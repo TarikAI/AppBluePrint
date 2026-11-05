@@ -1,0 +1,4 @@
+interface:
+  display_name: "App Blueprint"
+  short_description: "Plan every app file, owner and phase before code; track progress"
+  brand_color: "#0D4754"

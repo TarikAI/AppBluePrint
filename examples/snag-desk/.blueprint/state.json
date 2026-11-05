@@ -1,0 +1,50 @@
+{
+  "files": {
+    "apps/web/src/api.ts": {
+      "state": "claimed",
+      "by": "frontend-engineer",
+      "at": "2026-11-05T20:58:21Z"
+    },
+    "crates/snag-api/src/main.rs": {
+      "state": "built",
+      "by": "backend-engineer",
+      "at": "2026-11-05T20:58:21Z"
+    },
+    "crates/snag-core/src/lib.rs": {
+      "verified": {
+        "ok": true,
+        "cmd": "python -c \"pass\"",
+        "at": "2026-11-05T20:58:22Z",
+        "sha": "fe01df47ae032dc028ec587338c8c552b7e217c9"
+      }
+    },
+    "Cargo.toml": {
+      "verified": {
+        "ok": true,
+        "cmd": "python -c \"pass\"",
+        "at": "2026-11-05T20:58:22Z",
+        "sha": "fe01df47ae032dc028ec587338c8c552b7e217c9"
+      }
+    },
+    "README.md": {},
+    "apps/web/package.json": {
+      "state": "blocked",
+      "by": "frontend-engineer",
+      "at": "2026-11-05T20:58:22Z",
+      "note": "waiting on the generated API client"
+    }
+  },
+  "patterns": {
+    "web-screen": {
+      "instances": [
+        "apps/web/src/screens/SnagDetailScreen.tsx"
+      ]
+    }
+  },
+  "unplanned": [
+    "notes/todo.txt"
+  ],
+  "syncedAt": "2026-11-05T21:04:59Z",
+  "head": null,
+  "missingModify": []
+}

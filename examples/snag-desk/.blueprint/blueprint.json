@@ -1,0 +1,287 @@
+{
+  "version": 1,
+  "app": {
+    "name": "Snag Desk",
+    "summary": "A small snag tracker: a Rust engine records snags and an inbox web app lets a person review them.",
+    "platforms": [
+      "web"
+    ],
+    "preset": "rust-agent-engine"
+  },
+  "stack": [
+    {
+      "part": "Engine language",
+      "choice": "Rust (Cargo workspace)",
+      "version": "1.91",
+      "docs": "https://doc.rust-lang.org/cargo/reference/workspaces.html",
+      "verified": "2026-11-05"
+    },
+    {
+      "part": "HTTP API",
+      "choice": "Axum",
+      "version": "0.8",
+      "docs": "https://docs.rs/axum/latest/axum/",
+      "verified": "2026-11-05"
+    },
+    {
+      "part": "Web",
+      "choice": "React + TypeScript + Vite",
+      "version": "React 19",
+      "docs": "https://vite.dev/guide/",
+      "verified": "2026-11-05"
+    }
+  ],
+  "approach": {
+    "layout": "Cargo workspace (crates/) plus apps/web; one shared API schema generated from Rust types",
+    "notes": "Phase 1 is a walking skeleton: one snag goes in through the API and shows in the inbox. Example only: files are placeholders and every verify command is a no-op, so all commands run anywhere."
+  },
+  "modules": [
+    {
+      "id": "core",
+      "path": "crates/snag-core",
+      "layer": "domain",
+      "purpose": "Snag types and rules, no I/O",
+      "dependsOn": [],
+      "verify": "python -c \"pass\""
+    },
+    {
+      "id": "api",
+      "path": "crates/snag-api",
+      "layer": "interface",
+      "purpose": "HTTP API over the core",
+      "dependsOn": [
+        "core"
+      ],
+      "verify": "python -c \"pass\""
+    },
+    {
+      "id": "web",
+      "path": "apps/web",
+      "layer": "ui",
+      "purpose": "Inbox where a person reviews snags",
+      "dependsOn": [
+        "api"
+      ],
+      "verify": "python -c \"pass\""
+    },
+    {
+      "id": "repo",
+      "path": "",
+      "layer": "build",
+      "purpose": "Workspace and CI configuration",
+      "dependsOn": [],
+      "verify": "python -c \"pass\""
+    }
+  ],
+  "phases": [
+    {
+      "id": "P1",
+      "name": "Walking skeleton",
+      "goal": "One snag created through the API appears in the inbox.",
+      "exit": "cargo test --workspace and pnpm --dir apps/web test pass"
+    },
+    {
+      "id": "P2",
+      "name": "Snag lifecycle",
+      "goal": "Approve and close snags with history.",
+      "exit": "Lifecycle tests pass"
+    }
+  ],
+  "files": [
+    {
+      "path": "Cargo.toml",
+      "action": "create",
+      "module": "repo",
+      "phase": "P1",
+      "purpose": "Workspace manifest listing the crates",
+      "contract": true,
+      "produces": [
+        "workspace members"
+      ]
+    },
+    {
+      "path": "crates/snag-core/Cargo.toml",
+      "action": "create",
+      "module": "core",
+      "phase": "P1",
+      "purpose": "Core crate manifest",
+      "consumes": [
+        "workspace members"
+      ]
+    },
+    {
+      "path": "crates/snag-core/src/lib.rs",
+      "action": "create",
+      "module": "core",
+      "phase": "P1",
+      "purpose": "Snag, SnagId and SnagStatus types with validation",
+      "contract": true,
+      "produces": [
+        "type Snag",
+        "fn validate_snag"
+      ]
+    },
+    {
+      "path": "crates/snag-api/Cargo.toml",
+      "action": "create",
+      "module": "api",
+      "phase": "P1",
+      "purpose": "API crate manifest",
+      "consumes": [
+        "workspace members"
+      ]
+    },
+    {
+      "path": "crates/snag-api/src/main.rs",
+      "action": "create",
+      "module": "api",
+      "phase": "P1",
+      "purpose": "Axum server with POST /snags and GET /snags",
+      "consumes": [
+        "type Snag",
+        "fn validate_snag"
+      ],
+      "produces": [
+        "POST /snags",
+        "GET /snags"
+      ],
+      "dependsOn": [
+        "crates/snag-core/src/lib.rs"
+      ],
+      "ac": [
+        "AC-1"
+      ]
+    },
+    {
+      "path": "apps/web/package.json",
+      "action": "create",
+      "module": "web",
+      "phase": "P1",
+      "purpose": "Web app manifest and scripts"
+    },
+    {
+      "path": "apps/web/src/api.ts",
+      "action": "create",
+      "module": "web",
+      "phase": "P1",
+      "purpose": "Typed client for the snag endpoints",
+      "consumes": [
+        "GET /snags"
+      ],
+      "produces": [
+        "listSnags()"
+      ],
+      "dependsOn": [
+        "crates/snag-api/src/main.rs"
+      ]
+    },
+    {
+      "path": "apps/web/src/Inbox.tsx",
+      "action": "create",
+      "module": "web",
+      "phase": "P1",
+      "purpose": "Inbox list of open snags",
+      "consumes": [
+        "listSnags()"
+      ],
+      "dependsOn": [
+        "apps/web/src/api.ts"
+      ],
+      "ac": [
+        "AC-1"
+      ]
+    },
+    {
+      "path": "crates/snag-core/src/lifecycle.rs",
+      "action": "create",
+      "module": "core",
+      "phase": "P2",
+      "purpose": "Allowed status transitions and their history records",
+      "produces": [
+        "fn transition"
+      ],
+      "dependsOn": [
+        "crates/snag-core/src/lib.rs"
+      ]
+    },
+    {
+      "path": "README.md",
+      "action": "modify",
+      "module": "repo",
+      "phase": "P1",
+      "purpose": "How to run the skeleton locally"
+    }
+  ],
+  "patterns": [
+    {
+      "id": "web-screen",
+      "glob": "apps/web/src/screens/*Screen.tsx",
+      "module": "web",
+      "phase": "P2",
+      "purpose": "One screen per inbox view",
+      "instance": "A React component that loads its data through api.ts and renders loading, empty and error states",
+      "examples": [
+        "SnagDetailScreen",
+        "ClosedSnagsScreen"
+      ]
+    }
+  ],
+  "owners": [
+    {
+      "pattern": "*",
+      "owner": "cto-architect",
+      "note": "default owner for anything not listed below"
+    },
+    {
+      "pattern": "crates/",
+      "owner": "backend-engineer"
+    },
+    {
+      "pattern": "crates/snag-core/src/lib.rs",
+      "owner": "backend-lead",
+      "note": "shared contract: the lead owns the core types"
+    },
+    {
+      "pattern": "apps/web/",
+      "owner": "frontend-engineer"
+    }
+  ],
+  "roster": [
+    {
+      "id": "cto-architect",
+      "kind": "agent",
+      "harness": "agenticteam",
+      "role": "Owns workspace config and the plan"
+    },
+    {
+      "id": "backend-lead",
+      "kind": "agent",
+      "harness": "agenticteam",
+      "role": "Owns the core contract"
+    },
+    {
+      "id": "backend-engineer",
+      "kind": "agent",
+      "harness": "agenticteam",
+      "role": "Builds crates"
+    },
+    {
+      "id": "frontend-engineer",
+      "kind": "agent",
+      "harness": "agenticteam",
+      "role": "Builds the web inbox"
+    }
+  ],
+  "decisions": [
+    {
+      "id": "D1",
+      "decision": "Generate the TypeScript client from the API schema instead of writing types twice.",
+      "why": "The web app and API cannot drift apart.",
+      "source": "example"
+    }
+  ],
+  "ignore": [
+    "*.lock",
+    "pnpm-lock.yaml"
+  ]
+}
