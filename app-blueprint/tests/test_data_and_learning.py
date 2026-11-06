@@ -214,7 +214,8 @@ class LearningTest(Base):
         self.assertEqual(r.returncode, 0, r.stderr)
         fb = self.store_records("feedback.jsonl")
         self.assertEqual(fb[0]["kind"], "guidance")
-        self.assertIn("<project>", fb[0]["note"])
+        # The path is removed either as the project root or as a generic path (Windows may show it in 8.3 form).
+        self.assertTrue("<project>" in fb[0]["note"] or "<path>" in fb[0]["note"], fb[0]["note"])
         self.assertNotIn(str(self.dir), fb[0]["note"])
         log = (self.dir / ".blueprint" / "log.jsonl").read_text(encoding="utf-8")
         self.assertIn('"event": "feedback"', log)

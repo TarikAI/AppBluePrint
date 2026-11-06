@@ -19,4 +19,4 @@ Issue: <!-- Fixes #N -->
 - [ ] `CHANGELOG.md` entry
 - [ ] `learning/LESSONS.md` entry, for changes to guidance (SKILL.md, references, presets)
 - [ ] Docs match the new behaviour (SKILL.md, README.md, references, `--help`)
-- [ ] Standard library only, Python 3.9+, no new dependencies
+- [ ] Standard library only, Python 3.10+, no new dependencies

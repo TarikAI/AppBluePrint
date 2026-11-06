@@ -3,18 +3,18 @@
     "apps/web/src/api.ts": {
       "state": "claimed",
       "by": "frontend-engineer",
-      "at": "2026-11-06T13:38:08Z"
+      "at": "2026-11-06T13:46:31Z"
     },
     "crates/snag-api/src/main.rs": {
       "state": "built",
       "by": "backend-engineer",
-      "at": "2026-11-06T13:38:08Z"
+      "at": "2026-11-06T13:46:31Z"
     },
     "crates/snag-core/src/lib.rs": {
       "verified": {
         "ok": true,
         "cmd": "python -c \"pass\"",
-        "at": "2026-11-06T13:38:08Z",
+        "at": "2026-11-06T13:46:31Z",
         "sha": "eaae095dc502a4b64e1cf81beb134d0dd3395c5e"
       }
     },
@@ -22,7 +22,7 @@
       "verified": {
         "ok": true,
         "cmd": "python -c \"pass\"",
-        "at": "2026-11-06T13:38:08Z",
+        "at": "2026-11-06T13:46:31Z",
         "sha": "f3b5de686992bc667d3bfa4100d550cd7bf8f939"
       }
     },
@@ -30,7 +30,7 @@
       "verified": {
         "ok": true,
         "cmd": "python -c \"pass\"",
-        "at": "2026-11-06T13:38:08Z",
+        "at": "2026-11-06T13:46:31Z",
         "sha": "f30e2a958d607f9dfa096510a39adff03f74bf5c"
       }
     },
@@ -38,7 +38,7 @@
       "verified": {
         "ok": true,
         "cmd": "python -c \"pass\"",
-        "at": "2026-11-06T13:38:08Z",
+        "at": "2026-11-06T13:46:31Z",
         "sha": "de10024ec5f13309f2df4c20cd348e133ddc1d56"
       }
     },
@@ -46,14 +46,14 @@
       "verified": {
         "ok": true,
         "cmd": "python -c \"pass\"",
-        "at": "2026-11-06T13:38:08Z",
+        "at": "2026-11-06T13:46:31Z",
         "sha": "be30718c5ddcbb5ab0959f81f835d84276710c99"
       }
     },
     "apps/web/package.json": {
       "state": "blocked",
       "by": "frontend-engineer",
-      "at": "2026-11-06T13:38:08Z",
+      "at": "2026-11-06T13:46:31Z",
       "note": "waiting on the generated API client"
     }
   },
@@ -67,8 +67,8 @@
   "unplanned": [
     "notes/todo.txt"
   ],
-  "syncedAt": "2026-11-06T13:38:09Z",
-  "head": "a97f059",
+  "syncedAt": "2026-11-06T13:46:32Z",
+  "head": "e2372d9",
   "missingModify": [],
   "data": {
     "tables": [

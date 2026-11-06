@@ -59,7 +59,7 @@ python app-blueprint/scripts/blueprint.py <command> ...
      ```
 
 5. **Fix the minimum.** Change only what the test and the evidence need.
-   - Standard library only, Python 3.9+. No `match`, no `X | Y` type unions evaluated at runtime, no other 3.10+ features.
+   - Standard library only, Python 3.10+. No features newer than 3.10: no `except*`, `tomllib`, `typing.Self` or `type X = ...` syntax.
    - Works on Windows and POSIX: `pathlib`, no hardcoded `/` joins, `encoding="utf-8"` on every text read and write.
    - blueprint.py makes no network calls and sends nothing anywhere. Never add telemetry.
    - When user-visible behaviour changes (a command, flag, exit code, output, or a file written), update `app-blueprint/SKILL.md`, `README.md`, `app-blueprint/references/*.md` and the `--help` text to match.

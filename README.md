@@ -129,7 +129,7 @@ python -m unittest discover -s maintainers/tests -v
 python maintainers/learn.py scan-private --all
 ```
 
-The tests cover the CLI end to end: data connections, learning capture, every preset through the validator, and the maintainer script. CI runs them on Linux and Windows with Python 3.9 and 3.12.
+The tests cover the CLI end to end: data connections, learning capture, every preset through the validator, and the maintainer script. CI runs them on Linux and Windows with Python 3.10 and 3.12.
 
 ## Related work and credits
 

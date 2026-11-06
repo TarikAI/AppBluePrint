@@ -106,7 +106,7 @@ Community records only corroborate: a group made only of community records never
 
 Set `APP_BLUEPRINT_NO_CAPTURE=1` to turn off all writes to the store.
 
-## learn.py commands (maintainers only; standard library, Python 3.9+)
+## learn.py commands (maintainers only; standard library, Python 3.10+)
 
 | Command | Effect |
 |---|---|

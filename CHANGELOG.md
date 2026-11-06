@@ -4,6 +4,14 @@ All notable changes to the app-blueprint skill. The format follows [Keep a Chang
 
 ## [Unreleased]
 
+### Changed
+
+- The minimum Python version is now 3.10 (3.9 reached end of life and is no longer on GitHub's Ubuntu runners). CI tests 3.10 and 3.12.
+
+### Fixed
+
+- A feedback test failed on Windows runners, where temp folders can appear in 8.3 short form; the path was still removed.
+
 ## [1.2.0] - 2026-11-06
 
 ### Added

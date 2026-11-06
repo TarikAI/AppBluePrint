@@ -53,7 +53,7 @@ python maintainers/learn.py scan-private <changed files>
    - Run the same tests in `<tmp>/head`. They must pass.
    - No new test: Blocker, unless the change is guidance only and the PR and the LESSONS.md entry give a manual scenario and say why no automated test is possible. Then check that the scenario would really show the problem.
 
-5. **Run everything** in `<tmp>/head`: both suites. If Python 3.9 is installed (`py -3.9` on Windows, `python3.9` elsewhere), run them with it too. If not, read the diff for 3.10+ features: `match`, `X | Y` type unions evaluated at runtime, `zip(..., strict=...)`, parenthesized context managers.
+5. **Run everything** in `<tmp>/head`: both suites. If Python 3.10 is installed (`py -3.10` on Windows, `python3.10` elsewhere), run them with it too. If not, read the diff for features newer than 3.10: `except*`, `tomllib`, `typing.Self`, `type X = ...` syntax.
 
 6. **Scan for private data.** In `<tmp>/head`: `python maintainers/learn.py scan-private $(git diff --name-only --diff-filter=d <base sha> HEAD)`. It must exit 0. Then read the diff for what a scanner cannot know: project or client names, people, customer data, local machine details. Each new `scan-private: allow` line needs a reason in the PR body.
 

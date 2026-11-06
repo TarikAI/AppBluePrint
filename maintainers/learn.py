@@ -8,7 +8,7 @@ files for private data before they are published; exports a sanitized bundle of 
 the store between the owner's machines; and lists the published stack presets.
 
 The contract (store layout, record formats, grouping keys, promotion rule, commands) is
-maintainers/SPEC.md. Standard library only, Python 3.9+.
+maintainers/SPEC.md. Standard library only, Python 3.10+.
 
 Exit codes: 0 ok, 1 findings or errors, 64 usage.
 """

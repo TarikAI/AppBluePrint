@@ -39,7 +39,7 @@ python -m unittest discover -s app-blueprint/tests
 python -m unittest discover -s maintainers/tests
 ```
 
-On Windows, `py -3` works in place of `python`. CI runs both suites on Ubuntu and Windows with Python 3.9 and 3.12.
+On Windows, `py -3` works in place of `python`. CI runs both suites on Ubuntu and Windows with Python 3.10 and 3.12.
 
 ## The private-data scan
 
@@ -55,7 +55,7 @@ It fails on home-folder paths, personal emails, private claude.ai artifact links
 ## Style
 
 - Standard library only. No dependencies, ever.
-- Python 3.9 or newer, on Windows, macOS and Linux.
+- Python 3.10 or newer, on Windows, macOS and Linux.
 - Plain, short sentences in docs and guidance. No marketing words.
 - When behaviour changes, update `SKILL.md`, `README.md`, the references and the `--help` text in the same pull request.
 - Bump `TOOL_VERSION` in `app-blueprint/scripts/blueprint.py` (patch for a fix, minor for a feature), add a `CHANGELOG.md` entry, and for guidance changes an entry in `learning/LESSONS.md`.
