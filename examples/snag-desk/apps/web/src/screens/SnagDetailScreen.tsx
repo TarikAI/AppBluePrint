@@ -1,1 +1,2 @@
-// placeholder for the app-blueprint example
+// placeholder screen
+export default function SnagDetailScreen() { return null; }

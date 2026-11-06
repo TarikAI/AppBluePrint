@@ -1,1 +1,1 @@
-// placeholder for the app-blueprint example
+{ "name": "web", "private": true }

@@ -1,1 +1,1 @@
-// placeholder for the app-blueprint example
+An unplanned file, so the Drift view has an entry.

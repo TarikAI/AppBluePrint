@@ -3,34 +3,57 @@
     "apps/web/src/api.ts": {
       "state": "claimed",
       "by": "frontend-engineer",
-      "at": "2026-11-05T20:58:21Z"
+      "at": "2026-11-06T13:38:08Z"
     },
     "crates/snag-api/src/main.rs": {
       "state": "built",
       "by": "backend-engineer",
-      "at": "2026-11-05T20:58:21Z"
+      "at": "2026-11-06T13:38:08Z"
     },
     "crates/snag-core/src/lib.rs": {
       "verified": {
         "ok": true,
         "cmd": "python -c \"pass\"",
-        "at": "2026-11-05T20:58:22Z",
-        "sha": "fe01df47ae032dc028ec587338c8c552b7e217c9"
+        "at": "2026-11-06T13:38:08Z",
+        "sha": "eaae095dc502a4b64e1cf81beb134d0dd3395c5e"
+      }
+    },
+    "crates/snag-api/migrations/0001_snags.sql": {
+      "verified": {
+        "ok": true,
+        "cmd": "python -c \"pass\"",
+        "at": "2026-11-06T13:38:08Z",
+        "sha": "f3b5de686992bc667d3bfa4100d550cd7bf8f939"
       }
     },
     "Cargo.toml": {
       "verified": {
         "ok": true,
         "cmd": "python -c \"pass\"",
-        "at": "2026-11-05T20:58:22Z",
-        "sha": "fe01df47ae032dc028ec587338c8c552b7e217c9"
+        "at": "2026-11-06T13:38:08Z",
+        "sha": "f30e2a958d607f9dfa096510a39adff03f74bf5c"
       }
     },
-    "README.md": {},
+    ".env.example": {
+      "verified": {
+        "ok": true,
+        "cmd": "python -c \"pass\"",
+        "at": "2026-11-06T13:38:08Z",
+        "sha": "de10024ec5f13309f2df4c20cd348e133ddc1d56"
+      }
+    },
+    "README.md": {
+      "verified": {
+        "ok": true,
+        "cmd": "python -c \"pass\"",
+        "at": "2026-11-06T13:38:08Z",
+        "sha": "be30718c5ddcbb5ab0959f81f835d84276710c99"
+      }
+    },
     "apps/web/package.json": {
       "state": "blocked",
       "by": "frontend-engineer",
-      "at": "2026-11-05T20:58:22Z",
+      "at": "2026-11-06T13:38:08Z",
       "note": "waiting on the generated API client"
     }
   },
@@ -44,7 +67,53 @@
   "unplanned": [
     "notes/todo.txt"
   ],
-  "syncedAt": "2026-11-05T21:04:59Z",
-  "head": null,
-  "missingModify": []
+  "syncedAt": "2026-11-06T13:38:09Z",
+  "head": "a97f059",
+  "missingModify": [],
+  "data": {
+    "tables": [
+      {
+        "name": "snag_history",
+        "kind": "table",
+        "source": "crates/snag-api/migrations/0001_snags.sql"
+      },
+      {
+        "name": "snags",
+        "kind": "table",
+        "source": "crates/snag-api/migrations/0001_snags.sql"
+      }
+    ],
+    "envExample": [
+      "DATABASE_URL"
+    ],
+    "observed": {
+      "crates/snag-api/src/main.rs": {
+        "snags": "write",
+        "snag_history": "read",
+        "DATABASE_URL": "read",
+        "env:SECRET_KEY": "read"
+      }
+    },
+    "issues": [
+      {
+        "type": "undeclared-table",
+        "resource": "snag_history",
+        "path": "crates/snag-api/migrations/0001_snags.sql",
+        "detail": "table snag_history is created in crates/snag-api/migrations/0001_snags.sql but not declared in resources"
+      },
+      {
+        "type": "undeclared-use",
+        "path": "crates/snag-api/src/main.rs",
+        "resource": "snag_history",
+        "detail": "crates/snag-api/src/main.rs reads snag_history, which is not a declared resource"
+      },
+      {
+        "type": "undeclared-env",
+        "path": "crates/snag-api/src/main.rs",
+        "resource": "SECRET_KEY",
+        "detail": "crates/snag-api/src/main.rs reads env var SECRET_KEY, which is not a declared resource"
+      }
+    ],
+    "live": null
+  }
 }

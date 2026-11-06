@@ -18,6 +18,8 @@
 | `roster[]` | objects | everyone who can own files |
 | `decisions[]` | objects | `id`, `decision`, `why`, `source` |
 | `ignore[]` | globs | extra paths `sync` never reports as drift |
+| `stores[]` | objects | databases and storage services, see below |
+| `resources[]` | objects | tables, env vars, APIs and other things the code connects to, see below |
 
 ## modules[]
 
@@ -45,6 +47,8 @@
 | `dependsOn[]` | planned paths or pattern ids; a dependency in a later phase is an error |
 | `ac[]` | acceptance-criteria ids (AgenticTeam `AC-` ids) this file serves |
 
+| `uses[]` | resources this file touches: `{ "resource": "<id>", "access": "read" \| "write" }` |
+
 ## patterns[]
 
 | Field | Notes |
@@ -56,6 +60,36 @@
 | `instance` | **required**: what one instance contains, specific enough to build one |
 | `examples[]` | expected instance names |
 | `verify` | or inherited from the module |
+
+## stores[] and resources[]
+
+Store: `{ "id", "kind": "postgres"|"sqlite"|"mysql"|"supabase"|"redis"|"s3"|"other", "schema": ["<globs of migration or schema files>"], "purpose" }`.
+
+Resource:
+
+| Field | Notes |
+|---|---|
+| `id` | **required**, unique; for a table, its name |
+| `kind` | **required**: `table`, `view`, `env`, `api`, `queue`, `bucket`, `other` |
+| `purpose` | **required** |
+| `store` | a store id; expected for tables and views |
+| `definedIn` | the planned file that creates it: a migration, `schema.prisma`, `.env.example`; expected for tables and views |
+| `owner` | defaults to the owner of `definedIn` |
+| `aliases[]` | other names the code uses, e.g. the Prisma model name `Snag` for table `snags` |
+| `host` | for `api`: the host name the code calls, so `sync` can find it |
+
+What `sync` checks (statically, no database connection):
+
+| Issue | Meaning |
+|---|---|
+| `undeclared-table` | a schema file creates a table no resource declares |
+| `missing-table` | a declared table or view that no schema file creates |
+| `undeclared-use` | a planned file touches a resource (or schema table) without declaring it in `uses` |
+| `undeclared-env` | a planned file reads an env var no resource declares (checked once any env resource exists) |
+| `access-mismatch` | a file writes a resource it declares as read |
+| `declared-not-found` | a file declares a use its code does not show yet (informational) |
+
+SQL is read for `CREATE TABLE/VIEW`, `DROP` and `ALTER TABLE … RENAME TO`, in file order; Prisma for `model` and `@@map`. Code is scanned for SQL (`FROM`, `JOIN`, `INSERT INTO`, `UPDATE`, `DELETE FROM`), Supabase-style `.from('t')`, Prisma `prisma.model.create/find…`, and env reads in JS, Python, Rust, Deno and Ruby. `db-check` compares a live schema with the migrations: a SQLite file opened read-only, or a schema-only SQL dump.
 
 ## owners[] and roster[]
 

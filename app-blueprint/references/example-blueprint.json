@@ -30,7 +30,9 @@
     {"path": "crates/snag-core/Cargo.toml", "action": "create", "module": "core", "phase": "P1", "purpose": "Core crate manifest", "consumes": ["workspace members"]},
     {"path": "crates/snag-core/src/lib.rs", "action": "create", "module": "core", "phase": "P1", "purpose": "Snag, SnagId and SnagStatus types with validation", "contract": true, "produces": ["type Snag", "fn validate_snag"]},
     {"path": "crates/snag-api/Cargo.toml", "action": "create", "module": "api", "phase": "P1", "purpose": "API crate manifest", "consumes": ["workspace members"]},
-    {"path": "crates/snag-api/src/main.rs", "action": "create", "module": "api", "phase": "P1", "purpose": "Axum server with POST /snags and GET /snags", "consumes": ["type Snag", "fn validate_snag"], "produces": ["POST /snags", "GET /snags"], "dependsOn": ["crates/snag-core/src/lib.rs"], "ac": ["AC-1"]},
+    {"path": "crates/snag-api/src/main.rs", "action": "create", "module": "api", "phase": "P1", "purpose": "Axum server with POST /snags and GET /snags", "consumes": ["type Snag", "fn validate_snag"], "produces": ["POST /snags", "GET /snags"], "dependsOn": ["crates/snag-core/src/lib.rs", "crates/snag-api/migrations/0001_snags.sql"], "ac": ["AC-1"], "uses": [{"resource": "snags", "access": "write"}, {"resource": "DATABASE_URL", "access": "read"}]},
+    {"path": "crates/snag-api/migrations/0001_snags.sql", "action": "create", "module": "api", "phase": "P1", "purpose": "Creates the snags table", "contract": true, "produces": ["table snags"]},
+    {"path": ".env.example", "action": "create", "module": "repo", "phase": "P1", "purpose": "Names of the environment variables, with placeholder values", "contract": true, "produces": ["env DATABASE_URL"]},
     {"path": "apps/web/package.json", "action": "create", "module": "web", "phase": "P1", "purpose": "Web app manifest and scripts"},
     {"path": "apps/web/src/api.ts", "action": "create", "module": "web", "phase": "P1", "purpose": "Typed client for the snag endpoints", "consumes": ["GET /snags"], "produces": ["listSnags()"], "dependsOn": ["crates/snag-api/src/main.rs"]},
     {"path": "apps/web/src/Inbox.tsx", "action": "create", "module": "web", "phase": "P1", "purpose": "Inbox list of open snags", "consumes": ["listSnags()"], "dependsOn": ["apps/web/src/api.ts"], "ac": ["AC-1"]},
@@ -44,6 +46,7 @@
     {"pattern": "*", "owner": "cto-architect", "note": "default owner for anything not listed below"},
     {"pattern": "crates/", "owner": "backend-engineer"},
     {"pattern": "crates/snag-core/src/lib.rs", "owner": "backend-lead", "note": "shared contract: the lead owns the core types"},
+    {"pattern": "crates/snag-api/migrations/", "owner": "backend-lead", "note": "the schema is a shared contract"},
     {"pattern": "apps/web/", "owner": "frontend-engineer"}
   ],
   "roster": [
@@ -51,6 +54,13 @@
     {"id": "backend-lead", "kind": "agent", "harness": "agenticteam", "role": "Owns the core contract"},
     {"id": "backend-engineer", "kind": "agent", "harness": "agenticteam", "role": "Builds crates"},
     {"id": "frontend-engineer", "kind": "agent", "harness": "agenticteam", "role": "Builds the web inbox"}
+  ],
+  "stores": [
+    {"id": "main-db", "kind": "postgres", "schema": ["crates/snag-api/migrations/*.sql"], "purpose": "System of record for snags"}
+  ],
+  "resources": [
+    {"id": "snags", "kind": "table", "store": "main-db", "definedIn": "crates/snag-api/migrations/0001_snags.sql", "purpose": "One row per snag with its status"},
+    {"id": "DATABASE_URL", "kind": "env", "definedIn": ".env.example", "purpose": "Postgres connection string for the API"}
   ],
   "decisions": [
     {"id": "D1", "decision": "Generate the TypeScript client from the API schema instead of writing types twice.", "why": "The web app and API cannot drift apart.", "source": "example"}

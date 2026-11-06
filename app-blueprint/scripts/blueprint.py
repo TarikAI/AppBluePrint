@@ -14,13 +14,17 @@ import hashlib
 import io
 import json
 import os
+import platform
 import re
+import secrets
 import shutil
+import sqlite3
 import subprocess
 import sys
+import traceback
 from pathlib import Path
 
-TOOL_VERSION = "1.1.0"
+TOOL_VERSION = "1.2.0"
 SCHEMA_VERSION = 1
 ACTIONS = ("create", "modify", "delete")
 ROSTER_KINDS = ("agent", "human")
@@ -191,7 +195,7 @@ def load_plan(root):
         die(f"blueprint.json is not valid JSON: {e}")
     for key, default in (("stack", []), ("modules", []), ("phases", []), ("files", []),
                          ("patterns", []), ("owners", []), ("roster", []), ("decisions", []),
-                         ("ignore", []), ("approach", {}), ("app", {})):
+                         ("ignore", []), ("approach", {}), ("app", {}), ("stores", []), ("resources", [])):
         plan.setdefault(key, default)
     for f in plan["files"]:
         f["path"] = norm(f.get("path", ""))
@@ -391,6 +395,8 @@ def validate_plan(plan, team=None):
         elif wins[i] == 0:
             W(f"owner rule {i + 1} ({r.get('pattern')} -> {r.get('owner')}) never wins: later rules override every match")
 
+    validate_data(plan, E, W)
+
     # AgenticTeam roster check
     if team is not None:
         agents = {a.get("id"): a for a in team.get("agents", [])}
@@ -421,10 +427,586 @@ def cmd_validate(args):
         print("error:", e)
     n_files, n_pat = len(plan["files"]), len(plan["patterns"])
     if errors:
+        record_friction(root, errors)
         print(f"\n{len(errors)} error(s), {len(warnings)} warning(s). The blueprint is not ready.")
         sys.exit(1)
+    res = f", {len(plan['resources'])} data resources" if plan["resources"] else ""
     print(f"OK: {n_files} files, {n_pat} patterns, {len(plan['modules'])} modules, "
-          f"{len(plan['phases'])} phases, {len(plan['roster'])} owners. {len(warnings)} warning(s).")
+          f"{len(plan['phases'])} phases, {len(plan['roster'])} owners{res}. {len(warnings)} warning(s).")
+
+
+# ----------------------------------------------------------------------------- learning capture (see maintainers/SPEC.md)
+
+ISSUES_URL = "https://github.com/TarikAI/AppBluePrint/issues"
+NO_CAPTURE_ENV = "APP_BLUEPRINT_NO_CAPTURE"
+FEEDBACK_KINDS = ("bug", "guidance", "preset", "feature")
+VALIDATION_CODES = [
+    (r"^store ", "store-invalid"),
+    (r"^resource ", "resource-invalid"),
+    (r"uses unknown resource|access for ", "uses-invalid"),
+    (r"^version must be", "version"),
+    (r"^app\.name is empty", "app-name"),
+    (r" without \w+:", "missing-id"),
+    (r"^duplicate ", "duplicate-id"),
+    (r"^no phases", "no-phases"),
+    (r"^stack entry .*missing", "stack-incomplete"),
+    (r"depends on unknown module", "module-dependency"),
+    (r"^module .*empty purpose", "module-purpose"),
+    (r"dependency cycle", "module-cycle"),
+    (r"kind must be agent or human", "roster-kind"),
+    (r"use a repo-relative path", "file-path"),
+    (r"action must be", "file-action"),
+    (r"unknown module", "unknown-module"),
+    (r"unknown phase", "unknown-phase"),
+    (r"empty purpose", "missing-purpose"),
+    (r"no verify command", "missing-verify"),
+    (r"which is not planned", "unplanned-dependency"),
+    (r"lands in a later phase", "later-phase-dependency"),
+    (r"^pattern ", "pattern-incomplete"),
+    (r"needs pattern and owner", "owner-rule-incomplete"),
+    (r"is not in the roster", "owner-not-in-roster"),
+    (r"no owner rule matches", "unowned"),
+    (r"partly overlap", "owner-overlap"),
+    (r"not an agent in team\.json", "team-unknown-agent"),
+    (r"not workspace-write", "team-no-write"),
+]
+
+
+def store_dir():
+    return Path(os.environ.get("APP_BLUEPRINT_HOME") or (Path.home() / ".app-blueprint"))
+
+
+def capture_on():
+    return not os.environ.get(NO_CAPTURE_ENV)
+
+
+def _git(root, *args):
+    try:
+        out = subprocess.run(["git", *args], cwd=root, capture_output=True, timeout=10)
+        return out.stdout.decode("utf-8", "replace").strip() if out.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def project_identity(root):
+    """A machine-independent name for a project: its git origin plus its folder inside the repo.
+
+    The same project cloned on two machines gets the same identity, so it counts once toward the
+    learning loop's two-project bar. Without a remote, the absolute path is the best available."""
+    url = _git(root, "config", "--get", "remote.origin.url")
+    if url:
+        u = re.sub(r"^[a-z][a-z0-9+.-]*://", "", url.strip(), flags=re.I)  # scheme
+        u = re.sub(r"^[^@/]+@", "", u)  # credentials or git@
+        u = re.sub(r"^([^/:]+):(?!\d)", r"\1/", u)  # scp-style host:path
+        u = re.sub(r"\.git$", "", u.rstrip("/")).lower()
+        return u + "#" + _git(root, "rev-parse", "--show-prefix")
+    return str(Path(root).resolve())
+
+
+def project_ident(root):
+    """(projectId, project name) for a blueprinted project, else (None, None). Writes nothing."""
+    if not root or not (bp_dir(root) / "blueprint.json").exists():
+        return None, None
+    pid = hashlib.sha256(("app-blueprint:" + project_identity(root)).encode("utf-8")).hexdigest()[:12]
+    return pid, Path(root).resolve().name
+
+
+_RX_WINPATH = re.compile(r"\b[A-Za-z]:[\\/][^\s'\"<>|]*")
+_RX_UNIXPATH = re.compile(r"(?<![\w.])/(?:home|Users|root|var|tmp|private|mnt|opt|srv)/[^\s'\"<>|]*")
+_RX_EMAIL = re.compile(r"\b[\w.+-]+@[\w-]+(?:\.[\w-]+)+\b")
+_RX_URL = re.compile(r"\bhttps?://([^/\s'\"<>]+)[^\s'\"<>]*")
+_RX_TOKEN = re.compile(r"\b(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{24,}\b")
+
+
+def redact(text, root=None):
+    s = str(text)
+    if root:
+        s = s.replace(str(Path(root).resolve()), "<project>")
+    s = _RX_URL.sub(lambda m: "<url:" + m.group(1) + ">", s)
+    s = _RX_WINPATH.sub("<path>", s)
+    s = _RX_UNIXPATH.sub("<path>", s)
+    s = _RX_EMAIL.sub("<email>", s)
+    s = _RX_TOKEN.sub("<token>", s)
+    return s
+
+
+def store_append(name, rec):
+    """Append one record to a store file. Returns the record id, or None when capture is off or fails."""
+    if not capture_on():
+        return None
+    try:
+        rec = dict(rec)
+        rec.setdefault("id", secrets.token_hex(6))
+        rec.setdefault("at", now_iso())
+        rec.setdefault("tool", TOOL_VERSION)
+        d = store_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        with (d / name).open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        return rec["id"]
+    except OSError:
+        return None
+
+
+def read_jsonl(path):
+    out, seen = [], set()
+    if not path.exists():
+        return out
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(rec, dict) or rec.get("id") in seen:
+            continue
+        seen.add(rec.get("id"))
+        out.append(rec)
+    return out
+
+
+def classify_error(msg):
+    for rx, code in VALIDATION_CODES:
+        if re.search(rx, msg):
+            return code
+    return "other"
+
+
+def record_friction(root, errors):
+    codes = {}
+    for e in errors:
+        c = classify_error(e)
+        codes[c] = codes.get(c, 0) + 1
+    pid, name = project_ident(root)
+    store_append("friction.jsonl", {"codes": codes, "projectId": pid, "project": name})
+
+
+def record_incident(args, exc):
+    tb = traceback.extract_tb(exc.__traceback__)
+    frames = [f"{Path(fr.filename).name}:{fr.lineno}:{fr.name}" for fr in tb][-8:]
+    root = None
+    try:
+        root = find_root(getattr(args, "root", None))
+    except Exception:  # never let incident capture fail the report
+        root = None
+    pid, name = (None, None)
+    try:
+        pid, name = project_ident(root)
+    except OSError:
+        pass
+    rec = {"python": platform.python_version(), "os": platform.system(), "command": getattr(args, "cmd", None),
+           "error": type(exc).__name__, "message": redact(str(exc), root)[:500], "frames": frames,
+           "projectId": pid, "project": name}
+    rid = store_append("incidents.jsonl", rec)
+    print(f"blueprint.py hit an unexpected error: {type(exc).__name__}: {redact(str(exc), root)[:300]}", file=sys.stderr)
+    if rid:
+        print(f"Recorded as incident {rid} in {store_dir()}. To report it, run: blueprint.py report {rid}", file=sys.stderr)
+    else:
+        print(f"Not recorded ({NO_CAPTURE_ENV} is set or the store is not writable). Please report it at {ISSUES_URL}", file=sys.stderr)
+
+
+def cmd_feedback(args):
+    root = find_root(args.root)
+    pid, name = project_ident(root)
+    rec = {"kind": args.kind, "part": args.part or "", "note": redact(args.note, root),
+           "by": args.by or os.environ.get("BLUEPRINT_OWNER") or "", "projectId": pid, "project": name}
+    rid = store_append("feedback.jsonl", rec)
+    has_bp = (bp_dir(root) / "blueprint.json").exists()
+    if has_bp:
+        append_log(root, {"event": "feedback", "kind": args.kind, "part": rec["part"], "note": rec["note"], "by": rec["by"], "store": rid})
+    if rid:
+        print(f"Recorded {args.kind} feedback {rid} in {store_dir()}. The harvester turns it into a lesson candidate.")
+    else:
+        print(f"Capture is off ({NO_CAPTURE_ENV}); " + ("kept in this project's log only." if has_bp else "nothing recorded."))
+
+
+def cmd_report(args):
+    incidents = read_jsonl(store_dir() / "incidents.jsonl")
+    if not incidents:
+        die(f"No incidents recorded in {store_dir()}. To report something else, open {ISSUES_URL}/new/choose", 1)
+    rec = next((r for r in incidents if r.get("id") == args.incident), None) if args.incident else incidents[-1]
+    if rec is None:
+        die(f"No incident {args.incident}. Recorded: " + ", ".join(r.get("id", "?") for r in incidents[-10:]), 1)
+    frames = rec.get("frames") or []
+    where = frames[-1].split(":")[-1] if frames else "?"
+    title = f"[bug] {rec.get('error')} in {where} during {rec.get('command')}"
+    body = (
+        "### What happened\n\n<what you were doing when it failed>\n\n"
+        "### Part of the skill\n\nblueprint.py command\n\n"
+        "### Details\n\n"
+        f"- Tool: {rec.get('tool')}\n- Python: {rec.get('python')}\n- OS: {rec.get('os')}\n"
+        f"- Command: `{rec.get('command')}`\n- Error: `{rec.get('error')}: {redact(rec.get('message', ''))}`\n- Incident: `{rec.get('id')}`\n\n"
+        "<details><summary>Traceback (file:line:function)</summary>\n\n```\n" + "\n".join(frames) + "\n```\n</details>\n\n"
+        "_Generated by `blueprint.py report`. Paths, emails, URLs and project names are removed; check before filing._\n")
+    print(f"Title: {title}\n")
+    print(body)
+    print(f"File it at {ISSUES_URL}/new?template=bug_report.yml after reading it. Nothing has been sent.", file=sys.stderr)
+
+
+def _version_tuple(v):
+    try:
+        return tuple(int(x) for x in str(v).strip().split(".")[:3])
+    except ValueError:
+        return (0,)
+
+
+def installed_skill_versions():
+    found = {}
+    for base in (Path.home() / ".claude" / "skills", Path.home() / ".codex" / "skills", Path.home() / ".agents" / "skills"):
+        script = base / "app-blueprint" / "scripts" / "blueprint.py"
+        if script.exists():
+            m = re.search(r'^TOOL_VERSION = "([^"]+)"', script.read_text(encoding="utf-8", errors="replace"), re.M)
+            if m:
+                found[str(script)] = m.group(1)
+    return found
+
+
+def cmd_doctor(args):
+    root = find_root(args.root)
+    print(f"blueprint.py {TOOL_VERSION} (running from {HERE}) · Python {platform.python_version()} · {platform.system()}")
+    newest = TOOL_VERSION
+    skills = installed_skill_versions()
+    for path, v in skills.items():
+        print(f"  installed skill: {v}  {path}")
+        if _version_tuple(v) > _version_tuple(newest):
+            newest = v
+    stale = False
+    vfile = bp_dir(root) / "bin" / "VERSION"
+    if (bp_dir(root) / "blueprint.json").exists():
+        copied = vfile.read_text(encoding="utf-8").strip() if vfile.exists() else "missing"
+        print(f"  this project's tool copy: {copied}  ({vfile})")
+        if copied == "missing" or _version_tuple(copied) < _version_tuple(newest):
+            stale = True
+            print(f"  Out of date: run  python <skill>/scripts/blueprint.py init --refresh-tool  (newest is {newest})")
+    else:
+        print(f"  no blueprint in {root}")
+    d = store_dir()
+    counts = {n: len(read_jsonl(d / n)) for n in ("incidents.jsonl", "feedback.jsonl", "friction.jsonl")}
+    print(f"  learning store: {d} · capture {'on' if capture_on() else 'off'} · " + ", ".join(f"{k.split('.')[0]} {v}" for k, v in counts.items()))
+    if stale and args.strict:
+        sys.exit(1)
+
+
+# ----------------------------------------------------------------------------- data connections
+
+STORE_KINDS = ("postgres", "sqlite", "mysql", "supabase", "redis", "s3", "other")
+RESOURCE_KINDS = ("table", "view", "env", "api", "queue", "bucket", "other")
+ACCESS = ("read", "write")
+SCAN_EXT = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".rs", ".go", ".rb", ".php", ".java", ".kt", ".cs",
+            ".sql", ".prisma", ".vue", ".svelte", ".swift", ".dart", ".ex", ".exs", ".scala"}
+_SQL_CREATE = re.compile(r"\bcreate\s+(?:or\s+replace\s+)?(?:(?:global|local)\s+)?(?:temp(?:orary)?\s+|unlogged\s+)?"
+                         r"(table|view|materialized\s+view)\s+(?:if\s+not\s+exists\s+)?([\w.\"`\[\]]+)", re.I)
+_SQL_DROP = re.compile(r"\bdrop\s+(table|view|materialized\s+view)\s+(?:if\s+exists\s+)?([\w.\"`\[\]]+)", re.I)
+_SQL_RENAME = re.compile(r"\balter\s+table\s+(?:if\s+exists\s+)?(?:only\s+)?([\w.\"`\[\]]+)\s+rename\s+to\s+([\w.\"`\[\]]+)", re.I)
+_PRISMA_MODEL = re.compile(r"^\s*(model|view)\s+(\w+)\s*\{(.*?)^\s*\}", re.M | re.S)
+_PRISMA_MAP = re.compile(r"@@map\(\s*\"([^\"]+)\"\s*\)")
+_ENV_KEY = re.compile(r"^\s*(?:export\s+)?([A-Z][A-Z0-9_]*)\s*=", re.M)
+_ENV_USE = [re.compile(p) for p in (
+    r"process\.env\.([A-Z][A-Z0-9_]*)", r"process\.env\[\s*['\"]([A-Z][A-Z0-9_]*)['\"]", r"import\.meta\.env\.([A-Z][A-Z0-9_]*)",
+    r"os\.environ(?:\.get)?\(\s*['\"]([A-Z][A-Z0-9_]*)['\"]", r"os\.environ\[\s*['\"]([A-Z][A-Z0-9_]*)['\"]",
+    r"getenv\(\s*['\"]([A-Z][A-Z0-9_]*)['\"]", r"env::var(?:_os)?\(\s*\"([A-Z][A-Z0-9_]*)\"", r"env!\(\s*\"([A-Z][A-Z0-9_]*)\"",
+    r"Deno\.env\.get\(\s*['\"]([A-Z][A-Z0-9_]*)['\"]", r"ENV\[\s*['\"]([A-Z][A-Z0-9_]*)['\"]")]
+
+
+def bare_name(name):
+    n = re.sub(r"[\"`\[\]]", "", name).split(".")[-1]
+    return n.lower()
+
+
+def resource_names(r):
+    names = [r.get("id", "")] + list(r.get("aliases", []))
+    return [n for n in dict.fromkeys(n for n in names if n)]
+
+
+def resource_owner(plan, r):
+    if r.get("owner"):
+        return r["owner"]
+    if r.get("definedIn"):
+        return owner_of(plan, norm(r["definedIn"]))[0]
+    return None
+
+
+def validate_data(plan, E, W):
+    stores = set()
+    for s in plan.get("stores", []):
+        sid = s.get("id")
+        if not sid:
+            E(f"store without id: {json.dumps(s)[:80]}")
+            continue
+        if sid in stores:
+            E(f"store {sid}: duplicate id")
+        stores.add(sid)
+        if s.get("kind") not in STORE_KINDS:
+            E(f"store {sid}: kind must be one of {', '.join(STORE_KINDS)}")
+    roster = {r.get("id") for r in plan["roster"]}
+    planned = {f["path"] for f in plan["files"]}
+    pat_rx = [pattern_instance_rx(p.get("glob", "")) for p in plan["patterns"] if p.get("glob")]
+    ids = set()
+    for r in plan.get("resources", []):
+        rid = r.get("id")
+        if not rid:
+            E(f"resource without id: {json.dumps(r)[:80]}")
+            continue
+        if rid in ids:
+            E(f"resource {rid}: duplicate id")
+        ids.add(rid)
+        if r.get("kind") not in RESOURCE_KINDS:
+            E(f"resource {rid}: kind must be one of {', '.join(RESOURCE_KINDS)}")
+        if r.get("store") and r["store"] not in stores:
+            E(f"resource {rid}: unknown store {r['store']!r}")
+        if not r.get("purpose"):
+            E(f"resource {rid}: empty purpose")
+        if r.get("owner") and r["owner"] not in roster:
+            E(f"resource {rid}: owner {r['owner']!r} is not in the roster")
+        d = norm(r["definedIn"]) if r.get("definedIn") else None
+        if d and d not in planned and not any(rx.match(d) for rx in pat_rx):
+            E(f"resource {rid}: definedIn {d} is not a planned file or pattern instance")
+        if r.get("kind") in ("table", "view"):
+            if not r.get("store"):
+                W(f"resource {rid}: a {r['kind']} should name its store")
+            if not d:
+                W(f"resource {rid}: no definedIn (the migration or schema file that creates it)")
+    used = {}
+    items = [(f, f["path"], f["path"]) for f in plan["files"]] + [(p, "pattern " + str(p.get("id")), p.get("glob", "")) for p in plan["patterns"]]
+    for item, label, path in items:
+        for u in item.get("uses", []) or []:
+            if not isinstance(u, dict) or u.get("resource") not in ids:
+                name = u.get("resource") if isinstance(u, dict) else json.dumps(u)
+                E(f"{label}: uses unknown resource {name}")
+                continue
+            if u.get("access") not in ACCESS:
+                E(f"{label}: access for {u['resource']} must be read or write")
+                continue
+            used.setdefault(u["resource"], []).append((label, path, u["access"]))
+    for r in plan.get("resources", []):
+        rid = r.get("id")
+        if not rid:
+            continue
+        if rid not in used:
+            W(f"resource {rid}: no planned file or pattern uses it")
+        owner = resource_owner(plan, r)
+        for label, path, access in used.get(rid, []):
+            fo = owner_of(plan, path)[0]
+            if access == "write" and owner and fo and fo != owner:
+                W(f"{label}: writes {rid}, which {owner} owns; changes need {owner}'s review")
+
+
+def parse_sql_tables(text, source):
+    """Tables and views a SQL file leaves behind, applying creates, drops and renames in order."""
+    events = [(m.start(), "create", m.group(1).lower(), bare_name(m.group(2))) for m in _SQL_CREATE.finditer(text)]
+    events += [(m.start(), "drop", m.group(1).lower(), bare_name(m.group(2))) for m in _SQL_DROP.finditer(text)]
+    events += [(m.start(), "rename", bare_name(m.group(1)), bare_name(m.group(2))) for m in _SQL_RENAME.finditer(text)]
+    found = {}
+    for _, ev, a, b in sorted(events):
+        if ev == "create":
+            found[b] = {"name": b, "kind": "view" if "view" in a else "table", "source": source}
+        elif ev == "drop":
+            found.pop(b, None)
+        elif ev == "rename" and a in found:
+            found[b] = dict(found.pop(a), name=b)
+    return found
+
+
+def parse_prisma_tables(text, source):
+    found = {}
+    for m in _PRISMA_MODEL.finditer(text):
+        mp = _PRISMA_MAP.search(m.group(3))
+        name = (mp.group(1) if mp else m.group(2)).lower()
+        found[name] = {"name": name, "kind": "view" if m.group(1) == "view" else "table", "source": source, "model": m.group(2)}
+    return found
+
+
+def schema_sources(root, plan, disk):
+    globs = [g for s in plan["stores"] for g in s.get("schema", [])]
+    globs += [r["definedIn"] for r in plan["resources"] if r.get("definedIn") and r.get("kind") in ("table", "view")]
+    rxs = [pattern_instance_rx(g) for g in globs]
+    return [p for p in disk if any(rx.match(p) for rx in rxs)]
+
+
+def read_text_safe(path, limit=1_000_000):
+    try:
+        if path.stat().st_size > limit:
+            return None
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+def code_refs(text, names, prisma_models):
+    """Return 'read', 'write' or None for how text uses a table known by any of `names`."""
+    access = None
+    for n in names:
+        q = re.escape(n)
+        if re.search(r"\b(?:insert\s+into|update|delete\s+from|truncate(?:\s+table)?|merge\s+into|upsert\s+into)\s+[\"`\[]?(?:\w+\.)?" + q + r"\b", text, re.I) \
+                or re.search(r"\.from\(\s*['\"]" + q + r"['\"]\s*\)\s*\.\s*(?:insert|update|upsert|delete)\b", text):
+            return "write"
+        if re.search(r"\b(?:from|join)\s+[\"`\[]?(?:\w+\.)?" + q + r"\b", text, re.I) or re.search(r"\.from\(\s*['\"]" + q + r"['\"]", text):
+            access = "read"
+    for model in prisma_models:
+        acc = model[:1].lower() + model[1:]
+        if re.search(r"\." + re.escape(acc) + r"\.(?:create|createMany|update|updateMany|upsert|delete|deleteMany)\b", text):
+            return "write"
+        if re.search(r"\." + re.escape(acc) + r"\.(?:find\w*|count|aggregate|groupBy)\b", text):
+            access = "read"
+    return access
+
+
+def scan_data(root, plan, state, disk):
+    """Static data scan: tables from schema files, env vars, and what each planned file touches."""
+    tables = {}
+    for p in schema_sources(root, plan, disk):
+        text = read_text_safe(root / p) or ""
+        found = parse_prisma_tables(text, p) if p.endswith(".prisma") else parse_sql_tables(text, p)
+        tables.update(found)
+    env_example = sorted({k for name in (".env.example", ".env.sample", ".env.template") if (root / name).is_file()
+                          for k in _ENV_KEY.findall(read_text_safe(root / name) or "")})
+    declared = {r["id"]: r for r in plan["resources"] if r.get("id")}
+    by_name = {}
+    for r in declared.values():
+        for n in resource_names(r):
+            by_name[n.lower()] = r["id"]
+    issues = []
+    for t in sorted(tables):
+        if t not in by_name:
+            issues.append({"type": "undeclared-table", "resource": t, "path": tables[t]["source"],
+                           "detail": f"{tables[t]['kind']} {t} is created in {tables[t]['source']} but not declared in resources"})
+    have_schema = bool(schema_sources(root, plan, disk))
+    for r in declared.values():
+        if r.get("kind") in ("table", "view") and have_schema and not any(n.lower() in tables for n in resource_names(r)):
+            issues.append({"type": "missing-table", "resource": r["id"], "detail": f"{r['id']} is declared but no schema file creates it"})
+    # what each planned file (and pattern instance) touches
+    targets = [f["path"] for f in plan["files"] if f.get("action") != "delete"]
+    for inst in (state.get("patterns") or {}).values():
+        targets += inst.get("instances", [])
+    declared_uses = {}
+    for f in plan["files"]:
+        declared_uses[f["path"]] = {u["resource"]: u.get("access") for u in f.get("uses", []) if isinstance(u, dict)}
+    pat_uses = [(pattern_instance_rx(p.get("glob", "")), {u["resource"]: u.get("access") for u in p.get("uses", []) if isinstance(u, dict)})
+                for p in plan["patterns"] if p.get("glob")]
+    env_declared = {n: r["id"] for r in declared.values() if r.get("kind") == "env" for n in resource_names(r)}
+    api_hosts = {r.get("host"): r["id"] for r in declared.values() if r.get("kind") == "api" and r.get("host")}
+    table_keys = {}
+    for t, info in tables.items():
+        table_keys[by_name.get(t, t)] = ([t] + [n for n, rid in by_name.items() if rid == by_name.get(t)], [info["model"]] if info.get("model") else [])
+    for r in declared.values():
+        if r.get("kind") in ("table", "view") and r["id"] not in table_keys:
+            table_keys[r["id"]] = (resource_names(r), [a for a in r.get("aliases", []) if a[:1].isupper()])
+    observed = {}
+    schema_files = set(schema_sources(root, plan, disk))
+    for path in sorted(set(targets)):
+        if path in schema_files or Path(path).suffix.lower() not in SCAN_EXT or not (root / path).is_file():
+            continue
+        text = read_text_safe(root / path)
+        if not text:
+            continue
+        seen = {}
+        for key, (names, models) in table_keys.items():
+            acc = code_refs(text, names, models)
+            if acc:
+                seen[key] = acc
+        for rx in _ENV_USE:
+            for name in rx.findall(text):
+                seen[env_declared.get(name, "env:" + name)] = "read"
+        for host, rid in api_hosts.items():
+            if host in text:
+                seen[rid] = "read"
+        if not seen:
+            continue
+        observed[path] = seen
+        decl = dict(declared_uses.get(path, {}))
+        for rx, uses in pat_uses:
+            if rx.match(path):
+                decl.update(uses)
+        for res, acc in seen.items():
+            if res.startswith("env:"):
+                if env_declared:
+                    issues.append({"type": "undeclared-env", "path": path, "resource": res[4:], "detail": f"{path} reads env var {res[4:]}, which is not a declared resource"})
+                continue
+            if res not in declared:
+                issues.append({"type": "undeclared-use", "path": path, "resource": res, "detail": f"{path} {acc}s {res}, which is not a declared resource"})
+            elif res not in decl:
+                issues.append({"type": "undeclared-use", "path": path, "resource": res, "detail": f"{path} {acc}s {res} but its blueprint entry does not list it in uses"})
+            elif acc == "write" and decl[res] == "read":
+                issues.append({"type": "access-mismatch", "path": path, "resource": res, "detail": f"{path} writes {res} but is declared read-only"})
+        for res in decl:
+            if res in declared and declared[res].get("kind") in ("table", "view", "env") and res not in seen:
+                issues.append({"type": "declared-not-found", "path": path, "resource": res, "detail": f"{path} declares {res} but the code does not reference it yet"})
+    return {"tables": sorted(tables.values(), key=lambda t: t["name"]), "envExample": env_example,
+            "observed": observed, "issues": issues, "live": (state.get("data") or {}).get("live")}
+
+
+def data_view(plan, state):
+    """Resources with owners, readers and writers, for the views."""
+    data = state.get("data") or {}
+    res = []
+    for r in plan["resources"]:
+        rid = r.get("id")
+        readers, writers = [], []
+        for f in plan["files"]:
+            for u in f.get("uses", []):
+                if isinstance(u, dict) and u.get("resource") == rid:
+                    (writers if u.get("access") == "write" else readers).append(f["path"])
+        for p in plan["patterns"]:
+            for u in p.get("uses", []):
+                if isinstance(u, dict) and u.get("resource") == rid:
+                    (writers if u.get("access") == "write" else readers).append(p.get("glob"))
+        issues = [i for i in data.get("issues", []) if i.get("resource") == rid]
+        res.append({"id": rid, "kind": r.get("kind"), "store": r.get("store"), "definedIn": r.get("definedIn"),
+                    "owner": resource_owner(plan, r), "purpose": r.get("purpose", ""), "readers": readers, "writers": writers,
+                    "issues": len(issues)})
+    return {"stores": plan["stores"], "resources": res, "tables": data.get("tables", []), "issues": data.get("issues", []),
+            "observed": data.get("observed", {}), "live": data.get("live")}
+
+
+def cmd_db_check(args):
+    """Compare a live schema with the migrations. Read-only; never stores credentials."""
+    root = find_root(args.root)
+    plan = load_plan(root)
+    state = load_state(root)
+    if args.sqlite:
+        src = Path(args.sqlite)
+        if not src.is_file():
+            die(f"no such SQLite file: {args.sqlite}")
+        con = sqlite3.connect(src.resolve().as_uri() + "?mode=ro", uri=True)
+        try:
+            rows = con.execute("SELECT type, name FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%'").fetchall()
+        finally:
+            con.close()
+        live = {n.lower(): t for t, n in rows}
+        label = "sqlite:" + src.name
+    else:
+        src = Path(args.schema_dump)
+        if not src.is_file():
+            die(f"no such schema dump: {args.schema_dump}")
+        live = {k: v["kind"] for k, v in parse_sql_tables(src.read_text(encoding="utf-8", errors="replace"), src.name).items()}
+        label = "dump:" + src.name
+    data = state.get("data") or {}
+    if not data.get("tables") and plan["stores"]:
+        data = scan_data(root, plan, state, repo_files(root, plan))
+    migrated = {t["name"] for t in data.get("tables", [])}
+    declared = {n.lower() for r in plan["resources"] if r.get("kind") in ("table", "view") for n in resource_names(r)}
+    ignore = {x.lower() for x in args.ignore or []}
+    live_only = sorted(t for t in live if t not in migrated and t not in ignore)
+    not_applied = sorted(t for t in migrated if t not in live)
+    declared_missing = sorted(t for t in declared if t not in live and t in migrated)
+    data["live"] = {"source": label, "at": now_iso(), "tables": sorted(live), "liveOnly": live_only,
+                    "notApplied": not_applied, "declaredMissing": declared_missing}
+    state["data"] = data
+    save_state(root, state)
+    append_log(root, {"event": "db-check", "source": label, "liveOnly": len(live_only), "notApplied": len(not_applied)})
+    print(f"Live schema from {label}: {len(live)} tables and views; migrations create {len(migrated)}.")
+    for title, items in (("In the live database but in no migration", live_only), ("In migrations but not in the live database", not_applied)):
+        if items:
+            print(f"  {title}: {', '.join(items)}")
+    if not live_only and not not_applied:
+        print("  The live schema matches the migrations.")
+    errors, _ = validate_plan(plan)
+    if not errors:
+        render_all(root, plan, state, quiet=True)
+    if args.strict and (live_only or not_applied):
+        sys.exit(1)
 
 
 # ----------------------------------------------------------------------------- disk scan and status
@@ -487,7 +1069,9 @@ def compute(root, plan, state):
                      "contract": bool(f.get("contract")), "status": st, "present": present,
                      "consumes": f.get("consumes", []), "produces": f.get("produces", []),
                      "dependsOn": [norm(d) for d in f.get("dependsOn", [])], "verify": item_verify(plan, f),
-                     "ac": f.get("ac", []), "by": rec.get("by"), "at": rec.get("at"), "note": rec.get("note")})
+                     "ac": f.get("ac", []), "by": rec.get("by"), "at": rec.get("at"), "note": rec.get("note"),
+                     "uses": [u for u in f.get("uses", []) if isinstance(u, dict)],
+                     "observed": ((state.get("data") or {}).get("observed") or {}).get(f["path"], {})})
     pats = []
     for p in plan["patterns"]:
         owner, rule, _ = owner_of(plan, p.get("glob", ""))
@@ -538,10 +1122,14 @@ def cmd_sync(args):
     state["missingModify"] = missing_modify
     state["syncedAt"] = now_iso()
     state["head"] = git_head(root)
+    data_issues = []
+    if plan["stores"] or plan["resources"]:
+        state["data"] = scan_data(root, plan, state, disk)
+        data_issues = state["data"]["issues"]
     save_state(root, state)
     comp = compute(root, plan, state)
     c = comp["counts"]
-    append_log(root, {"event": "sync", "head": state["head"], "counts": c, "unplanned": len(unplanned)})
+    append_log(root, {"event": "sync", "head": state["head"], "counts": c, "unplanned": len(unplanned), "dataIssues": len(data_issues)})
     if not args.quiet:
         print(f"Synced {len(disk)} files on disk against {len(plan['files'])} planned files and {len(plan['patterns'])} patterns.")
         print("  " + "  ".join(f"{GLYPH[s]} {LABEL[s]} {c[s]}" for s in STATES))
@@ -555,6 +1143,14 @@ def cmd_sync(args):
             print(f"  Planned to modify but missing: {len(missing_modify)}")
             for p in missing_modify[:10]:
                 print("    !", p)
+        if state.get("data"):
+            dt = state["data"]
+            print(f"  Data: {len(dt['tables'])} table(s) in schema files, {len(plan['resources'])} declared resource(s), "
+                  f"{len(dt['observed'])} file(s) touching data, {len(data_issues)} issue(s).")
+            for i in data_issues[:12]:
+                print(f"    ~ [{i['type']}] {i['detail']}")
+            if len(data_issues) > 12:
+                print(f"    ... and {len(data_issues) - 12} more (see map.html, Data)")
     if not args.no_render:
         errors, _ = validate_plan(plan)
         if errors:
@@ -562,7 +1158,8 @@ def cmd_sync(args):
                 print(f"  Views not refreshed: the blueprint has {len(errors)} validation error(s). Run validate.")
         else:
             render_all(root, plan, state, quiet=True)
-    if getattr(args, "strict", False) and (unplanned or missing_modify):
+    serious = [i for i in data_issues if i["type"] != "declared-not-found"]
+    if getattr(args, "strict", False) and (unplanned or missing_modify or serious):
         sys.exit(1)
 
 
@@ -890,6 +1487,44 @@ def render_structure(plan, state, comp):
         for m in plan["modules"]:
             w(f"| {m['id']} | `{md_cell(m.get('path'))}` | {md_cell(m.get('layer'))} | {md_cell(m.get('purpose'))} | {md_cell(', '.join(m.get('dependsOn', [])))} | `{md_cell(m.get('verify'))}` |\n")
         w("\n")
+    if plan["stores"] or plan["resources"]:
+        dv = data_view(plan, state)
+        w("## Data\n\nTables, environment variables and services the code connects to. Declared in the blueprint; checked by `sync` against schema files and code.\n\n")
+        if dv["stores"]:
+            w("| Store | Kind | Schema files | Purpose |\n|---|---|---|---|\n")
+            for s in dv["stores"]:
+                w(f"| {s.get('id')} | {s.get('kind')} | {md_cell(', '.join('`' + g + '`' for g in s.get('schema', [])))} | {md_cell(s.get('purpose'))} |\n")
+            w("\n")
+        if dv["resources"]:
+            w("| Resource | Kind | Store | Defined in | Owner | Read by | Written by |\n|---|---|---|---|---|---|---|\n")
+            for r in dv["resources"]:
+                w(f"| {r['id']} | {r['kind']} | {md_cell(r['store'])} | {('`' + r['definedIn'] + '`') if r['definedIn'] else ''} | {md_cell(r['owner'])} | "
+                  f"{md_cell(', '.join('`' + x + '`' for x in r['readers']))} | {md_cell(', '.join('`' + x + '`' for x in r['writers']))} |\n")
+            w("\n```mermaid\nflowchart LR\n")
+            mods_used = {}
+            files_mod = {f["path"]: f.get("module") for f in plan["files"]}
+            files_mod.update({p.get("glob"): p.get("module") for p in plan["patterns"]})
+            for r in dv["resources"]:
+                for x in r["readers"]:
+                    mods_used.setdefault((files_mod.get(x), r["id"]), set()).add("read")
+                for x in r["writers"]:
+                    mods_used.setdefault((files_mod.get(x), r["id"]), set()).add("write")
+            sid = lambda s: re.sub(r"[^A-Za-z0-9_]", "_", str(s))
+            for r in dv["resources"]:
+                w(f"  r_{sid(r['id'])}[(\"{r['id']}\")]\n")
+            for (m, rid), acc in sorted(mods_used.items(), key=lambda x: (str(x[0][0]), x[0][1])):
+                if m:
+                    w(f"  m_{sid(m)}[\"{m}\"] -->|{'/'.join(sorted(acc))}| r_{sid(rid)}\n")
+            w("```\n\n")
+        if dv["issues"]:
+            w(f"**Data drift: {len(dv['issues'])} issue(s)**\n\n")
+            for i in dv["issues"][:100]:
+                w(f"- [{i['type']}] {i['detail']}\n")
+            w("\n")
+        if dv.get("live"):
+            lv = dv["live"]
+            w(f"Live check ({lv['source']}, {lv['at']}): {len(lv['tables'])} tables; not in any migration: {', '.join(lv['liveOnly']) or 'none'}; "
+              f"migrations not applied: {', '.join(lv['notApplied']) or 'none'}.\n\n")
     w("## Phases\n\n| Phase | Name | Goal | Exit | Files | Verified |\n|---|---|---|---|---|---|\n")
     for ph in plan["phases"]:
         pr = [r for r in rows if r["phase"] == ph["id"]]
@@ -941,6 +1576,13 @@ def render_roster(plan, state, comp):
     for i, rule in enumerate(plan["owners"]):
         wins = sum(1 for x in rows if x["rule"] == i) + sum(1 for p in pats if p["rule"] == i)
         w(f"| {i + 1} | `{md_cell(rule.get('pattern'))}` | {rule.get('owner')} | {'yes' if rule.get('override') else ''} | {wins} |\n")
+    if plan["resources"]:
+        dv = data_view(plan, state)
+        w("\n## Data ownership\n\nThe owner of a table is the owner of the file that defines it (or `owner` in the blueprint). Writes by anyone else need that owner's review.\n\n")
+        w("| Resource | Kind | Owner | Writers from other owners |\n|---|---|---|---|\n")
+        for r in dv["resources"]:
+            foreign = [x for x in r["writers"] if owner_of(plan, x)[0] not in (None, r["owner"])]
+            w(f"| {r['id']} | {r['kind']} | {md_cell(r['owner'])} | {md_cell(', '.join('`' + x + '` (' + str(owner_of(plan, x)[0]) + ')' for x in foreign))} |\n")
     w("\n## Write lists by owner and phase\n\n")
     for r in plan["roster"]:
         mine = [x for x in rows if x["owner"] == r["id"]]
@@ -982,7 +1624,8 @@ def render_map(plan, state, comp):
             "modules": plan["modules"], "phases": plan["phases"], "roster": plan["roster"], "owners": plan["owners"],
             "decisions": plan["decisions"], "rows": comp["rows"], "patterns": comp["patterns"], "counts": comp["counts"],
             "unplanned": state.get("unplanned", []), "missingModify": state.get("missingModify", []),
-            "syncedAt": state.get("syncedAt"), "head": state.get("head"), "states": list(STATES), "glyph": GLYPH, "label": LABEL}
+            "syncedAt": state.get("syncedAt"), "head": state.get("head"), "states": list(STATES), "glyph": GLYPH, "label": LABEL,
+            "data": data_view(plan, state)}
     payload = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
     html = tpl.read_text(encoding="utf-8")
     mm = find_asset("mindmap.js")
@@ -1173,7 +1816,8 @@ def cmd_export(args):
             wr.writerow(["pattern", p["glob"], "create", p["module"], p["phase"], p["owner"], f"{len(p['instances'])} on disk", False, p["purpose"], p["verify"]])
     elif fmt == "json":
         print(json.dumps({"app": plan["app"], "phases": plan["phases"], "roster": plan["roster"], "rows": comp["rows"],
-                          "patterns": comp["patterns"], "unplanned": state.get("unplanned", []), "syncedAt": state.get("syncedAt")},
+                          "patterns": comp["patterns"], "unplanned": state.get("unplanned", []), "syncedAt": state.get("syncedAt"),
+                          "data": data_view(plan, state)},
                          indent=2, ensure_ascii=False))
     elif fmt == "agenticteam":
         team = read_json(Path(args.team)) if args.team else None
@@ -1341,6 +1985,25 @@ def main(argv=None):
     p.add_argument("--team", help="AgenticTeam team.json, to check write access")
     p.add_argument("--json", action="store_true", help="agenticteam: print task objects instead of commands")
 
+    p = add("db-check", cmd_db_check, "compare a live database schema with the migrations (read-only, on request)")
+    g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument("--sqlite", help="a SQLite database file, opened read-only")
+    g.add_argument("--schema-dump", help="a schema-only SQL dump, e.g. from pg_dump --schema-only")
+    p.add_argument("--ignore", nargs="*", help="live tables to ignore, e.g. framework tables")
+    p.add_argument("--strict", action="store_true", help="exit 1 when the live schema and the migrations differ")
+
+    p = add("feedback", cmd_feedback, "record a problem with the skill for the maintainers' learning loop (stays on this machine)")
+    p.add_argument("--kind", required=True, choices=FEEDBACK_KINDS)
+    p.add_argument("--note", required=True, help="what went wrong or what the user corrected, in one or two sentences")
+    p.add_argument("--part", help="part of the skill, e.g. 'SKILL.md step 4', 'preset:nextjs-prisma', 'command:sync'")
+    p.add_argument("--by", help="who is recording it (default: $BLUEPRINT_OWNER)")
+
+    p = add("report", cmd_report, "print a GitHub issue body for a recorded incident (nothing is sent)")
+    p.add_argument("incident", nargs="?", help="incident id (default: the latest)")
+
+    p = add("doctor", cmd_doctor, "versions of this tool, this project's copy and installed skills; the learning store")
+    p.add_argument("--strict", action="store_true", help="exit 1 if this project's tool copy is out of date")
+
     args = ap.parse_args(argv)
     if hasattr(sys.stdout, "reconfigure"):
         try:
@@ -1348,7 +2011,13 @@ def main(argv=None):
             sys.stderr.reconfigure(encoding="utf-8")
         except (ValueError, OSError):
             pass
-    args.fn(args)
+    try:
+        args.fn(args)
+    except (SystemExit, KeyboardInterrupt):
+        raise
+    except Exception as exc:  # an unexpected error is a bug in the tool: record it for the learning loop
+        record_incident(args, exc)
+        sys.exit(70)
 
 
 if __name__ == "__main__":

@@ -146,10 +146,43 @@
         "GET /snags"
       ],
       "dependsOn": [
-        "crates/snag-core/src/lib.rs"
+        "crates/snag-core/src/lib.rs",
+        "crates/snag-api/migrations/0001_snags.sql"
       ],
       "ac": [
         "AC-1"
+      ],
+      "uses": [
+        {
+          "resource": "snags",
+          "access": "write"
+        },
+        {
+          "resource": "DATABASE_URL",
+          "access": "read"
+        }
+      ]
+    },
+    {
+      "path": "crates/snag-api/migrations/0001_snags.sql",
+      "action": "create",
+      "module": "api",
+      "phase": "P1",
+      "purpose": "Creates the snags table",
+      "contract": true,
+      "produces": [
+        "table snags"
+      ]
+    },
+    {
+      "path": ".env.example",
+      "action": "create",
+      "module": "repo",
+      "phase": "P1",
+      "purpose": "Names of the environment variables, with placeholder values",
+      "contract": true,
+      "produces": [
+        "env DATABASE_URL"
       ]
     },
     {
@@ -242,6 +275,11 @@
       "note": "shared contract: the lead owns the core types"
     },
     {
+      "pattern": "crates/snag-api/migrations/",
+      "owner": "backend-lead",
+      "note": "the schema is a shared contract"
+    },
+    {
       "pattern": "apps/web/",
       "owner": "frontend-engineer"
     }
@@ -270,6 +308,31 @@
       "kind": "agent",
       "harness": "agenticteam",
       "role": "Builds the web inbox"
+    }
+  ],
+  "stores": [
+    {
+      "id": "main-db",
+      "kind": "postgres",
+      "schema": [
+        "crates/snag-api/migrations/*.sql"
+      ],
+      "purpose": "System of record for snags"
+    }
+  ],
+  "resources": [
+    {
+      "id": "snags",
+      "kind": "table",
+      "store": "main-db",
+      "definedIn": "crates/snag-api/migrations/0001_snags.sql",
+      "purpose": "One row per snag with its status"
+    },
+    {
+      "id": "DATABASE_URL",
+      "kind": "env",
+      "definedIn": ".env.example",
+      "purpose": "Postgres connection string for the API"
     }
   ],
   "decisions": [

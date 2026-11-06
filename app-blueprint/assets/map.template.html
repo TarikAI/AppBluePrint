@@ -189,12 +189,22 @@ ul.plain { margin: 0; padding-left: 18px; display: grid; gap: 3px; font-size: 13
     <div class="table-wrap"><table id="modules"></table></div>
   </section>
 
+  <section class="view" id="v-data">
+    <p class="meta">Tables, environment variables and services the code connects to: declared in the blueprint, checked by <code>sync</code> against schema files and code, and against a live database only when you run <code>db-check</code>.</p>
+    <div class="table-wrap"><table id="resources"></table></div>
+    <div class="grid two">
+      <div class="card"><h2>Data drift</h2><div id="data-issues"></div></div>
+      <div class="card"><h2>In schema files</h2><div id="data-tables"></div><div id="data-live"></div></div>
+    </div>
+  </section>
+
   <section class="view" id="v-drift">
     <div class="grid two">
       <div class="card"><h2>Unplanned files</h2><p class="meta">On disk, not in the blueprint, not covered by a pattern. Add, cover, ignore or remove each.</p><div id="unplanned"></div></div>
       <div class="card"><h2>Patterns</h2><div id="patterns"></div></div>
     </div>
     <div class="card"><h2>Planned to modify but missing</h2><div id="missing"></div></div>
+    <div class="card"><h2>Data drift</h2><div id="drift-data"></div></div>
   </section>
 </main>
 <script id="bp" type="application/json">__BLUEPRINT_DATA__</script>
@@ -227,7 +237,9 @@ ul.plain { margin: 0; padding-left: 18px; display: grid; gap: 3px; font-size: 13
   $('meta').textContent = rows.length + ' planned files · ' + D.patterns.length + ' patterns · ' + (D.syncedAt ? 'synced ' + D.syncedAt.replace('T', ' ').replace('Z', ' UTC') : 'never synced') + (D.head ? ' at ' + D.head : '');
   var tb = stack(C, total); $('topbar').replaceWith(tb); tb.id = 'topbar';
 
-  var TABS = [['overview', 'Overview'], ['mindmap', 'Mind map'], ['tree', 'Tree'], ['roster', 'Roster'], ['phases', 'Phases'], ['modules', 'Modules'], ['drift', 'Drift' + (D.unplanned.length ? ' (' + D.unplanned.length + ')' : '')]];
+  var DATA = D.data || { stores: [], resources: [], tables: [], issues: [], observed: {}, live: null };
+  var TABS = [['overview', 'Overview'], ['mindmap', 'Mind map'], ['tree', 'Tree'], ['roster', 'Roster'], ['phases', 'Phases'], ['modules', 'Modules'],
+    ['data', 'Data' + (DATA.issues.length ? ' (' + DATA.issues.length + ')' : '')], ['drift', 'Drift' + (D.unplanned.length ? ' (' + D.unplanned.length + ')' : '')]];
   TABS.forEach(function (t) {
     var b = el('button', { role: 'tab', type: 'button', id: 't-' + t[0], 'aria-controls': 'v-' + t[0], text: t[1] });
     b.addEventListener('click', function () { show(t[0]); try { history.replaceState(null, '', '#' + t[0]); } catch (e) {} window.scrollTo(0, 0); });
@@ -317,6 +329,10 @@ ul.plain { margin: 0; padding-left: 18px; display: grid; gap: 3px; font-size: 13
     if (r.note) add('Note', r.note);
     add('Produces', chipList(r.produces, target)); add('Consumes', chipList(r.consumes, target));
     add('Depends on', chipList(r.dependsOn, target)); add('Needed by', chipList(dependents[r.path] || [], target));
+    if ((r.uses && r.uses.length) || (r.observed && Object.keys(r.observed).length)) {
+      add('Uses (plan)', chipList((r.uses || []).map(function (u) { return u.resource + ' · ' + u.access; }), target));
+      add('Seen in code', chipList(Object.keys(r.observed || {}).map(function (k) { return k.replace(/^env:/, 'env ') + ' · ' + r.observed[k]; }), target));
+    }
     add('Verify', el('code', { text: r.verify || '-' }));
     if (r.ac && r.ac.length) add('Acceptance', r.ac.join(', '));
     $(target).textContent = '';
@@ -361,6 +377,20 @@ ul.plain { margin: 0; padding-left: 18px; display: grid; gap: 3px; font-size: 13
     } else {
       root.children = byModule(rows, D.patterns);
     }
+    if (DATA.resources.length) {
+      var byStore = {};
+      DATA.resources.forEach(function (r) { (byStore[r.store || r.kind] = byStore[r.store || r.kind] || []).push(r); });
+      root.children.push({ label: 'Data', title: 'Tables, env vars and services, with the files that read and write them', color: 'var(--b6)',
+        children: Object.keys(byStore).map(function (s) {
+          return { label: s, title: 'Store ' + s, children: byStore[s].map(function (r) {
+            var short = function (p) { return p.split('/').slice(-2).join('/'); };
+            var kids = r.writers.map(function (p) { return { label: short(p) + ' · write', title: p + ' writes ' + r.id, row: byPath[p] }; })
+              .concat(r.readers.map(function (p) { return { label: short(p) + ' · read', title: p + ' reads ' + r.id, row: byPath[p] }; }));
+            return { label: r.id + (r.issues ? ' ⚠' : ''), title: r.kind + ' · owner ' + (r.owner || '?') + ' · ' + r.purpose, res: r,
+              dot: r.issues ? 'var(--warn)' : null, children: kids };
+          }) };
+        }) });
+    }
     if (D.unplanned.length) {
       root.children.push({ label: 'Unplanned (' + D.unplanned.length + ')', title: 'On disk but not in the blueprint', color: 'var(--warn)', collapsed: true,
         children: D.unplanned.slice(0, 80).map(function (p) { return { label: p, dot: 'var(--warn)', title: 'Unplanned: ' + p }; }) });
@@ -382,6 +412,12 @@ ul.plain { margin: 0; padding-left: 18px; display: grid; gap: 3px; font-size: 13
           $('mm-detail').appendChild(el('p', { text: 'Pattern ' + p.id + ': ' + p.purpose }));
           $('mm-detail').appendChild(el('p', { cls: 'meta', text: 'One instance: ' + p.instance }));
           $('mm-detail').appendChild(el('p', { cls: 'meta', text: p.instances.length + ' on disk · ' + p.owner + ' · ' + p.phase }));
+        } else if (n.res) {
+          var rs = n.res; $('mm-detail').textContent = '';
+          $('mm-detail').appendChild(el('h3', { text: rs.id }));
+          $('mm-detail').appendChild(el('p', { text: rs.purpose || '' }));
+          $('mm-detail').appendChild(el('p', { cls: 'meta', text: rs.kind + (rs.store ? ' in ' + rs.store : '') + ' · owner ' + (rs.owner || '?') + (rs.definedIn ? ' · defined in ' + rs.definedIn : '') }));
+          DATA.issues.filter(function (i) { return i.resource === rs.id; }).forEach(function (i) { $('mm-detail').appendChild(el('p', { cls: 'pill warn', text: i.type + ': ' + i.detail })); });
         } else if (n.mod) {
           var m = n.mod, mr = rows.filter(function (r) { return r.module === m.id; }); $('mm-detail').textContent = '';
           $('mm-detail').appendChild(el('h3', { text: m.id }));
@@ -486,6 +522,25 @@ ul.plain { margin: 0; padding-left: 18px; display: grid; gap: 3px; font-size: 13
   }
   list('unplanned', D.unplanned, 'None. Every file on disk is planned, covered by a pattern, or ignored.');
   list('missing', D.missingModify, 'None.');
+
+  // data
+  table('resources', ['Resource', 'Kind', 'Store', 'Defined in', 'Owner', 'Read by', 'Written by', 'Issues'], DATA.resources.map(function (r) {
+    return [r.id, r.kind, r.store || '', r.definedIn ? el('code', { text: r.definedIn }) : '', r.owner || '', r.readers.join(', '), r.writers.join(', '),
+      r.issues ? el('span', { cls: 'pill warn', text: String(r.issues) }) : ''];
+  }));
+  if (!DATA.resources.length) $('resources').replaceWith(el('p', { cls: 'empty', text: 'No data resources are declared. Add stores and resources to the blueprint to track tables, env vars and services.' }));
+  function issueList(target) {
+    if (!DATA.issues.length) { $(target).appendChild(el('p', { cls: 'empty', text: DATA.resources.length ? 'None. The code matches the declared connections.' : 'Nothing checked yet.' })); return; }
+    var ul = el('ul', { cls: 'plain' });
+    DATA.issues.slice(0, 200).forEach(function (i) { ul.appendChild(el('li', null, [el('span', { cls: 'pill ' + (i.type === 'declared-not-found' ? '' : 'warn'), text: i.type }), ' ' + i.detail])); });
+    $(target).appendChild(ul);
+  }
+  issueList('data-issues'); issueList('drift-data');
+  list('data-tables', DATA.tables.map(function (t) { return t.kind + ' ' + t.name + '  (' + t.source + ')'; }), 'No schema files found yet.');
+  if (DATA.live) {
+    var lv = DATA.live;
+    $('data-live').appendChild(el('p', { cls: 'meta', text: 'Live check ' + lv.source + ' at ' + lv.at + ': ' + lv.tables.length + ' tables. Not in any migration: ' + (lv.liveOnly.join(', ') || 'none') + '. Migrations not applied: ' + (lv.notApplied.join(', ') || 'none') + '.' }));
+  }
   if (D.patterns.length) {
     var pu = el('ul', { cls: 'plain' });
     D.patterns.forEach(function (p) { pu.appendChild(el('li', null, [el('code', { text: p.glob }), ' · ' + p.instances.length + ' on disk' + (p.examples && p.examples.length ? ' (expected e.g. ' + p.examples.join(', ') + ')' : '') + ' · ' + p.owner])); });

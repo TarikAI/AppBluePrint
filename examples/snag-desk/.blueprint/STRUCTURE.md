@@ -4,7 +4,7 @@
 
 A small snag tracker: a Rust engine records snags and an inbox web app lets a person review them.
 
-**10 planned files, 1 patterns.** Status: ○ planned 2, ◔ claimed 1, ◑ on disk 3, ● built 1, ✔ verified 2, ▲ blocked 1. Last sync: 2026-11-05T21:04:59Z.
+**12 planned files, 1 patterns.** Status: ○ planned 2, ◔ claimed 1, ◑ on disk 2, ● built 1, ✔ verified 5, ▲ blocked 1. Last sync: 2026-11-06T13:38:09Z at `a97f059`.
 
 ## Stack
 
@@ -35,6 +35,8 @@ A small snag tracker: a Rust engine records snags and an inbox web app lets a pe
 │       └── package.json  ▲ Web app manifest and scripts (frontend-engineer, P1)
 ├── crates/
 │   ├── snag-api/  # HTTP API over the core [api]
+│   │   ├── migrations/
+│   │   │   └── 0001_snags.sql ★  ✔ Creates the snags table (backend-lead, P1)
 │   │   ├── src/
 │   │   │   └── main.rs  ● Axum server with POST /snags and GET /snags (backend-engineer, P1)
 │   │   └── Cargo.toml  ◑ API crate manifest (backend-engineer, P1)
@@ -43,8 +45,9 @@ A small snag tracker: a Rust engine records snags and an inbox web app lets a pe
 │       │   ├── lib.rs ★  ✔ Snag, SnagId and SnagStatus types with validation (backend-lead, P1)
 │       │   └── lifecycle.rs  ○ Allowed status transitions and their history records (backend-engineer, P2)
 │       └── Cargo.toml  ◑ Core crate manifest (backend-engineer, P1)
+├── .env.example ★  ✔ Names of the environment variables, with placeholder values (cto-architect, P1)
 ├── Cargo.toml ★  ✔ Workspace manifest listing the crates (cto-architect, P1)
-└── README.md [modify]  ◑ How to run the skeleton locally (cto-architect, P1)
+└── README.md [modify]  ✔ How to run the skeleton locally (cto-architect, P1)
 ```
 
 ## Modules
@@ -66,11 +69,38 @@ flowchart LR
 | web | `apps/web` | ui | Inbox where a person reviews snags | api | `python -c "pass"` |
 | repo | `` | build | Workspace and CI configuration |  | `python -c "pass"` |
 
+## Data
+
+Tables, environment variables and services the code connects to. Declared in the blueprint; checked by `sync` against schema files and code.
+
+| Store | Kind | Schema files | Purpose |
+|---|---|---|---|
+| main-db | postgres | `crates/snag-api/migrations/*.sql` | System of record for snags |
+
+| Resource | Kind | Store | Defined in | Owner | Read by | Written by |
+|---|---|---|---|---|---|---|
+| snags | table | main-db | `crates/snag-api/migrations/0001_snags.sql` | backend-lead |  | `crates/snag-api/src/main.rs` |
+| DATABASE_URL | env |  | `.env.example` | cto-architect | `crates/snag-api/src/main.rs` |  |
+
+```mermaid
+flowchart LR
+  r_snags[("snags")]
+  r_DATABASE_URL[("DATABASE_URL")]
+  m_api["api"] -->|read| r_DATABASE_URL
+  m_api["api"] -->|write| r_snags
+```
+
+**Data drift: 3 issue(s)**
+
+- [undeclared-table] table snag_history is created in crates/snag-api/migrations/0001_snags.sql but not declared in resources
+- [undeclared-use] crates/snag-api/src/main.rs reads snag_history, which is not a declared resource
+- [undeclared-env] crates/snag-api/src/main.rs reads env var SECRET_KEY, which is not a declared resource
+
 ## Phases
 
 | Phase | Name | Goal | Exit | Files | Verified |
 |---|---|---|---|---|---|
-| P1 | Walking skeleton | One snag created through the API appears in the inbox. | cargo test --workspace and pnpm --dir apps/web test pass | 9 | 2 |
+| P1 | Walking skeleton | One snag created through the API appears in the inbox. | cargo test --workspace and pnpm --dir apps/web test pass | 11 | 5 |
 | P2 | Snag lifecycle | Approve and close snags with history. | Lifecycle tests pass | 1 | 0 |
 
 ## Shared contracts
@@ -81,6 +111,8 @@ These files are depended on by several owners. Change them only through their ow
 |---|---|---|---|
 | `Cargo.toml` | cto-architect | workspace members | Workspace manifest listing the crates |
 | `crates/snag-core/src/lib.rs` | backend-lead | type Snag, fn validate_snag | Snag, SnagId and SnagStatus types with validation |
+| `crates/snag-api/migrations/0001_snags.sql` | backend-lead | table snags | Creates the snags table |
+| `.env.example` | cto-architect | env DATABASE_URL | Names of the environment variables, with placeholder values |
 
 ## Repeated-file patterns
 
@@ -97,11 +129,13 @@ These files are depended on by several owners. Change them only through their ow
 | `crates/snag-core/src/lib.rs` | create | core | P1 | backend-lead | ✔ verified | Snag, SnagId and SnagStatus types with validation |  | type Snag, fn validate_snag | `python -c "pass"` |
 | `crates/snag-api/Cargo.toml` | create | api | P1 | backend-engineer | ◑ on disk | API crate manifest | workspace members |  | `python -c "pass"` |
 | `crates/snag-api/src/main.rs` | create | api | P1 | backend-engineer | ● built | Axum server with POST /snags and GET /snags | type Snag, fn validate_snag | POST /snags, GET /snags | `python -c "pass"` |
+| `crates/snag-api/migrations/0001_snags.sql` | create | api | P1 | backend-lead | ✔ verified | Creates the snags table |  | table snags | `python -c "pass"` |
+| `.env.example` | create | repo | P1 | cto-architect | ✔ verified | Names of the environment variables, with placeholder values |  | env DATABASE_URL | `python -c "pass"` |
 | `apps/web/package.json` | create | web | P1 | frontend-engineer | ▲ blocked | Web app manifest and scripts |  |  | `python -c "pass"` |
 | `apps/web/src/api.ts` | create | web | P1 | frontend-engineer | ◔ claimed | Typed client for the snag endpoints | GET /snags | listSnags() | `python -c "pass"` |
 | `apps/web/src/Inbox.tsx` | create | web | P1 | frontend-engineer | ○ planned | Inbox list of open snags | listSnags() |  | `python -c "pass"` |
 | `crates/snag-core/src/lifecycle.rs` | create | core | P2 | backend-engineer | ○ planned | Allowed status transitions and their history records |  | fn transition | `python -c "pass"` |
-| `README.md` | modify | repo | P1 | cto-architect | ◑ on disk | How to run the skeleton locally |  |  | `python -c "pass"` |
+| `README.md` | modify | repo | P1 | cto-architect | ✔ verified | How to run the skeleton locally |  |  | `python -c "pass"` |
 
 ## Decisions
 

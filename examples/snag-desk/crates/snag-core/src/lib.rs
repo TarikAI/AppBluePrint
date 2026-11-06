@@ -1,1 +1,2 @@
-// placeholder for the app-blueprint example
+// Snag, SnagId and SnagStatus (placeholder)
+pub struct Snag;

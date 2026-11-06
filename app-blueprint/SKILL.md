@@ -24,7 +24,9 @@ Before `init`, run the script beside this file: `python <this skill folder>/scri
 python .blueprint/bin/blueprint.py <command>      # on Windows, `py -3` also works
 ```
 
-Commands: `init`, `validate [--team team.json]`, `render [--check]`, `sync`, `status [--owner X] [--phase P] [--next]`, `owner <path>`, `claim <path> --by X`, `mark <path> built|blocked|planned --by X`, `verify [--phase P] [--run]`, `guard <path> --by X`, `contracts [--write]`, `export codeowners|csv|json|agenticteam`. Each has `--help`. Exit codes: 0 ok, 1 error, 2 guard refused, 3 not allowed (wrong owner, unplanned path), 64 bad usage.
+Commands: `init`, `validate [--team team.json]`, `render [--check]`, `sync [--strict]`, `status [--owner X] [--phase P] [--next]`, `owner <path>`, `claim <path> --by X`, `mark <path> built|blocked|planned --by X`, `verify [--phase P] [--run]`, `guard <path> --by X`, `contracts [--write]`, `export codeowners|csv|json|agenticteam`, `db-check --sqlite F | --schema-dump F`, `feedback`, `report`, `doctor`. Each has `--help`. Exit codes: 0 ok, 1 error, 2 guard refused, 3 not allowed (wrong owner, unplanned path), 64 bad usage, 70 unexpected error (recorded as an incident).
+
+In a repo that already has a blueprint, run `doctor` first. It tells you if the repo's copy of the tool is older than the installed skill; if so, run `python <this skill folder>/scripts/blueprint.py init --refresh-tool`.
 
 ## Choose the mode
 
@@ -73,6 +75,11 @@ Write `blueprint.json` in sections. After each section, run `validate` (and `ren
 3. **Phase 1 files and shared contracts, every file**: one entry per file with `action` (create, modify, delete), `module`, `phase`, a one-sentence `purpose`, and `verify` if it differs from the module's. Mark shared contracts (types, API schema, DB schema, env example, design tokens) `"contract": true`. Give them `produces`, and give their users `consumes`, using the same exact names (`type Snag`, `POST /snags`) so parallel builders agree before either writes code. Add `dependsOn` paths; a file may not depend on a later phase.
 4. **Later phases**: list files that are unique; describe repeated files once as a **pattern** (`glob`, `instance` = what one instance contains, `examples`), such as one row for all CRUD screens. `sync` finds the instances on disk.
 5. **Config, tests, CI**: the files that make the verify commands work.
+6. **Data connections**, when the app has a database, env vars or outside services:
+   - `stores[]`: each database or storage service, with `kind` and the `schema` globs of its migrations or schema files (`supabase/migrations/*.sql`, `prisma/schema.prisma`).
+   - `resources[]`: each table, view, env var, external API, queue or bucket the code relies on, with `kind`, `store`, `definedIn` (the migration, schema file or `.env.example` that creates it) and `purpose`. A Prisma model whose name differs from its table goes in `aliases`.
+   - On every file that touches one: `uses: [{"resource": "snags", "access": "write"}]`. A file that only reads says `read`.
+   - The owner of a table is the owner of the file that defines it. Writes from other owners are allowed but flagged for that owner's review.
 
 Rules while drafting:
 - Zero-decision rule: a fresh agent must be able to build each file from its entry and the contracts it names, without choosing a schema, an API path, a library or an edge-case rule. If it would have to choose, decide now and record it in `decisions[]`.
@@ -100,7 +107,7 @@ Go through the findings with the user and fix what they accept.
 
 ## 7. The map
 
-`render` and `sync` always write `.blueprint/map.html`, a self-contained page with Overview, Tree, Roster, Phases, Modules and Drift views. Tell the user where it is. If this host can publish pages (for example a claude.ai artifact tool), **ask** whether they also want a shareable copy; never publish without a yes, and republish only when asked again.
+`render` and `sync` always write `.blueprint/map.html`, a self-contained page with Overview, Mind map, Tree, Roster, Phases, Modules, Data and Drift views. Tell the user where it is. If this host can publish pages (for example a claude.ai artifact tool), **ask** whether they also want a shareable copy; never publish without a yes, and republish only when asked again.
 
 ## 8. Hand-off to builders
 
@@ -124,6 +131,16 @@ Go through the findings with the user and fix what they accept.
 - `status --next` lists what is ready to build: open files in the earliest unfinished phase whose dependencies are built.
 - Progress is only ever counted from these states. Never estimate a percentage.
 - Verify commands are shell commands from the plan. Read them (`verify` without `--run` lists them) before running them, and never add one that does more than build or test.
+- When the plan has `stores` or `resources`, `sync` also reads the schema files and scans the planned files for table names, env vars and API hosts. It reports tables no resource declares, declared tables no schema creates, files that touch a resource without declaring it, writes to a resource declared read-only, and declared uses the code does not show yet. `sync --strict` fails on all but the last.
+- Live database: only when the user asks, run `db-check --sqlite <file>` (opened read-only) or `db-check --schema-dump <file>` with a schema-only dump the user made (`pg_dump --schema-only`). Never ask for a connection string or password, and never connect to a production database yourself.
+
+## When the skill gets something wrong
+
+The skill learns from its mistakes through a loop its maintainers run. Nothing leaves this machine on its own.
+
+- An unexpected error in `blueprint.py` is recorded automatically as an incident in `~/.app-blueprint` (exit code 70). Tell the user, and offer `blueprint.py report <id>`, which prints a cleaned-up GitHub issue. Filing it is public, so only the user files it, or you do after they say yes.
+- When the user corrects the plan in a way this skill should have got right, or a step here proves wrong, unclear or missing, record it: `blueprint.py feedback --kind guidance|bug|preset|feature --part "<SKILL.md step, preset:<id> or command:<name>>" --note "<what happened, in one or two sentences>"`. Record facts, not guesses, and leave out names and secrets.
+- `APP_BLUEPRINT_NO_CAPTURE=1` turns all of this off.
 
 ## Changing the plan
 

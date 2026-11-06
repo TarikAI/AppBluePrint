@@ -1,0 +1,52 @@
+name: Feature request
+description: Something the skill or blueprint.py should do and does not.
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Start from the problem you hit. A proposal is welcome but optional.
+
+        This issue is public. Remove project names, paths, customer data and secrets before you submit.
+  - type: dropdown
+    id: part
+    attributes:
+      label: Part of the skill
+      options:
+        - SKILL.md guidance
+        - blueprint.py command
+        - Stack preset
+        - map.html / views
+        - Installer
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What you were trying to do, and what got in the way.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What the skill or blueprint.py could do about it.
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Workarounds
+      description: What you do today instead, if anything.
+    validations:
+      required: false
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Private details
+      options:
+        - label: I removed project names, paths, customer data and secrets from this issue.
+          required: true

@@ -1,0 +1,67 @@
+name: Preset outdated or new stack
+description: A stack preset no longer matches the official docs, or you want a preset for another stack.
+title: "[preset] "
+labels: ["preset"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Presets live in `app-blueprint/references/stacks/`. A link to the official docs or release notes is the evidence a preset change needs.
+
+        This issue is public. Remove project names, paths, customer data and secrets before you submit.
+  - type: dropdown
+    id: part
+    attributes:
+      label: Part of the skill
+      options:
+        - SKILL.md guidance
+        - blueprint.py command
+        - Stack preset
+        - map.html / views
+        - Installer
+        - Other
+      default: 2
+    validations:
+      required: true
+  - type: dropdown
+    id: request
+    attributes:
+      label: Request
+      options:
+        - A preset is outdated
+        - A new stack preset
+    validations:
+      required: true
+  - type: dropdown
+    id: preset
+    attributes:
+      label: Command, preset or section
+      options:
+        - vite-react-supabase
+        - nextjs-prisma
+        - pnpm-monorepo-docker
+        - rust-agent-engine
+        - None (new stack)
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What changed, or which stack
+      description: For an outdated preset, what the preset says and what the docs say now. For a new stack, its frameworks and versions, and how apps on it are usually laid out.
+    validations:
+      required: true
+  - type: textarea
+    id: sources
+    attributes:
+      label: Official docs links
+      description: Links to the official docs, release notes or changelog. Blog posts alone are not enough.
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Private details
+      options:
+        - label: I removed project names, paths, customer data and secrets from this issue.
+          required: true

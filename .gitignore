@@ -7,9 +7,17 @@
 !/install.py
 !/app-blueprint/
 !/examples/
+!/maintainers/
+!/learning/
+!/.github/
+!/CHANGELOG.md
+!/CONTRIBUTING.md
 
 # Your own presets, never published (install.py still copies them into your installs)
 app-blueprint/references/stacks/local/
+
+# Triage reports are built from the local learning store: they can name local projects. Never published.
+maintainers/triage/
 
 __pycache__/
 *.pyc

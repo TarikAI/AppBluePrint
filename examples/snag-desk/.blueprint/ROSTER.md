@@ -8,8 +8,8 @@ Ownership follows the rules below in order; **the last matching rule wins**, as 
 
 | Owner | Kind | Harness | Role | Files | Verified | Patterns |
 |---|---|---|---|---|---|---|
-| cto-architect | agent | agenticteam | Owns workspace config and the plan | 2 | 1 | 0 |
-| backend-lead | agent | agenticteam | Owns the core contract | 1 | 1 | 0 |
+| cto-architect | agent | agenticteam | Owns workspace config and the plan | 3 | 3 | 0 |
+| backend-lead | agent | agenticteam | Owns the core contract | 2 | 2 | 0 |
 | backend-engineer | agent | agenticteam | Builds crates | 4 | 0 | 0 |
 | frontend-engineer | agent | agenticteam | Builds the web inbox | 3 | 0 | 1 |
 
@@ -17,10 +17,20 @@ Ownership follows the rules below in order; **the last matching rule wins**, as 
 
 | # | Pattern | Owner | Override | Wins |
 |---|---|---|---|---|
-| 1 | `*` | cto-architect |  | 2 |
+| 1 | `*` | cto-architect |  | 3 |
 | 2 | `crates/` | backend-engineer |  | 4 |
 | 3 | `crates/snag-core/src/lib.rs` | backend-lead |  | 1 |
-| 4 | `apps/web/` | frontend-engineer |  | 4 |
+| 4 | `crates/snag-api/migrations/` | backend-lead |  | 1 |
+| 5 | `apps/web/` | frontend-engineer |  | 4 |
+
+## Data ownership
+
+The owner of a table is the owner of the file that defines it (or `owner` in the blueprint). Writes by anyone else need that owner's review.
+
+| Resource | Kind | Owner | Writers from other owners |
+|---|---|---|---|
+| snags | table | backend-lead | `crates/snag-api/src/main.rs` (backend-engineer) |
+| DATABASE_URL | env | cto-architect |  |
 
 ## Write lists by owner and phase
 
@@ -29,13 +39,15 @@ Ownership follows the rules below in order; **the last matching rule wins**, as 
 **P1 Walking skeleton**
 
 - ✔ `Cargo.toml` ★
-- ◑ `README.md` (modify)
+- ✔ `.env.example` ★
+- ✔ `README.md` (modify)
 
 ### backend-lead
 
 **P1 Walking skeleton**
 
 - ✔ `crates/snag-core/src/lib.rs` ★
+- ✔ `crates/snag-api/migrations/0001_snags.sql` ★
 
 ### backend-engineer
 

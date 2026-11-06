@@ -16,8 +16,12 @@ OK_CMD = f'"{PY}" -c "pass"'
 FAIL_CMD = f'"{PY}" -c "import sys; sys.exit(3)"'
 
 
+TEST_STORE = tempfile.mkdtemp(prefix="bp-test-store-")  # never write to the real ~/.app-blueprint
+
+
 def run(args, cwd, stdin=None, env=None):
     e = dict(os.environ)
+    e["APP_BLUEPRINT_HOME"] = TEST_STORE
     e.update(env or {})
     e["PYTHONIOENCODING"] = "utf-8"
     return subprocess.run([PY, str(SCRIPT)] + args, cwd=cwd, capture_output=True, text=True, encoding="utf-8",
@@ -63,7 +67,7 @@ class BlueprintTest(unittest.TestCase):
     def test_example_validates(self):
         r = self.tool("validate")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn("OK: 10 files, 1 patterns", r.stdout)
+        self.assertIn("OK: 12 files, 1 patterns", r.stdout)
 
     def test_narrower_rules_need_no_override(self):
         for rule in self.plan["owners"]:
@@ -78,7 +82,7 @@ class BlueprintTest(unittest.TestCase):
         r = self.tool("validate")
         self.assertEqual(r.returncode, 1)
         self.assertIn("partly overlap", r.stdout)
-        self.assertIn("rule 5", r.stdout)
+        self.assertIn("rule 6", r.stdout)
         self.plan["owners"][-1]["override"] = True
         self.save()
         r = self.tool("validate")
@@ -140,7 +144,7 @@ class BlueprintTest(unittest.TestCase):
         r = self.tool("sync", "--strict", "--quiet")
         self.assertEqual(r.returncode, 1)
         r = self.tool("status", "--next")
-        self.assertIn("verified 0/10", r.stdout)
+        self.assertIn("verified 0/12", r.stdout)
         self.assertIn("Ready to build next", r.stdout)
 
     def test_claim_mark_and_ownership(self):

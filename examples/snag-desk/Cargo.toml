@@ -1,1 +1,3 @@
-// placeholder for the app-blueprint example
+[workspace]
+members = ["crates/snag-core", "crates/snag-api"]
+resolver = "3"

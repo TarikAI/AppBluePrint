@@ -1,1 +1,4 @@
-// placeholder for the app-blueprint example
+[package]
+name = "snag-core"
+version = "0.1.0"
+edition = "2024"
