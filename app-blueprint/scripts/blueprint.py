@@ -20,7 +20,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-TOOL_VERSION = "1.0.0"
+TOOL_VERSION = "1.1.0"
 SCHEMA_VERSION = 1
 ACTIONS = ("create", "modify", "delete")
 ROSTER_KINDS = ("agent", "human")
@@ -962,11 +962,16 @@ def render_roster(plan, state, comp):
     return out.getvalue()
 
 
-def find_template():
-    for cand in (HERE / "map.template.html", HERE.parent / "assets" / "map.template.html"):
+def find_asset(name):
+    """An asset next to the copied tool (.blueprint/bin) or in the skill's assets folder."""
+    for cand in (HERE / name, HERE.parent / "assets" / name):
         if cand.exists():
             return cand
     return None
+
+
+def find_template():
+    return find_asset("map.template.html")
 
 
 def render_map(plan, state, comp):
@@ -980,6 +985,9 @@ def render_map(plan, state, comp):
             "syncedAt": state.get("syncedAt"), "head": state.get("head"), "states": list(STATES), "glyph": GLYPH, "label": LABEL}
     payload = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
     html = tpl.read_text(encoding="utf-8")
+    mm = find_asset("mindmap.js")
+    mm_js = mm.read_text(encoding="utf-8").replace("</script", "<\\/script") if mm else "function mindMap(host){host.textContent='Mind map unavailable: run init --refresh-tool.';return {expandAll:function(){},collapseAll:function(){},zoom:function(){},fit:function(){}};}"
+    html = html.replace("/*__MINDMAP_JS__*/", mm_js)
     return html.replace("__APP_NAME__", _html_escape(plan["app"].get("name", "App"))).replace("__BLUEPRINT_DATA__", payload)
 
 
@@ -1215,10 +1223,13 @@ SKELETON = {
 def copy_tool(root):
     dest = bp_dir(root) / "bin"
     dest.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(Path(__file__).resolve(), dest / "blueprint.py")
-    tpl = find_template()
-    if tpl:
-        shutil.copy2(tpl, dest / "map.template.html")
+    me = Path(__file__).resolve()
+    if me != (dest / "blueprint.py").resolve():
+        shutil.copy2(me, dest / "blueprint.py")
+    for name in ("map.template.html", "mindmap.js"):
+        src = find_asset(name)
+        if src and src.resolve() != (dest / name).resolve():
+            shutil.copy2(src, dest / name)
     (dest / "VERSION").write_text(TOOL_VERSION + "\n", encoding="utf-8")
 
 

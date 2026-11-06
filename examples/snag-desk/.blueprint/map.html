@@ -14,6 +14,7 @@
   --accent: #0d4754; --accent-soft: #e2eef1;
   --s-planned: #c3ccd0; --s-claimed: #8a5a00; --s-ondisk: #2c5d9c; --s-built: #0d4754; --s-verified: #1f7a4d; --s-blocked: #a33a2b;
   --warn: #8a5a00; --warn-bg: #fbefd6; --bad: #a33a2b; --bad-bg: #f9e4e0; --ok: #1f7a4d; --ok-bg: #e3f3ea;
+  --b1: #0d4754; --b2: #2c5d9c; --b3: #6a4a9c; --b4: #136b6b; --b5: #4a5a6f; --b6: #7a4f2a;
   --font-display: "IBM Plex Sans Condensed", "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
   --font-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
   --font-mono: "IBM Plex Mono", Consolas, monospace;
@@ -24,6 +25,7 @@
     --bg: #0f1619; --paper: #162024; --ink: #e3ecef; --sub: #9fb1b7; --line: #263439; --accent: #7cc4d4; --accent-soft: #1b343b;
     --s-planned: #3a4a50; --s-claimed: #e8b85a; --s-ondisk: #8db6ef; --s-built: #7cc4d4; --s-verified: #6fd19c; --s-blocked: #f08c7c;
     --warn: #e8b85a; --warn-bg: #3a2d12; --bad: #f08c7c; --bad-bg: #3d1f1a; --ok: #6fd19c; --ok-bg: #173327;
+    --b1: #7cc4d4; --b2: #8db6ef; --b3: #c2a6ee; --b4: #6fc7c7; --b5: #a9b6c6; --b6: #d6a77a;
     color-scheme: dark;
   }
 }
@@ -31,6 +33,7 @@
   --bg: #0f1619; --paper: #162024; --ink: #e3ecef; --sub: #9fb1b7; --line: #263439; --accent: #7cc4d4; --accent-soft: #1b343b;
   --s-planned: #3a4a50; --s-claimed: #e8b85a; --s-ondisk: #8db6ef; --s-built: #7cc4d4; --s-verified: #6fd19c; --s-blocked: #f08c7c;
   --warn: #e8b85a; --warn-bg: #3a2d12; --bad: #f08c7c; --bad-bg: #3d1f1a; --ok: #6fd19c; --ok-bg: #173327;
+  --b1: #7cc4d4; --b2: #8db6ef; --b3: #c2a6ee; --b4: #6fc7c7; --b5: #a9b6c6; --b6: #d6a77a;
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
@@ -110,6 +113,14 @@ td.num { text-align: center; font-family: var(--font-mono); font-variant-numeric
 svg text { font-family: var(--font-body); }
 .empty { color: var(--sub); font-size: 13px; }
 ul.plain { margin: 0; padding-left: 18px; display: grid; gap: 3px; font-size: 13px; }
+.mm-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.mm-bar button { font: 500 12.5px var(--font-body); border: 1px solid var(--line); background: var(--paper); color: var(--ink); padding: 5px 10px; border-radius: 6px; cursor: pointer; }
+.mm-bar button:hover { border-color: var(--accent); }
+.mm-host { overflow: auto; max-height: 76vh; background: var(--paper); border: 1px solid var(--line); border-radius: 8px; padding: 6px; }
+.mm-host svg { display: block; margin: 0 auto; }
+.mm-host svg text { font-family: var(--font-body); }
+.mm-node:focus { outline: none; }
+.mm-node:focus-visible rect, .mm-node:focus-visible circle { stroke: var(--accent); stroke-width: 2.5px; }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 </style>
 </head>
@@ -130,6 +141,23 @@ ul.plain { margin: 0; padding-left: 18px; display: grid; gap: 3px; font-size: 13
     <div class="grid two">
       <div class="card"><h2>Ready to build next</h2><p class="meta">Open files in the earliest unfinished phase whose dependencies are built.</p><div id="ready"></div></div>
       <div class="card"><h2>Needs attention</h2><div id="attention"></div></div>
+    </div>
+  </section>
+
+  <section class="view" id="v-mindmap">
+    <div class="mm-bar">
+      <label class="meta" for="mm-by">Branches</label>
+      <select id="mm-by"><option value="module">Modules</option><option value="owner">Owners</option><option value="phase">Phases</option></select>
+      <button type="button" id="mm-expand">Expand all</button>
+      <button type="button" id="mm-collapse">Branches only</button>
+      <button type="button" id="mm-out" aria-label="Zoom out">−</button>
+      <button type="button" id="mm-in" aria-label="Zoom in">+</button>
+      <button type="button" id="mm-fit">Fit</button>
+      <span class="meta">Click a branch to open or close it; click a file for its details.</span>
+    </div>
+    <div class="split">
+      <div class="mm-host" id="mm-host"></div>
+      <div class="card detail" id="mm-detail"><p class="empty">Select a file to see its purpose, owner, contracts and dependencies.</p></div>
     </div>
   </section>
 
@@ -169,7 +197,182 @@ ul.plain { margin: 0; padding-left: 18px; display: grid; gap: 3px; font-size: 13
     <div class="card"><h2>Planned to modify but missing</h2><div id="missing"></div></div>
   </section>
 </main>
-<script id="bp" type="application/json">{"tool": "1.0.0", "app": {"name": "Snag Desk", "summary": "A small snag tracker: a Rust engine records snags and an inbox web app lets a person review them.", "platforms": ["web"], "preset": "rust-agent-engine"}, "stack": [{"part": "Engine language", "choice": "Rust (Cargo workspace)", "version": "1.91", "docs": "https://doc.rust-lang.org/cargo/reference/workspaces.html", "verified": "2026-11-05"}, {"part": "HTTP API", "choice": "Axum", "version": "0.8", "docs": "https://docs.rs/axum/latest/axum/", "verified": "2026-11-05"}, {"part": "Web", "choice": "React + TypeScript + Vite", "version": "React 19", "docs": "https://vite.dev/guide/", "verified": "2026-11-05"}], "approach": {"layout": "Cargo workspace (crates/) plus apps/web; one shared API schema generated from Rust types", "notes": "Phase 1 is a walking skeleton: one snag goes in through the API and shows in the inbox. Example only: files are placeholders and every verify command is a no-op, so all commands run anywhere."}, "modules": [{"id": "core", "path": "crates/snag-core", "layer": "domain", "purpose": "Snag types and rules, no I/O", "dependsOn": [], "verify": "python -c \"pass\""}, {"id": "api", "path": "crates/snag-api", "layer": "interface", "purpose": "HTTP API over the core", "dependsOn": ["core"], "verify": "python -c \"pass\""}, {"id": "web", "path": "apps/web", "layer": "ui", "purpose": "Inbox where a person reviews snags", "dependsOn": ["api"], "verify": "python -c \"pass\""}, {"id": "repo", "path": "", "layer": "build", "purpose": "Workspace and CI configuration", "dependsOn": [], "verify": "python -c \"pass\""}], "phases": [{"id": "P1", "name": "Walking skeleton", "goal": "One snag created through the API appears in the inbox.", "exit": "cargo test --workspace and pnpm --dir apps/web test pass"}, {"id": "P2", "name": "Snag lifecycle", "goal": "Approve and close snags with history.", "exit": "Lifecycle tests pass"}], "roster": [{"id": "cto-architect", "kind": "agent", "harness": "agenticteam", "role": "Owns workspace config and the plan"}, {"id": "backend-lead", "kind": "agent", "harness": "agenticteam", "role": "Owns the core contract"}, {"id": "backend-engineer", "kind": "agent", "harness": "agenticteam", "role": "Builds crates"}, {"id": "frontend-engineer", "kind": "agent", "harness": "agenticteam", "role": "Builds the web inbox"}], "owners": [{"pattern": "*", "owner": "cto-architect", "note": "default owner for anything not listed below"}, {"pattern": "crates/", "owner": "backend-engineer"}, {"pattern": "crates/snag-core/src/lib.rs", "owner": "backend-lead", "note": "shared contract: the lead owns the core types"}, {"pattern": "apps/web/", "owner": "frontend-engineer"}], "decisions": [{"id": "D1", "decision": "Generate the TypeScript client from the API schema instead of writing types twice.", "why": "The web app and API cannot drift apart.", "source": "example"}], "rows": [{"path": "Cargo.toml", "kind": "file", "action": "create", "module": "repo", "phase": "P1", "purpose": "Workspace manifest listing the crates", "owner": "cto-architect", "rule": 0, "contract": true, "status": "verified", "present": true, "consumes": [], "produces": ["workspace members"], "dependsOn": [], "verify": "python -c \"pass\"", "ac": [], "by": null, "at": null, "note": null}, {"path": "crates/snag-core/Cargo.toml", "kind": "file", "action": "create", "module": "core", "phase": "P1", "purpose": "Core crate manifest", "owner": "backend-engineer", "rule": 1, "contract": false, "status": "ondisk", "present": true, "consumes": ["workspace members"], "produces": [], "dependsOn": [], "verify": "python -c \"pass\"", "ac": [], "by": null, "at": null, "note": null}, {"path": "crates/snag-core/src/lib.rs", "kind": "file", "action": "create", "module": "core", "phase": "P1", "purpose": "Snag, SnagId and SnagStatus types with validation", "owner": "backend-lead", "rule": 2, "contract": true, "status": "verified", "present": true, "consumes": [], "produces": ["type Snag", "fn validate_snag"], "dependsOn": [], "verify": "python -c \"pass\"", "ac": [], "by": null, "at": null, "note": null}, {"path": "crates/snag-api/Cargo.toml", "kind": "file", "action": "create", "module": "api", "phase": "P1", "purpose": "API crate manifest", "owner": "backend-engineer", "rule": 1, "contract": false, "status": "ondisk", "present": true, "consumes": ["workspace members"], "produces": [], "dependsOn": [], "verify": "python -c \"pass\"", "ac": [], "by": null, "at": null, "note": null}, {"path": "crates/snag-api/src/main.rs", "kind": "file", "action": "create", "module": "api", "phase": "P1", "purpose": "Axum server with POST /snags and GET /snags", "owner": "backend-engineer", "rule": 1, "contract": false, "status": "built", "present": true, "consumes": ["type Snag", "fn validate_snag"], "produces": ["POST /snags", "GET /snags"], "dependsOn": ["crates/snag-core/src/lib.rs"], "verify": "python -c \"pass\"", "ac": ["AC-1"], "by": "backend-engineer", "at": "2026-11-05T20:58:21Z", "note": null}, {"path": "apps/web/package.json", "kind": "file", "action": "create", "module": "web", "phase": "P1", "purpose": "Web app manifest and scripts", "owner": "frontend-engineer", "rule": 3, "contract": false, "status": "blocked", "present": true, "consumes": [], "produces": [], "dependsOn": [], "verify": "python -c \"pass\"", "ac": [], "by": "frontend-engineer", "at": "2026-11-05T20:58:22Z", "note": "waiting on the generated API client"}, {"path": "apps/web/src/api.ts", "kind": "file", "action": "create", "module": "web", "phase": "P1", "purpose": "Typed client for the snag endpoints", "owner": "frontend-engineer", "rule": 3, "contract": false, "status": "claimed", "present": false, "consumes": ["GET /snags"], "produces": ["listSnags()"], "dependsOn": ["crates/snag-api/src/main.rs"], "verify": "python -c \"pass\"", "ac": [], "by": "frontend-engineer", "at": "2026-11-05T20:58:21Z", "note": null}, {"path": "apps/web/src/Inbox.tsx", "kind": "file", "action": "create", "module": "web", "phase": "P1", "purpose": "Inbox list of open snags", "owner": "frontend-engineer", "rule": 3, "contract": false, "status": "planned", "present": false, "consumes": ["listSnags()"], "produces": [], "dependsOn": ["apps/web/src/api.ts"], "verify": "python -c \"pass\"", "ac": ["AC-1"], "by": null, "at": null, "note": null}, {"path": "crates/snag-core/src/lifecycle.rs", "kind": "file", "action": "create", "module": "core", "phase": "P2", "purpose": "Allowed status transitions and their history records", "owner": "backend-engineer", "rule": 1, "contract": false, "status": "planned", "present": false, "consumes": [], "produces": ["fn transition"], "dependsOn": ["crates/snag-core/src/lib.rs"], "verify": "python -c \"pass\"", "ac": [], "by": null, "at": null, "note": null}, {"path": "README.md", "kind": "file", "action": "modify", "module": "repo", "phase": "P1", "purpose": "How to run the skeleton locally", "owner": "cto-architect", "rule": 0, "contract": false, "status": "ondisk", "present": true, "consumes": [], "produces": [], "dependsOn": [], "verify": "python -c \"pass\"", "ac": [], "by": null, "at": null, "note": null}], "patterns": [{"id": "web-screen", "glob": "apps/web/src/screens/*Screen.tsx", "module": "web", "phase": "P2", "purpose": "One screen per inbox view", "instance": "A React component that loads its data through api.ts and renders loading, empty and error states", "owner": "frontend-engineer", "rule": 3, "examples": ["SnagDetailScreen", "ClosedSnagsScreen"], "instances": ["apps/web/src/screens/SnagDetailScreen.tsx"], "verify": "python -c \"pass\""}], "counts": {"planned": 2, "claimed": 1, "ondisk": 3, "built": 1, "verified": 2, "blocked": 1}, "unplanned": ["notes/todo.txt"], "missingModify": [], "syncedAt": "2026-11-05T21:04:59Z", "head": null, "states": ["planned", "claimed", "ondisk", "built", "verified", "blocked"], "glyph": {"planned": "○", "claimed": "◔", "ondisk": "◑", "built": "●", "verified": "✔", "blocked": "▲"}, "label": {"planned": "planned", "claimed": "claimed", "ondisk": "on disk", "built": "built", "verified": "verified", "blocked": "blocked"}}</script>
+<script id="bp" type="application/json">{"tool": "1.1.0", "app": {"name": "Snag Desk", "summary": "A small snag tracker: a Rust engine records snags and an inbox web app lets a person review them.", "platforms": ["web"], "preset": "rust-agent-engine"}, "stack": [{"part": "Engine language", "choice": "Rust (Cargo workspace)", "version": "1.91", "docs": "https://doc.rust-lang.org/cargo/reference/workspaces.html", "verified": "2026-11-05"}, {"part": "HTTP API", "choice": "Axum", "version": "0.8", "docs": "https://docs.rs/axum/latest/axum/", "verified": "2026-11-05"}, {"part": "Web", "choice": "React + TypeScript + Vite", "version": "React 19", "docs": "https://vite.dev/guide/", "verified": "2026-11-05"}], "approach": {"layout": "Cargo workspace (crates/) plus apps/web; one shared API schema generated from Rust types", "notes": "Phase 1 is a walking skeleton: one snag goes in through the API and shows in the inbox. Example only: files are placeholders and every verify command is a no-op, so all commands run anywhere."}, "modules": [{"id": "core", "path": "crates/snag-core", "layer": "domain", "purpose": "Snag types and rules, no I/O", "dependsOn": [], "verify": "python -c \"pass\""}, {"id": "api", "path": "crates/snag-api", "layer": "interface", "purpose": "HTTP API over the core", "dependsOn": ["core"], "verify": "python -c \"pass\""}, {"id": "web", "path": "apps/web", "layer": "ui", "purpose": "Inbox where a person reviews snags", "dependsOn": ["api"], "verify": "python -c \"pass\""}, {"id": "repo", "path": "", "layer": "build", "purpose": "Workspace and CI configuration", "dependsOn": [], "verify": "python -c \"pass\""}], "phases": [{"id": "P1", "name": "Walking skeleton", "goal": "One snag created through the API appears in the inbox.", "exit": "cargo test --workspace and pnpm --dir apps/web test pass"}, {"id": "P2", "name": "Snag lifecycle", "goal": "Approve and close snags with history.", "exit": "Lifecycle tests pass"}], "roster": [{"id": "cto-architect", "kind": "agent", "harness": "agenticteam", "role": "Owns workspace config and the plan"}, {"id": "backend-lead", "kind": "agent", "harness": "agenticteam", "role": "Owns the core contract"}, {"id": "backend-engineer", "kind": "agent", "harness": "agenticteam", "role": "Builds crates"}, {"id": "frontend-engineer", "kind": "agent", "harness": "agenticteam", "role": "Builds the web inbox"}], "owners": [{"pattern": "*", "owner": "cto-architect", "note": "default owner for anything not listed below"}, {"pattern": "crates/", "owner": "backend-engineer"}, {"pattern": "crates/snag-core/src/lib.rs", "owner": "backend-lead", "note": "shared contract: the lead owns the core types"}, {"pattern": "apps/web/", "owner": "frontend-engineer"}], "decisions": [{"id": "D1", "decision": "Generate the TypeScript client from the API schema instead of writing types twice.", "why": "The web app and API cannot drift apart.", "source": "example"}], "rows": [{"path": "Cargo.toml", "kind": "file", "action": "create", "module": "repo", "phase": "P1", "purpose": "Workspace manifest listing the crates", "owner": "cto-architect", "rule": 0, "contract": true, "status": "verified", "present": true, "consumes": [], "produces": ["workspace members"], "dependsOn": [], "verify": "python -c \"pass\"", "ac": [], "by": null, "at": null, "note": null}, {"path": "crates/snag-core/Cargo.toml", "kind": "file", "action": "create", "module": "core", "phase": "P1", "purpose": "Core crate manifest", "owner": "backend-engineer", "rule": 1, "contract": false, "status": "ondisk", "present": true, "consumes": ["workspace members"], "produces": [], "dependsOn": [], "verify": "python -c \"pass\"", "ac": [], "by": null, "at": null, "note": null}, {"path": "crates/snag-core/src/lib.rs", "kind": "file", "action": "create", "module": "core", "phase": "P1", "purpose": "Snag, SnagId and SnagStatus types with validation", "owner": "backend-lead", "rule": 2, "contract": true, "status": "verified", "present": true, "consumes": [], "produces": ["type Snag", "fn validate_snag"], "dependsOn": [], "verify": "python -c \"pass\"", "ac": [], "by": null, "at": null, "note": null}, {"path": "crates/snag-api/Cargo.toml", "kind": "file", "action": "create", "module": "api", "phase": "P1", "purpose": "API crate manifest", "owner": "backend-engineer", "rule": 1, "contract": false, "status": "ondisk", "present": true, "consumes": ["workspace members"], "produces": [], "dependsOn": [], "verify": "python -c \"pass\"", "ac": [], "by": null, "at": null, "note": null}, {"path": "crates/snag-api/src/main.rs", "kind": "file", "action": "create", "module": "api", "phase": "P1", "purpose": "Axum server with POST /snags and GET /snags", "owner": "backend-engineer", "rule": 1, "contract": false, "status": "built", "present": true, "consumes": ["type Snag", "fn validate_snag"], "produces": ["POST /snags", "GET /snags"], "dependsOn": ["crates/snag-core/src/lib.rs"], "verify": "python -c \"pass\"", "ac": ["AC-1"], "by": "backend-engineer", "at": "2026-11-05T20:58:21Z", "note": null}, {"path": "apps/web/package.json", "kind": "file", "action": "create", "module": "web", "phase": "P1", "purpose": "Web app manifest and scripts", "owner": "frontend-engineer", "rule": 3, "contract": false, "status": "blocked", "present": true, "consumes": [], "produces": [], "dependsOn": [], "verify": "python -c \"pass\"", "ac": [], "by": "frontend-engineer", "at": "2026-11-05T20:58:22Z", "note": "waiting on the generated API client"}, {"path": "apps/web/src/api.ts", "kind": "file", "action": "create", "module": "web", "phase": "P1", "purpose": "Typed client for the snag endpoints", "owner": "frontend-engineer", "rule": 3, "contract": false, "status": "claimed", "present": false, "consumes": ["GET /snags"], "produces": ["listSnags()"], "dependsOn": ["crates/snag-api/src/main.rs"], "verify": "python -c \"pass\"", "ac": [], "by": "frontend-engineer", "at": "2026-11-05T20:58:21Z", "note": null}, {"path": "apps/web/src/Inbox.tsx", "kind": "file", "action": "create", "module": "web", "phase": "P1", "purpose": "Inbox list of open snags", "owner": "frontend-engineer", "rule": 3, "contract": false, "status": "planned", "present": false, "consumes": ["listSnags()"], "produces": [], "dependsOn": ["apps/web/src/api.ts"], "verify": "python -c \"pass\"", "ac": ["AC-1"], "by": null, "at": null, "note": null}, {"path": "crates/snag-core/src/lifecycle.rs", "kind": "file", "action": "create", "module": "core", "phase": "P2", "purpose": "Allowed status transitions and their history records", "owner": "backend-engineer", "rule": 1, "contract": false, "status": "planned", "present": false, "consumes": [], "produces": ["fn transition"], "dependsOn": ["crates/snag-core/src/lib.rs"], "verify": "python -c \"pass\"", "ac": [], "by": null, "at": null, "note": null}, {"path": "README.md", "kind": "file", "action": "modify", "module": "repo", "phase": "P1", "purpose": "How to run the skeleton locally", "owner": "cto-architect", "rule": 0, "contract": false, "status": "ondisk", "present": true, "consumes": [], "produces": [], "dependsOn": [], "verify": "python -c \"pass\"", "ac": [], "by": null, "at": null, "note": null}], "patterns": [{"id": "web-screen", "glob": "apps/web/src/screens/*Screen.tsx", "module": "web", "phase": "P2", "purpose": "One screen per inbox view", "instance": "A React component that loads its data through api.ts and renders loading, empty and error states", "owner": "frontend-engineer", "rule": 3, "examples": ["SnagDetailScreen", "ClosedSnagsScreen"], "instances": ["apps/web/src/screens/SnagDetailScreen.tsx"], "verify": "python -c \"pass\""}], "counts": {"planned": 2, "claimed": 1, "ondisk": 3, "built": 1, "verified": 2, "blocked": 1}, "unplanned": ["notes/todo.txt"], "missingModify": [], "syncedAt": "2026-11-05T21:04:59Z", "head": null, "states": ["planned", "claimed", "ondisk", "built", "verified", "blocked"], "glyph": {"planned": "○", "claimed": "◔", "ondisk": "◑", "built": "●", "verified": "✔", "blocked": "▲"}, "label": {"planned": "planned", "claimed": "claimed", "ondisk": "on disk", "built": "built", "verified": "verified", "blocked": "blocked"}}</script>
+<script>/* app-blueprint mind map renderer. Self-contained, no libraries.
+ *
+ * mindMap(host, root, opts) draws a two-sided mind map into `host` (an element) and returns
+ * { expandAll, collapseAll, zoom(f), fit() }.
+ *
+ * root: { label, title?, children?: [node] }  node: { label, title?, children?, collapsed?, color?, dot? }
+ * opts: {
+ *   palette:    CSS colours for the first-level branches, used in order,
+ *   collapseAt: depth from which nodes with children start collapsed (default: none),
+ *   dotColor:   function (node) -> CSS colour for a leaf's dot (default: node.dot or its branch colour),
+ *   onSelect:   function (node) called when a node is clicked or activated with Enter/Space
+ * }
+ * Clicking a node with children also expands or collapses it. Colours should be CSS variables so
+ * the map follows the page's light and dark themes.
+ */
+function mindMap(host, root, opts) {
+  opts = opts || {};
+  var NS = 'http://www.w3.org/2000/svg', ROW = 24, GX = 30, PAD = 18, GROUP_GAP = 10;
+  var palette = opts.palette || ['var(--accent)'];
+  var ctx = document.createElement('canvas').getContext('2d');
+  var family = getComputedStyle(document.body).fontFamily;
+  var st = { scale: 1, selected: null, vbW: 0, focusId: null };
+  var seq = 0;
+
+  function s(tag, attrs) { var n = document.createElementNS(NS, tag); for (var k in attrs) n.setAttribute(k, attrs[k]); return n; }
+  function measure(t, fs, fw) { ctx.font = fw + ' ' + fs + 'px ' + family; return ctx.measureText(t).width; }
+  function has(n) { return !!(n.children && n.children.length); }
+  function vis(n) { return has(n) && !n.collapsed ? n.children : []; }
+  function leafCount(n) { return has(n) ? n.children.reduce(function (a, c) { return a + leafCount(c); }, 0) : 1; }
+
+  (function init(n, d, color, i) {
+    n.depth = d;
+    n._id = 'mm' + (seq++);
+    if (d === 1) color = n.color || palette[i % palette.length];
+    n.branch = color || 'var(--accent)';
+    if (n.collapsed == null) n.collapsed = has(n) && d > 0 && opts.collapseAt != null && d >= opts.collapseAt;
+    (n.children || []).forEach(function (c, k) { init(c, d + 1, color, k); });
+  })(root, 0, null, 0);
+
+  function measureNode(n) {
+    n.fs = n.depth === 0 ? 15 : n.depth === 1 ? 13 : 12.5;
+    n.fw = n.depth <= 1 ? 600 : 400;
+    n.more = has(n) && n.collapsed ? '+' + leafCount(n) : '';
+    n.lw = measure(n.label, n.fs, n.fw);
+    n.mw = n.more ? measure(n.more, 11, 500) : 0;
+    var pad = n.depth === 0 ? 34 : n.depth === 1 ? 24 : 22;
+    n.w = Math.ceil(n.lw + (n.more ? n.mw + 8 : 0) + pad);
+    n.h = n.depth === 0 ? 36 : n.depth === 1 ? 26 : 20;
+  }
+  function height(n) { var k = vis(n); return k.length ? k.reduce(function (a, c) { return a + height(c); }, 0) : Math.max(ROW, n.h + 4); }
+
+  function edge(x1, y1, x2, y2, color, width) {
+    var dx = (x2 - x1) / 2;
+    var p = s('path', { d: 'M' + x1 + ',' + y1 + ' C' + (x1 + dx) + ',' + y1 + ' ' + (x2 - dx) + ',' + y2 + ' ' + x2 + ',' + y2, fill: 'none' });
+    p.style.stroke = color; p.style.strokeWidth = width; p.style.opacity = '0.7';
+    return p;
+  }
+  function text(x, y, str, fs, fw, fill, anchor) {
+    var t = s('text', { x: x, y: y + fs * 0.35, 'font-size': fs, 'font-weight': fw, 'text-anchor': anchor || 'start' });
+    t.textContent = str; t.style.fill = fill;
+    return t;
+  }
+
+  function act(n) {
+    if (has(n) && n.depth > 0) n.collapsed = !n.collapsed;
+    st.selected = n; st.focusId = n._id;
+    if (opts.onSelect) opts.onSelect(n);
+    draw();
+  }
+
+  function draw() {
+    (function walk(n) { measureNode(n); vis(n).forEach(walk); })(root);
+    var top = vis(root), total = top.reduce(function (a, c) { return a + height(c); }, 0), acc = 0, right = [], left = [];
+    top.forEach(function (c) { if (acc < total / 2 || right.length === 0) { right.push(c); acc += height(c); } else left.push(c); });
+    var sides = [[right, 1], [left, -1]], all = [], sideH = [0, 0];
+    sides.forEach(function (sd, si) {
+      var nodes = sd[0], dir = sd[1], colW = {}, off = {}, cursor = 0;
+      (function cols(list) { list.forEach(function (n) { n.side = dir; colW[n.depth] = Math.max(colW[n.depth] || 0, n.w); cols(vis(n)); }); })(nodes);
+      off[1] = root.w / 2 + GX;
+      for (var d = 2; colW[d] != null; d++) off[d] = off[d - 1] + colW[d - 1] + GX;
+      function place(n) {
+        var k = vis(n);
+        if (!k.length) { n.y = cursor + height(n) / 2; cursor += height(n); }
+        else { k.forEach(place); n.y = (k[0].y + k[k.length - 1].y) / 2; }
+        n.x = dir > 0 ? off[n.depth] : -off[n.depth] - n.w;
+        all.push(n);
+      }
+      nodes.forEach(function (n, i) { if (i) cursor += GROUP_GAP; place(n); });
+      sideH[si] = cursor;
+    });
+    var H = Math.max(sideH[0], sideH[1], root.h + 8);
+    sides.forEach(function (sd, si) {
+      var shift = (H - sideH[si]) / 2;
+      (function sh(list) { list.forEach(function (n) { n.y += shift; sh(vis(n)); }); })(sd[0]);
+    });
+    root.x = -root.w / 2; root.y = H / 2; root.side = 1; all.push(root);
+
+    var minX = Math.min.apply(null, all.map(function (n) { return n.x; }));
+    var maxX = Math.max.apply(null, all.map(function (n) { return n.x + n.w; }));
+    var vbW = maxX - minX + PAD * 2, vbH = H + PAD * 2;
+    st.vbW = vbW;
+    var svg = s('svg', { viewBox: (minX - PAD) + ' ' + (-PAD) + ' ' + vbW + ' ' + vbH, width: Math.round(vbW * st.scale), height: Math.round(vbH * st.scale), role: 'tree', 'aria-label': 'Mind map of ' + root.label });
+    var edges = s('g', {}), nodesG = s('g', {});
+    svg.appendChild(edges); svg.appendChild(nodesG);
+
+    all.forEach(function (n) {
+      vis(n).forEach(function (c) {
+        var x1 = n.depth === 0 ? (c.side > 0 ? n.x + n.w : n.x) : (c.side > 0 ? n.x + n.w : n.x);
+        var x2 = c.side > 0 ? c.x : c.x + c.w;
+        edges.appendChild(edge(x1, n.y, x2, c.y, c.branch, c.depth === 1 ? 2.4 : 1.4));
+      });
+    });
+
+    all.forEach(function (n) {
+      var g = s('g', { 'class': 'mm-node', tabindex: '0', role: 'treeitem', 'data-id': n._id,
+        'aria-label': n.label + (has(n) ? (n.collapsed ? ', collapsed, ' + leafCount(n) + ' items' : ', expanded') : '') });
+      if (has(n) && n.depth > 0) g.setAttribute('aria-expanded', String(!n.collapsed));
+      var tt = s('title', {}); tt.textContent = n.title || n.label; g.appendChild(tt);
+      var selected = st.selected === n;
+      if (n.depth === 0) {
+        var r0 = s('rect', { x: n.x, y: n.y - n.h / 2, width: n.w, height: n.h, rx: n.h / 2 }); r0.style.fill = 'var(--accent)';
+        g.appendChild(r0);
+        g.appendChild(text(n.x + n.w / 2, n.y, n.label, n.fs, n.fw, 'var(--paper)', 'middle'));
+      } else if (n.depth === 1) {
+        var r1 = s('rect', { x: n.x, y: n.y - n.h / 2, width: n.w, height: n.h, rx: 7 });
+        r1.style.fill = selected ? 'var(--accent-soft)' : 'var(--paper)'; r1.style.stroke = n.branch; r1.style.strokeWidth = '1.6';
+        g.appendChild(r1);
+        g.appendChild(text(n.x + 12, n.y, n.label, n.fs, n.fw, 'var(--ink)'));
+        if (n.more) g.appendChild(text(n.x + 12 + n.lw + 8, n.y, n.more, 11, 500, 'var(--sub)'));
+      } else {
+        if (selected) { var hl = s('rect', { x: n.x + 1, y: n.y - 10, width: n.w - 2, height: 20, rx: 5 }); hl.style.fill = 'var(--accent-soft)'; g.appendChild(hl); }
+        var dotX = n.side > 0 ? n.x + 8 : n.x + n.w - 8;
+        var dot = s('circle', { cx: dotX, cy: n.y, r: has(n) ? 4.5 : 3.8 });
+        dot.style.fill = opts.dotColor ? opts.dotColor(n) : (n.dot || n.branch);
+        if (has(n)) { dot.style.stroke = n.branch; dot.style.strokeWidth = '1.5'; }
+        g.appendChild(dot);
+        if (n.side > 0) {
+          g.appendChild(text(n.x + 17, n.y, n.label, n.fs, n.fw, 'var(--ink)'));
+          if (n.more) g.appendChild(text(n.x + 17 + n.lw + 6, n.y, n.more, 11, 500, 'var(--sub)'));
+        } else {
+          g.appendChild(text(n.x + n.w - 17, n.y, n.label, n.fs, n.fw, 'var(--ink)', 'end'));
+          if (n.more) g.appendChild(text(n.x + 3, n.y, n.more, 11, 500, 'var(--sub)'));
+        }
+      }
+      if (has(n) || opts.onSelect) g.style.cursor = 'pointer';
+      g.addEventListener('click', function () { act(n); });
+      g.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); act(n); } });
+      nodesG.appendChild(g);
+    });
+
+    host.textContent = '';
+    host.appendChild(svg);
+    if (st.focusId) { var f = svg.querySelector('[data-id="' + st.focusId + '"]'); if (f) f.focus({ preventScroll: true }); }
+  }
+
+  function setAll(collapsed) { (function w(n) { if (has(n) && n.depth > 0) n.collapsed = collapsed; (n.children || []).forEach(w); })(root); }
+  draw();
+  return {
+    expandAll: function () { setAll(false); draw(); },
+    collapseAll: function () { setAll(true); draw(); },
+    zoom: function (f) { st.scale = Math.max(0.3, Math.min(2.5, st.scale * f)); draw(); },
+    fit: function () {
+      // Measure twice: fitting can make the map tall enough to add a vertical scrollbar,
+      // which narrows the box it was fitted to.
+      for (var i = 0; i < 2; i++) {
+        var cs = getComputedStyle(host);
+        var w = host.clientWidth - parseFloat(cs.paddingLeft || 0) - parseFloat(cs.paddingRight || 0) - 2;
+        if (w <= 50 || !st.vbW) return;
+        st.scale = Math.min(1, w / st.vbW); draw();
+        if (host.scrollWidth <= host.clientWidth + 1) return;
+      }
+    }
+  };
+}
+</script>
 <script>
 (function () {
   var D = JSON.parse(document.getElementById('bp').textContent);
@@ -198,7 +401,7 @@ ul.plain { margin: 0; padding-left: 18px; display: grid; gap: 3px; font-size: 13
   $('meta').textContent = rows.length + ' planned files · ' + D.patterns.length + ' patterns · ' + (D.syncedAt ? 'synced ' + D.syncedAt.replace('T', ' ').replace('Z', ' UTC') : 'never synced') + (D.head ? ' at ' + D.head : '');
   var tb = stack(C, total); $('topbar').replaceWith(tb); tb.id = 'topbar';
 
-  var TABS = [['overview', 'Overview'], ['tree', 'Tree'], ['roster', 'Roster'], ['phases', 'Phases'], ['modules', 'Modules'], ['drift', 'Drift' + (D.unplanned.length ? ' (' + D.unplanned.length + ')' : '')]];
+  var TABS = [['overview', 'Overview'], ['mindmap', 'Mind map'], ['tree', 'Tree'], ['roster', 'Roster'], ['phases', 'Phases'], ['modules', 'Modules'], ['drift', 'Drift' + (D.unplanned.length ? ' (' + D.unplanned.length + ')' : '')]];
   TABS.forEach(function (t) {
     var b = el('button', { role: 'tab', type: 'button', id: 't-' + t[0], 'aria-controls': 'v-' + t[0], text: t[1] });
     b.addEventListener('click', function () { show(t[0]); try { history.replaceState(null, '', '#' + t[0]); } catch (e) {} window.scrollTo(0, 0); });
@@ -270,12 +473,13 @@ ul.plain { margin: 0; padding-left: 18px; display: grid; gap: 3px; font-size: 13
     $('tree').textContent = '';
     $('tree').appendChild(items.length ? build(root, '') : el('p', { cls: 'empty', text: 'No files match these filters.' }));
   }
-  function chipList(list) {
+  function chipList(list, target) {
     var box = el('div', { cls: 'chips' });
-    list.forEach(function (p) { var c = el('button', { cls: 'chip', type: 'button', text: p }); if (byPath[p]) c.addEventListener('click', function () { selected = p; detail(byPath[p]); drawTree(); }); box.appendChild(c); });
+    list.forEach(function (p) { var c = el('button', { cls: 'chip', type: 'button', text: p }); if (byPath[p]) c.addEventListener('click', function () { selected = p; detail(byPath[p], target); drawTree(); }); box.appendChild(c); });
     return list.length ? box : el('span', { cls: 'empty', text: 'none' });
   }
-  function detail(r) {
+  function detail(r, target) {
+    target = target || 'detail';
     var rule = r.rule != null ? D.owners[r.rule] : null;
     var dl = el('dl');
     function add(k, v) { dl.appendChild(el('dt', { text: k })); dl.appendChild(el('dd', null, [v])); }
@@ -285,16 +489,94 @@ ul.plain { margin: 0; padding-left: 18px; display: grid; gap: 3px; font-size: 13
     add('Module', r.module); add('Phase', r.phase);
     add('Owner', r.owner + (rule ? ' (rule ' + (r.rule + 1) + ': ' + rule.pattern + ')' : ''));
     if (r.note) add('Note', r.note);
-    add('Produces', chipList(r.produces)); add('Consumes', chipList(r.consumes));
-    add('Depends on', chipList(r.dependsOn)); add('Needed by', chipList(dependents[r.path] || []));
+    add('Produces', chipList(r.produces, target)); add('Consumes', chipList(r.consumes, target));
+    add('Depends on', chipList(r.dependsOn, target)); add('Needed by', chipList(dependents[r.path] || [], target));
     add('Verify', el('code', { text: r.verify || '-' }));
     if (r.ac && r.ac.length) add('Acceptance', r.ac.join(', '));
-    $('detail').textContent = '';
-    $('detail').appendChild(el('h3', null, [el('code', { text: r.path })]));
-    $('detail').appendChild(dl);
+    $(target).textContent = '';
+    $(target).appendChild(el('h3', null, [el('code', { text: r.path })]));
+    $(target).appendChild(dl);
   }
   ['f-q', 'f-owner', 'f-phase', 'f-status'].forEach(function (id) { $(id).addEventListener('input', drawTree); });
   drawTree();
+
+  // mind map: the app at the centre, branches by module, owner or phase, files coloured by status
+  var MM = null;
+  function rel(base, p) { return base && p.indexOf(base + '/') === 0 ? p.slice(base.length + 1) : p; }
+  function fileLeaf(r, base) { return { label: rel(base, r.path) + (r.contract ? ' ★' : ''), title: r.path + ' · ' + L[r.status] + ' · ' + r.owner + ' · ' + r.purpose, row: r }; }
+  function patLeaf(p, base) { return { label: '⟨' + rel(base, p.glob) + '⟩', title: 'Pattern ' + p.id + ': ' + p.purpose + ' · ' + p.instances.length + ' on disk', pat: p, dot: 'var(--sub)' }; }
+  function modBase(id) { var m = D.modules.filter(function (x) { return x.id === id; })[0]; return m && m.path ? m.path.replace(/\/$/, '') : ''; }
+  function byModule(list, pats) {
+    return D.modules.map(function (m) {
+      var base = modBase(m.id);
+      var kids = list.filter(function (r) { return r.module === m.id; }).map(function (r) { return fileLeaf(r, base); })
+        .concat(pats.filter(function (p) { return p.module === m.id; }).map(function (p) { return patLeaf(p, base); }));
+      return { label: m.id + (m.layer ? ' · ' + m.layer : ''), title: m.purpose || m.id, children: kids, mod: m };
+    }).filter(function (n) { return n.children.length; });
+  }
+  function buildMindMap(by) {
+    var root = { label: D.app.name || 'App', title: D.app.summary || '' , children: [] };
+    if (by === 'owner') {
+      root.children = D.roster.map(function (o) {
+        var mine = rows.filter(function (r) { return r.owner === o.id; });
+        var pats = D.patterns.filter(function (p) { return p.owner === o.id; });
+        var kids = D.phases.map(function (ph) {
+          var f = mine.filter(function (r) { return r.phase === ph.id; }).map(function (r) { return fileLeaf(r, ''); })
+            .concat(pats.filter(function (p) { return p.phase === ph.id; }).map(function (p) { return patLeaf(p, ''); }));
+          return { label: ph.id + ' ' + (ph.name || ''), title: ph.goal || '', children: f };
+        }).filter(function (n) { return n.children.length; });
+        return { label: o.id, title: (o.role || o.kind || '') + (o.harness ? ' · ' + o.harness : ''), children: kids };
+      }).filter(function (n) { return n.children.length; });
+    } else if (by === 'phase') {
+      root.children = D.phases.map(function (ph) {
+        return { label: ph.id + ' ' + (ph.name || ''), title: ph.goal || '',
+          children: byModule(rows.filter(function (r) { return r.phase === ph.id; }), D.patterns.filter(function (p) { return p.phase === ph.id; })) };
+      }).filter(function (n) { return n.children.length; });
+    } else {
+      root.children = byModule(rows, D.patterns);
+    }
+    if (D.unplanned.length) {
+      root.children.push({ label: 'Unplanned (' + D.unplanned.length + ')', title: 'On disk but not in the blueprint', color: 'var(--warn)', collapsed: true,
+        children: D.unplanned.slice(0, 80).map(function (p) { return { label: p, dot: 'var(--warn)', title: 'Unplanned: ' + p }; }) });
+    }
+    return root;
+  }
+  function drawMindMap() {
+    var tree = buildMindMap($('mm-by').value);
+    var many = rows.length + D.patterns.length > 120;
+    MM = mindMap($('mm-host'), tree, {
+      palette: ['var(--b1)', 'var(--b2)', 'var(--b3)', 'var(--b4)', 'var(--b5)', 'var(--b6)'],
+      collapseAt: many ? 1 : ($('mm-by').value === 'module' ? null : 2),
+      dotColor: function (n) { return n.row ? COLOR[n.row.status] : (n.dot || n.branch); },
+      onSelect: function (n) {
+        if (n.row) { selected = n.row.path; detail(n.row, 'mm-detail'); }
+        else if (n.pat) {
+          var p = n.pat; $('mm-detail').textContent = '';
+          $('mm-detail').appendChild(el('h3', null, [el('code', { text: p.glob })]));
+          $('mm-detail').appendChild(el('p', { text: 'Pattern ' + p.id + ': ' + p.purpose }));
+          $('mm-detail').appendChild(el('p', { cls: 'meta', text: 'One instance: ' + p.instance }));
+          $('mm-detail').appendChild(el('p', { cls: 'meta', text: p.instances.length + ' on disk · ' + p.owner + ' · ' + p.phase }));
+        } else if (n.mod) {
+          var m = n.mod, mr = rows.filter(function (r) { return r.module === m.id; }); $('mm-detail').textContent = '';
+          $('mm-detail').appendChild(el('h3', { text: m.id }));
+          $('mm-detail').appendChild(el('p', { text: m.purpose || '' }));
+          $('mm-detail').appendChild(stack(count(mr), mr.length || 1));
+          $('mm-detail').appendChild(el('p', { cls: 'meta', text: (m.path ? m.path + ' · ' : '') + (m.layer || '') + ((m.dependsOn || []).length ? ' · depends on ' + m.dependsOn.join(', ') : '') }));
+        }
+      }
+    });
+    if ($('v-mindmap').classList.contains('on')) MM.fit();
+  }
+  $('mm-by').addEventListener('change', drawMindMap);
+  $('mm-expand').addEventListener('click', function () { MM.expandAll(); });
+  $('mm-collapse').addEventListener('click', function () { MM.collapseAll(); });
+  $('mm-in').addEventListener('click', function () { MM.zoom(1.2); });
+  $('mm-out').addEventListener('click', function () { MM.zoom(1 / 1.2); });
+  $('mm-fit').addEventListener('click', function () { MM.fit(); });
+  $('t-mindmap').addEventListener('click', function () { if (MM) MM.fit(); });
+  var mmResize = null;
+  window.addEventListener('resize', function () { clearTimeout(mmResize); mmResize = setTimeout(function () { if (MM && $('v-mindmap').classList.contains('on')) MM.fit(); }, 150); });
+  drawMindMap();
 
   // roster
   function table(id, head, body) {
@@ -385,6 +667,7 @@ ul.plain { margin: 0; padding-left: 18px; display: grid; gap: 3px; font-size: 13
   } else $('patterns').appendChild(el('p', { cls: 'empty', text: 'No repeated-file patterns.' }));
 
   show(location.hash.slice(1) || 'overview');
+  if (location.hash === '#mindmap' && MM) MM.fit();
 })();
 </script>
 </body>

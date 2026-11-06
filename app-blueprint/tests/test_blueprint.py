@@ -214,6 +214,10 @@ class BlueprintTest(unittest.TestCase):
         self.assertIn("⟨pattern web-screen", structure)
         html = (self.dir / ".blueprint" / "map.html").read_text(encoding="utf-8")
         self.assertNotIn("__BLUEPRINT_DATA__", html)
+        self.assertNotIn("/*__MINDMAP_JS__*/", html)
+        self.assertIn("function mindMap(host, root, opts)", html)
+        self.assertIn('id="v-mindmap"', html)
+        self.assertTrue((self.dir / ".blueprint" / "bin" / "mindmap.js").exists())
         self.assertIn("Snag Desk", html)
         self.plan["files"][0]["purpose"] = "Workspace manifest, changed"
         self.save()

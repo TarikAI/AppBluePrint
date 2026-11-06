@@ -14,6 +14,7 @@
   --accent: #0d4754; --accent-soft: #e2eef1;
   --s-planned: #c3ccd0; --s-claimed: #8a5a00; --s-ondisk: #2c5d9c; --s-built: #0d4754; --s-verified: #1f7a4d; --s-blocked: #a33a2b;
   --warn: #8a5a00; --warn-bg: #fbefd6; --bad: #a33a2b; --bad-bg: #f9e4e0; --ok: #1f7a4d; --ok-bg: #e3f3ea;
+  --b1: #0d4754; --b2: #2c5d9c; --b3: #6a4a9c; --b4: #136b6b; --b5: #4a5a6f; --b6: #7a4f2a;
   --font-display: "IBM Plex Sans Condensed", "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
   --font-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
   --font-mono: "IBM Plex Mono", Consolas, monospace;
@@ -24,6 +25,7 @@
     --bg: #0f1619; --paper: #162024; --ink: #e3ecef; --sub: #9fb1b7; --line: #263439; --accent: #7cc4d4; --accent-soft: #1b343b;
     --s-planned: #3a4a50; --s-claimed: #e8b85a; --s-ondisk: #8db6ef; --s-built: #7cc4d4; --s-verified: #6fd19c; --s-blocked: #f08c7c;
     --warn: #e8b85a; --warn-bg: #3a2d12; --bad: #f08c7c; --bad-bg: #3d1f1a; --ok: #6fd19c; --ok-bg: #173327;
+    --b1: #7cc4d4; --b2: #8db6ef; --b3: #c2a6ee; --b4: #6fc7c7; --b5: #a9b6c6; --b6: #d6a77a;
     color-scheme: dark;
   }
 }
@@ -31,6 +33,7 @@
   --bg: #0f1619; --paper: #162024; --ink: #e3ecef; --sub: #9fb1b7; --line: #263439; --accent: #7cc4d4; --accent-soft: #1b343b;
   --s-planned: #3a4a50; --s-claimed: #e8b85a; --s-ondisk: #8db6ef; --s-built: #7cc4d4; --s-verified: #6fd19c; --s-blocked: #f08c7c;
   --warn: #e8b85a; --warn-bg: #3a2d12; --bad: #f08c7c; --bad-bg: #3d1f1a; --ok: #6fd19c; --ok-bg: #173327;
+  --b1: #7cc4d4; --b2: #8db6ef; --b3: #c2a6ee; --b4: #6fc7c7; --b5: #a9b6c6; --b6: #d6a77a;
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
@@ -110,6 +113,14 @@ td.num { text-align: center; font-family: var(--font-mono); font-variant-numeric
 svg text { font-family: var(--font-body); }
 .empty { color: var(--sub); font-size: 13px; }
 ul.plain { margin: 0; padding-left: 18px; display: grid; gap: 3px; font-size: 13px; }
+.mm-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.mm-bar button { font: 500 12.5px var(--font-body); border: 1px solid var(--line); background: var(--paper); color: var(--ink); padding: 5px 10px; border-radius: 6px; cursor: pointer; }
+.mm-bar button:hover { border-color: var(--accent); }
+.mm-host { overflow: auto; max-height: 76vh; background: var(--paper); border: 1px solid var(--line); border-radius: 8px; padding: 6px; }
+.mm-host svg { display: block; margin: 0 auto; }
+.mm-host svg text { font-family: var(--font-body); }
+.mm-node:focus { outline: none; }
+.mm-node:focus-visible rect, .mm-node:focus-visible circle { stroke: var(--accent); stroke-width: 2.5px; }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 </style>
 </head>
@@ -130,6 +141,23 @@ ul.plain { margin: 0; padding-left: 18px; display: grid; gap: 3px; font-size: 13
     <div class="grid two">
       <div class="card"><h2>Ready to build next</h2><p class="meta">Open files in the earliest unfinished phase whose dependencies are built.</p><div id="ready"></div></div>
       <div class="card"><h2>Needs attention</h2><div id="attention"></div></div>
+    </div>
+  </section>
+
+  <section class="view" id="v-mindmap">
+    <div class="mm-bar">
+      <label class="meta" for="mm-by">Branches</label>
+      <select id="mm-by"><option value="module">Modules</option><option value="owner">Owners</option><option value="phase">Phases</option></select>
+      <button type="button" id="mm-expand">Expand all</button>
+      <button type="button" id="mm-collapse">Branches only</button>
+      <button type="button" id="mm-out" aria-label="Zoom out">−</button>
+      <button type="button" id="mm-in" aria-label="Zoom in">+</button>
+      <button type="button" id="mm-fit">Fit</button>
+      <span class="meta">Click a branch to open or close it; click a file for its details.</span>
+    </div>
+    <div class="split">
+      <div class="mm-host" id="mm-host"></div>
+      <div class="card detail" id="mm-detail"><p class="empty">Select a file to see its purpose, owner, contracts and dependencies.</p></div>
     </div>
   </section>
 
@@ -170,6 +198,7 @@ ul.plain { margin: 0; padding-left: 18px; display: grid; gap: 3px; font-size: 13
   </section>
 </main>
 <script id="bp" type="application/json">__BLUEPRINT_DATA__</script>
+<script>/*__MINDMAP_JS__*/</script>
 <script>
 (function () {
   var D = JSON.parse(document.getElementById('bp').textContent);
@@ -198,7 +227,7 @@ ul.plain { margin: 0; padding-left: 18px; display: grid; gap: 3px; font-size: 13
   $('meta').textContent = rows.length + ' planned files · ' + D.patterns.length + ' patterns · ' + (D.syncedAt ? 'synced ' + D.syncedAt.replace('T', ' ').replace('Z', ' UTC') : 'never synced') + (D.head ? ' at ' + D.head : '');
   var tb = stack(C, total); $('topbar').replaceWith(tb); tb.id = 'topbar';
 
-  var TABS = [['overview', 'Overview'], ['tree', 'Tree'], ['roster', 'Roster'], ['phases', 'Phases'], ['modules', 'Modules'], ['drift', 'Drift' + (D.unplanned.length ? ' (' + D.unplanned.length + ')' : '')]];
+  var TABS = [['overview', 'Overview'], ['mindmap', 'Mind map'], ['tree', 'Tree'], ['roster', 'Roster'], ['phases', 'Phases'], ['modules', 'Modules'], ['drift', 'Drift' + (D.unplanned.length ? ' (' + D.unplanned.length + ')' : '')]];
   TABS.forEach(function (t) {
     var b = el('button', { role: 'tab', type: 'button', id: 't-' + t[0], 'aria-controls': 'v-' + t[0], text: t[1] });
     b.addEventListener('click', function () { show(t[0]); try { history.replaceState(null, '', '#' + t[0]); } catch (e) {} window.scrollTo(0, 0); });
@@ -270,12 +299,13 @@ ul.plain { margin: 0; padding-left: 18px; display: grid; gap: 3px; font-size: 13
     $('tree').textContent = '';
     $('tree').appendChild(items.length ? build(root, '') : el('p', { cls: 'empty', text: 'No files match these filters.' }));
   }
-  function chipList(list) {
+  function chipList(list, target) {
     var box = el('div', { cls: 'chips' });
-    list.forEach(function (p) { var c = el('button', { cls: 'chip', type: 'button', text: p }); if (byPath[p]) c.addEventListener('click', function () { selected = p; detail(byPath[p]); drawTree(); }); box.appendChild(c); });
+    list.forEach(function (p) { var c = el('button', { cls: 'chip', type: 'button', text: p }); if (byPath[p]) c.addEventListener('click', function () { selected = p; detail(byPath[p], target); drawTree(); }); box.appendChild(c); });
     return list.length ? box : el('span', { cls: 'empty', text: 'none' });
   }
-  function detail(r) {
+  function detail(r, target) {
+    target = target || 'detail';
     var rule = r.rule != null ? D.owners[r.rule] : null;
     var dl = el('dl');
     function add(k, v) { dl.appendChild(el('dt', { text: k })); dl.appendChild(el('dd', null, [v])); }
@@ -285,16 +315,94 @@ ul.plain { margin: 0; padding-left: 18px; display: grid; gap: 3px; font-size: 13
     add('Module', r.module); add('Phase', r.phase);
     add('Owner', r.owner + (rule ? ' (rule ' + (r.rule + 1) + ': ' + rule.pattern + ')' : ''));
     if (r.note) add('Note', r.note);
-    add('Produces', chipList(r.produces)); add('Consumes', chipList(r.consumes));
-    add('Depends on', chipList(r.dependsOn)); add('Needed by', chipList(dependents[r.path] || []));
+    add('Produces', chipList(r.produces, target)); add('Consumes', chipList(r.consumes, target));
+    add('Depends on', chipList(r.dependsOn, target)); add('Needed by', chipList(dependents[r.path] || [], target));
     add('Verify', el('code', { text: r.verify || '-' }));
     if (r.ac && r.ac.length) add('Acceptance', r.ac.join(', '));
-    $('detail').textContent = '';
-    $('detail').appendChild(el('h3', null, [el('code', { text: r.path })]));
-    $('detail').appendChild(dl);
+    $(target).textContent = '';
+    $(target).appendChild(el('h3', null, [el('code', { text: r.path })]));
+    $(target).appendChild(dl);
   }
   ['f-q', 'f-owner', 'f-phase', 'f-status'].forEach(function (id) { $(id).addEventListener('input', drawTree); });
   drawTree();
+
+  // mind map: the app at the centre, branches by module, owner or phase, files coloured by status
+  var MM = null;
+  function rel(base, p) { return base && p.indexOf(base + '/') === 0 ? p.slice(base.length + 1) : p; }
+  function fileLeaf(r, base) { return { label: rel(base, r.path) + (r.contract ? ' ★' : ''), title: r.path + ' · ' + L[r.status] + ' · ' + r.owner + ' · ' + r.purpose, row: r }; }
+  function patLeaf(p, base) { return { label: '⟨' + rel(base, p.glob) + '⟩', title: 'Pattern ' + p.id + ': ' + p.purpose + ' · ' + p.instances.length + ' on disk', pat: p, dot: 'var(--sub)' }; }
+  function modBase(id) { var m = D.modules.filter(function (x) { return x.id === id; })[0]; return m && m.path ? m.path.replace(/\/$/, '') : ''; }
+  function byModule(list, pats) {
+    return D.modules.map(function (m) {
+      var base = modBase(m.id);
+      var kids = list.filter(function (r) { return r.module === m.id; }).map(function (r) { return fileLeaf(r, base); })
+        .concat(pats.filter(function (p) { return p.module === m.id; }).map(function (p) { return patLeaf(p, base); }));
+      return { label: m.id + (m.layer ? ' · ' + m.layer : ''), title: m.purpose || m.id, children: kids, mod: m };
+    }).filter(function (n) { return n.children.length; });
+  }
+  function buildMindMap(by) {
+    var root = { label: D.app.name || 'App', title: D.app.summary || '' , children: [] };
+    if (by === 'owner') {
+      root.children = D.roster.map(function (o) {
+        var mine = rows.filter(function (r) { return r.owner === o.id; });
+        var pats = D.patterns.filter(function (p) { return p.owner === o.id; });
+        var kids = D.phases.map(function (ph) {
+          var f = mine.filter(function (r) { return r.phase === ph.id; }).map(function (r) { return fileLeaf(r, ''); })
+            .concat(pats.filter(function (p) { return p.phase === ph.id; }).map(function (p) { return patLeaf(p, ''); }));
+          return { label: ph.id + ' ' + (ph.name || ''), title: ph.goal || '', children: f };
+        }).filter(function (n) { return n.children.length; });
+        return { label: o.id, title: (o.role || o.kind || '') + (o.harness ? ' · ' + o.harness : ''), children: kids };
+      }).filter(function (n) { return n.children.length; });
+    } else if (by === 'phase') {
+      root.children = D.phases.map(function (ph) {
+        return { label: ph.id + ' ' + (ph.name || ''), title: ph.goal || '',
+          children: byModule(rows.filter(function (r) { return r.phase === ph.id; }), D.patterns.filter(function (p) { return p.phase === ph.id; })) };
+      }).filter(function (n) { return n.children.length; });
+    } else {
+      root.children = byModule(rows, D.patterns);
+    }
+    if (D.unplanned.length) {
+      root.children.push({ label: 'Unplanned (' + D.unplanned.length + ')', title: 'On disk but not in the blueprint', color: 'var(--warn)', collapsed: true,
+        children: D.unplanned.slice(0, 80).map(function (p) { return { label: p, dot: 'var(--warn)', title: 'Unplanned: ' + p }; }) });
+    }
+    return root;
+  }
+  function drawMindMap() {
+    var tree = buildMindMap($('mm-by').value);
+    var many = rows.length + D.patterns.length > 120;
+    MM = mindMap($('mm-host'), tree, {
+      palette: ['var(--b1)', 'var(--b2)', 'var(--b3)', 'var(--b4)', 'var(--b5)', 'var(--b6)'],
+      collapseAt: many ? 1 : ($('mm-by').value === 'module' ? null : 2),
+      dotColor: function (n) { return n.row ? COLOR[n.row.status] : (n.dot || n.branch); },
+      onSelect: function (n) {
+        if (n.row) { selected = n.row.path; detail(n.row, 'mm-detail'); }
+        else if (n.pat) {
+          var p = n.pat; $('mm-detail').textContent = '';
+          $('mm-detail').appendChild(el('h3', null, [el('code', { text: p.glob })]));
+          $('mm-detail').appendChild(el('p', { text: 'Pattern ' + p.id + ': ' + p.purpose }));
+          $('mm-detail').appendChild(el('p', { cls: 'meta', text: 'One instance: ' + p.instance }));
+          $('mm-detail').appendChild(el('p', { cls: 'meta', text: p.instances.length + ' on disk · ' + p.owner + ' · ' + p.phase }));
+        } else if (n.mod) {
+          var m = n.mod, mr = rows.filter(function (r) { return r.module === m.id; }); $('mm-detail').textContent = '';
+          $('mm-detail').appendChild(el('h3', { text: m.id }));
+          $('mm-detail').appendChild(el('p', { text: m.purpose || '' }));
+          $('mm-detail').appendChild(stack(count(mr), mr.length || 1));
+          $('mm-detail').appendChild(el('p', { cls: 'meta', text: (m.path ? m.path + ' · ' : '') + (m.layer || '') + ((m.dependsOn || []).length ? ' · depends on ' + m.dependsOn.join(', ') : '') }));
+        }
+      }
+    });
+    if ($('v-mindmap').classList.contains('on')) MM.fit();
+  }
+  $('mm-by').addEventListener('change', drawMindMap);
+  $('mm-expand').addEventListener('click', function () { MM.expandAll(); });
+  $('mm-collapse').addEventListener('click', function () { MM.collapseAll(); });
+  $('mm-in').addEventListener('click', function () { MM.zoom(1.2); });
+  $('mm-out').addEventListener('click', function () { MM.zoom(1 / 1.2); });
+  $('mm-fit').addEventListener('click', function () { MM.fit(); });
+  $('t-mindmap').addEventListener('click', function () { if (MM) MM.fit(); });
+  var mmResize = null;
+  window.addEventListener('resize', function () { clearTimeout(mmResize); mmResize = setTimeout(function () { if (MM && $('v-mindmap').classList.contains('on')) MM.fit(); }, 150); });
+  drawMindMap();
 
   // roster
   function table(id, head, body) {
@@ -385,6 +493,7 @@ ul.plain { margin: 0; padding-left: 18px; display: grid; gap: 3px; font-size: 13
   } else $('patterns').appendChild(el('p', { cls: 'empty', text: 'No repeated-file patterns.' }));
 
   show(location.hash.slice(1) || 'overview');
+  if (location.hash === '#mindmap' && MM) MM.fit();
 })();
 </script>
 </body>
