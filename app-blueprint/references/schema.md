@@ -17,7 +17,7 @@
 | `owners[]` | objects | ordered owner rules, last match wins |
 | `roster[]` | objects | everyone who can own files |
 | `decisions[]` | objects | `id`, `decision`, `why`, `source` |
-| `ignore[]` | globs | extra paths `sync` never reports as drift |
+| `ignore[]` | globs | extra paths `sync` never reports as drift. A planned file is never ignored. A path that matches a pattern is kept only when every ignore rule that matches the path ends in `/` with no wildcard (like `src/legacy/`) and the pattern's glob names every folder of each such rule (`src/legacy/**/*.py` does, `src/**/*.py` does not). Wildcard rules such as `*.lock` yield only to individually planned files |
 | `stores[]` | objects | databases and storage services, see below |
 | `resources[]` | objects | tables, env vars, APIs and other things the code connects to, see below |
 
@@ -100,6 +100,7 @@ Owner rule: `{ "pattern": "<glob>", "owner": "<roster id>", "override": true|fal
 - A later rule that **partly** overlaps an earlier rule of a different owner (it shares some paths and also takes paths the earlier rule does not cover) makes ownership depend on rule order. `validate` reports it as an error unless the later rule has `"override": true`.
 - Every planned file and every pattern glob must have an owner.
 - A rule that matches nothing, or never wins, is a warning.
+- A bare folder name (`docs/`, `agents/`) matches every folder of that name at any depth, as in CODEOWNERS. Write `/docs/` for the root folder only. `validate` warns when such a rule matches planned items both in the root folder and in a nested one.
 
 Roster entry: `{ "id", "kind": "agent"|"human", "harness": "agenticteam"|"claude-code"|"codex"|..., "role", "github": "@handle", "lane" }`. With `validate --team team.json`, every `harness: "agenticteam"` agent must exist in team.json, and owners of files must have `workspace-write` access.
 
@@ -110,7 +111,8 @@ Roster entry: `{ "id", "kind": "agent"|"human", "harness": "agenticteam"|"claude
 | `*` | anything inside one folder level |
 | `**` | any number of folders |
 | `?` | one character |
-| `docs/` or `docs` | the folder and everything inside it |
+| `docs/` or `docs` | any folder named docs, at any depth, and everything inside it |
+| `/docs/` | only the root folder docs, and everything inside it |
 | `*.md` (no slash) | at any depth |
 | `/README.md` or `apps/web/x` (has a slash) | anchored at the repo root |
 | `package.json` (no slash) | every package.json at any depth; write `/package.json` for the root one |
@@ -129,3 +131,7 @@ Roster entry: `{ "id", "kind": "agent"|"human", "harness": "agenticteam"|"claude
 For `action: "delete"`, the file counts as verified once it is gone.
 
 Drift found by `sync`: files on disk that are not planned, not pattern instances, not ignored and not a module's `README.md`; and `modify` targets that are missing.
+
+Default ignores: `.git/`, `node_modules/`, `target/`, `dist/`, `build/`, `.next/`, `.turbo/`, `.venv/`, `venv/`, `__pycache__/`, `.pytest_cache/`, `coverage/`, `.DS_Store`, `.idea/`, `.vscode/` and `.blueprint/` match at any depth. `/.claude/`, `/.codex/` and `/.agentic-team/` are ignored at the repo root only, so a nested folder of those names (for example under `tests/`) is checked like any other folder.
+
+State fields set by `sync`: `unplanned`, `missingModify`, `patterns` (instances per pattern), `ignoredTracked` (`{"count": N, "paths": [up to 20]}`: git-tracked files the default ignore rules dropped, never counting `.blueprint/`; plan them or cover them with a pattern to track them), `syncedAt`, `head`, and `data` when stores or resources exist.

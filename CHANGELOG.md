@@ -4,12 +4,21 @@ All notable changes to the app-blueprint skill. The format follows [Keep a Chang
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-18
+
 ### Changed
 
+- `contracts` takes `--module ID` (repeatable) to list or write the README for chosen modules only; an unknown id exits 64, and a module without a path says so and exits 0. After writing, it reminds you to run the project's own tests, because a new README can break tooling that treats every entry in a folder as an item. SKILL.md step 8 says contracts are optional: list first, write per module when in doubt, then run the project's checks. The hint to add `--write` now appears only when something is left to write (c-55831b76).
+- `validate` warns when an owner rule that is a bare folder name (`agents/`) matches that folder at the root and in a nested place. SKILL.md and `references/schema.md` now say that `docs/` matches any folder named docs and `/docs/` only the root one, and the example blueprint anchors its folder rules (c-5a1a611f).
 - The minimum Python version is now 3.10 (3.9 reached end of life and is no longer on GitHub's Ubuntu runners). CI tests 3.10 and 3.12.
 
 ### Fixed
 
+- `export codeowners` writes owner rules with forward slashes even when the plan used backslashes, so GitHub applies them.
+- A malformed `blueprint.json` (for example `"files": ["oops"]`) no longer crashes with an unexpected error. Every command exits 1 and names each bad entry (wrong-typed text, list and `uses` fields included), such as `blueprint.json: files[0] must be an object (got string)`, then says to fix it and run `validate`. A section or field set to `null` counts as missing, and a missing key the code reads directly is filled with an empty value that `validate` then reports. A fuzz test (`test_plan_fuzz.py`) replaces each key of the example blueprint with ten wrong values and deletes it in turn (2,695 mutations); none crashes the functions behind `validate`, `sync`, `status`, `render`, `export` (csv, codeowners, agenticteam), `contracts` and `guard`, including the data scan and views. The reviewer also ran every mutation through the real command line in a git repository, 16 commands each, with no crash. Other shapes are not covered (c-62072a1b).
+- Ignore rules and owner patterns written with backslashes (`src\legacy\`) now match like forward slashes.
+- Tracked files in nested folders named `.claude`, `.codex` or `.agentic-team` (for example `tests/golden/codex/.codex/config.toml`) were invisible to `sync`. Those three default ignores now match the repo root only. An ignore rule never drops a file that is individually planned. It also never drops a path that matches a pattern, but only when every ignore rule that matches the path ends in `/` with no wildcard (`.claude/`, `src/legacy/`) and the pattern's glob names every folder of each such rule (`**/.claude/*.md` names `.claude`; `src/**/*.py` does not name `legacy`, so your own `ignore: ["src/legacy/"]` still wins). Wildcard rules such as `*.lock` yield only to individually planned files. This holds with and without git. `sync` says when default rules dropped tracked files (never counting `.blueprint/`) and records up to 20 of them as `ignoredTracked` in state (c-cf8599d6).
+- Because `.claude/`, `.codex/` and `.agentic-team/` are now ignored at the repo root only, `guard` and the pre-write hook refuse unplanned writes into nested folders of those names, as they do for any other unplanned path (c-cf8599d6).
 - A feedback test failed on Windows runners, where temp folders can appear in 8.3 short form; the path was still removed.
 
 ## [1.2.0] - 2026-11-06

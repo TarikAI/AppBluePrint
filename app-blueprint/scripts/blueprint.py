@@ -24,7 +24,7 @@ import sys
 import traceback
 from pathlib import Path
 
-TOOL_VERSION = "1.2.0"
+TOOL_VERSION = "1.3.0"
 SCHEMA_VERSION = 1
 ACTIONS = ("create", "modify", "delete")
 ROSTER_KINDS = ("agent", "human")
@@ -34,7 +34,7 @@ LABEL = {"planned": "planned", "claimed": "claimed", "ondisk": "on disk", "built
          "verified": "verified", "blocked": "blocked"}
 DEFAULT_IGNORE = [".git/", "node_modules/", "target/", "dist/", "build/", ".next/", ".turbo/",
                   ".venv/", "venv/", "__pycache__/", ".pytest_cache/", "coverage/", ".DS_Store",
-                  ".idea/", ".vscode/", ".blueprint/", ".agentic-team/", ".claude/", ".codex/"]
+                  ".idea/", ".vscode/", ".blueprint/", "/.agentic-team/", "/.claude/", "/.codex/"]
 WRITE_ACCESS = {"workspace-write"}
 
 HERE = Path(__file__).resolve().parent
@@ -127,7 +127,7 @@ def glob_rx(pattern):
     """
     if pattern in _RX_CACHE:
         return _RX_CACHE[pattern]
-    p = pattern.strip()
+    p = pattern.strip().replace("\\", "/")
     anchored = p.startswith("/") or "/" in p.rstrip("/")
     p = p.lstrip("/")
     if p.endswith("/"):
@@ -185,6 +185,108 @@ def pattern_instance_rx(glob):
 
 # ----------------------------------------------------------------------------- loading
 
+def json_kind(v):
+    if v is None:
+        return "null"
+    if isinstance(v, bool):
+        return "boolean"
+    if isinstance(v, (int, float)):
+        return "number"
+    return {str: "string", list: "list", dict: "object"}.get(type(v), type(v).__name__)
+
+
+LIST_SECTIONS = ("stack", "modules", "phases", "files", "patterns", "owners", "roster", "decisions", "stores", "resources")
+ID_SECTIONS = ("modules", "phases", "patterns", "roster", "stores", "resources")  # sections whose ids are keys
+STRING_FIELDS = ("path", "module", "phase", "owner", "pattern", "glob", "action", "kind", "store", "definedIn",
+                 "name", "purpose", "verify", "layer", "instance", "role", "harness", "github", "lane", "goal", "exit",
+                 "part", "choice", "docs", "verified", "version", "decision", "why", "source", "host", "note",
+                 "resource", "access", "summary", "preset", "layout", "notes")
+STRING_LIST_FIELDS = ("dependsOn", "consumes", "produces", "aliases", "examples", "schema", "ac", "platforms")
+REQUIRED_KEYS = {"modules": ("id", "purpose"), "phases": ("id",), "roster": ("id",), "patterns": ("id", "glob"),
+                 "owners": ("pattern", "owner"), "stores": ("id",), "resources": ("id",), "files": ("path", "action")}
+
+
+def check_entry(label, item, bad, ids=False):
+    """Type-check one object's known fields; append a message per problem to bad."""
+    for fld in (("id",) if ids else ()) + STRING_FIELDS:
+        if item.get(fld) is not None and not isinstance(item[fld], str):
+            bad.append(f"{label}.{fld} must be a string (got {json_kind(item[fld])})")
+    for fld in STRING_LIST_FIELDS + ("uses",):
+        if item.get(fld) is None and fld not in item:
+            continue
+        val = item.get(fld)
+        if not isinstance(val, list):
+            bad.append(f"{label}.{fld} must be a list (got {json_kind(val)})")
+            continue
+        want, what = (dict, "an object") if fld == "uses" else (str, "a string")
+        for j, x in enumerate(val):
+            if not isinstance(x, want):
+                bad.append(f"{label}.{fld}[{j}] must be {what} (got {json_kind(x)})")
+            elif fld == "uses":
+                check_entry(f"{label}.uses[{j}]", x, bad)
+
+
+def check_plan_shapes(plan):
+    """Exit 1 with every shape problem at once, so a malformed plan never reaches code that assumes the shapes.
+    A null section or field is treated as missing, not as an error."""
+    if not isinstance(plan, dict):
+        die(f"blueprint.json must be an object (got {json_kind(plan)})\n"
+            "Fix it, then run: python .blueprint/bin/blueprint.py validate")
+    bad = []
+    for key in LIST_SECTIONS:
+        v = plan.get(key)
+        if v is None:
+            continue
+        if not isinstance(v, list):
+            bad.append(f"{key} must be a list (got {json_kind(v)})")
+            continue
+        for i, item in enumerate(v):
+            if not isinstance(item, dict):
+                bad.append(f"{key}[{i}] must be an object (got {json_kind(item)})")
+            else:
+                check_entry(f"{key}[{i}]", item, bad, ids=key in ID_SECTIONS)
+    ig = plan.get("ignore")
+    if ig is not None:
+        if not isinstance(ig, list):
+            bad.append(f"ignore must be a list (got {json_kind(ig)})")
+        else:
+            for i, item in enumerate(ig):
+                if not isinstance(item, str):
+                    bad.append(f"ignore[{i}] must be a string (got {json_kind(item)})")
+    for key in ("app", "approach"):
+        v = plan.get(key)
+        if v is None:
+            continue
+        if not isinstance(v, dict):
+            bad.append(f"{key} must be an object (got {json_kind(v)})")
+        else:
+            check_entry(key, v, bad)
+    if bad:
+        die("\n".join("blueprint.json: " + b for b in bad)
+            + "\nFix it, then run: python .blueprint/bin/blueprint.py validate")
+
+
+def normalize_plan(plan):
+    """After the shape check: null means missing, and keys the code reads directly always exist (validate reports
+    the empty ones)."""
+    for key in [k for k, v in plan.items() if v is None]:
+        del plan[key]
+    for key in LIST_SECTIONS:
+        for item in plan.get(key) or []:
+            for k in [k for k, v in item.items() if v is None]:
+                del item[k]
+            for k in REQUIRED_KEYS.get(key, ()):
+                item.setdefault(k, "")
+            for u in item.get("uses") or []:
+                for k in [k for k, v in u.items() if v is None]:
+                    del u[k]
+                u.setdefault("resource", "")
+    for key in ("app", "approach"):
+        if isinstance(plan.get(key), dict):
+            for k in [k for k, v in plan[key].items() if v is None]:
+                del plan[key][k]
+
+
 def load_plan(root):
     path = bp_dir(root) / "blueprint.json"
     if not path.exists():
@@ -193,6 +295,8 @@ def load_plan(root):
         plan = read_json(path)
     except json.JSONDecodeError as e:
         die(f"blueprint.json is not valid JSON: {e}")
+    check_plan_shapes(plan)
+    normalize_plan(plan)
     for key, default in (("stack", []), ("modules", []), ("phases", []), ("files", []),
                          ("patterns", []), ("owners", []), ("roster", []), ("decisions", []),
                          ("ignore", []), ("approach", {}), ("app", {}), ("stores", []), ("resources", [])):
@@ -394,6 +498,26 @@ def validate_plan(plan, team=None):
             W(f"owner rule {i + 1} ({r.get('pattern')} -> {r.get('owner')}) matches no planned file or pattern")
         elif wins[i] == 0:
             W(f"owner rule {i + 1} ({r.get('pattern')} -> {r.get('owner')}) never wins: later rules override every match")
+
+    # A bare folder-name rule ("agents/") matches that folder at any depth, like CODEOWNERS. Warn when it
+    # covers planned items in the root folder and in a nested one, which is rarely what was meant.
+    label_target = {label: target for target, label in items}
+    for i, r in enumerate(rules):
+        core = str(r.get("pattern") or "").strip().rstrip("/")
+        if not core or "/" in core or "*" in core or "?" in core:
+            continue
+        root_hit, nested = False, None
+        for label in sorted(covers[i]):
+            parts = norm(label_target.get(label, "")).lstrip("/").split("/")
+            for k, part in enumerate(parts[:-1]):
+                if part == core:
+                    if k == 0:
+                        root_hit = True
+                    elif nested is None:
+                        nested = "/".join(parts)
+        if root_hit and nested:
+            W(f"owner rule {i + 1} ({r['pattern']} -> {r.get('owner')}) matches that folder name at any depth: "
+              f"it also matches {nested}. Write /{core}/ for the root folder only.")
 
     validate_data(plan, E, W)
 
@@ -1011,14 +1135,55 @@ def cmd_db_check(args):
 
 # ----------------------------------------------------------------------------- disk scan and status
 
-def repo_files(root, plan):
+def folder_rule_segments(rule):
+    """The folder names of a plain folder rule ('src/legacy/' -> ['src', 'legacy']); None for any other rule."""
+    r = rule.strip().replace("\\", "/")
+    if not r.endswith("/") or any(c in r for c in "*?["):
+        return None
+    return [x for x in r.strip("/").split("/") if x] or None
+
+
+def repo_files(root, plan, ignored_tracked=None):
+    """Files to compare with the plan. An ignored path is kept only if it is an individually planned file, or it
+    matches a pattern glob that names, as literal folder segments, every folder of the plain folder rule(s) that
+    drop it. If ignored_tracked is a list, tracked files that DEFAULT_IGNORE dropped are appended to it."""
     ignore = DEFAULT_IGNORE + list(plan.get("ignore", []))
+    planned = {norm(f.get("path", "")) for f in plan["files"]}
+    pats = [(pattern_instance_rx(p["glob"]), norm(p["glob"]).lstrip("/").split("/"))
+            for p in plan["patterns"] if p.get("glob")]
+
+    def named_by(rules, gsegs):
+        for g in rules:
+            segs = folder_rule_segments(g)
+            if segs is None or not all(x in gsegs for x in segs):
+                return False
+        return True
+
+    def kept(path, rules):
+        if path in planned:
+            return True
+        hits = [g for g in rules if glob_match(g, path)]
+        return not hits or any(rx.match(path) and named_by(hits, gsegs) for rx, gsegs in pats)
+
+    def planned_inside(rel):
+        return any(f.startswith(rel + "/") for f in planned)
+
+    def prune(rel):
+        hits = [g for g in ignore if glob_match(g, rel + "/x")]
+        return bool(hits) and not planned_inside(rel) and not any(named_by(hits, gsegs) for _, gsegs in pats)
+
     files = None
     try:
         out = subprocess.run(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
                              cwd=root, capture_output=True, timeout=60)
         if out.returncode == 0:
             files = [norm(p) for p in out.stdout.decode("utf-8", "replace").split("\0") if p]
+            if ignored_tracked is not None:
+                tr = subprocess.run(["git", "ls-files", "--cached", "-z"], cwd=root, capture_output=True, timeout=60)
+                if tr.returncode == 0:
+                    tracked = {norm(p) for p in tr.stdout.decode("utf-8", "replace").split("\0") if p}
+                    ignored_tracked.extend(sorted(p for p in tracked if (root / p).is_file() and not kept(p, DEFAULT_IGNORE)
+                                                  and not p.startswith((".blueprint/", ".git/"))))
     except (OSError, subprocess.SubprocessError):
         files = None
     if files is None:
@@ -1026,10 +1191,10 @@ def repo_files(root, plan):
         for dirpath, dirnames, filenames in os.walk(root):
             rel_dir = norm(os.path.relpath(dirpath, root))
             rel_dir = "" if rel_dir == "." else rel_dir
-            dirnames[:] = [d for d in dirnames if not any(glob_match(g, (rel_dir + "/" if rel_dir else "") + d + "/x") for g in ignore)]
+            dirnames[:] = [d for d in dirnames if not prune((rel_dir + "/" if rel_dir else "") + d)]
             for fn in filenames:
                 files.append((rel_dir + "/" if rel_dir else "") + fn)
-    return sorted(p for p in files if (root / p).is_file() and not any(glob_match(g, p) for g in ignore))
+    return sorted(p for p in files if (root / p).is_file() and kept(p, ignore))
 
 
 def git_head(root):
@@ -1098,7 +1263,8 @@ def cmd_sync(args):
     root = find_root(args.root)
     plan = load_plan(root)
     state = load_state(root)
-    disk = repo_files(root, plan)
+    ignored_tracked = []
+    disk = repo_files(root, plan, ignored_tracked)
     disk_set = set(disk)
     planned = {f["path"] for f in plan["files"]}
     module_readmes = {norm(m.get("path", "")).rstrip("/") + "/README.md" for m in plan["modules"] if m.get("path")}
@@ -1119,6 +1285,7 @@ def cmd_sync(args):
     missing_modify = [f["path"] for f in plan["files"] if f.get("action") == "modify" and f["path"] not in disk_set]
     state["patterns"] = patterns
     state["unplanned"] = unplanned
+    state["ignoredTracked"] = {"count": len(ignored_tracked), "paths": ignored_tracked[:20]}
     state["missingModify"] = missing_modify
     state["syncedAt"] = now_iso()
     state["head"] = git_head(root)
@@ -1139,6 +1306,9 @@ def cmd_sync(args):
                 print("    +", p)
             if len(unplanned) > 15:
                 print(f"    ... and {len(unplanned) - 15} more (see map.html, Drift)")
+        if ignored_tracked:
+            print(f"  Ignored by default rules: {len(ignored_tracked)} tracked file(s) (e.g. {', '.join(ignored_tracked[:3])}). "
+                  "Plan them or cover them with a pattern to track them.")
         if missing_modify:
             print(f"  Planned to modify but missing: {len(missing_modify)}")
             for p in missing_modify[:10]:
@@ -1704,8 +1874,16 @@ def cmd_contracts(args):
     plan = load_plan(root)
     comp = compute(root, plan, load_state(root))
     made = 0
+    wanted = list(args.module or [])
+    unknown = [w for w in wanted if w not in {m.get("id") for m in plan["modules"]}]
+    if unknown:
+        die(f"unknown module id(s): {', '.join(unknown)}. Known: {', '.join(str(m.get('id')) for m in plan['modules'])}", 64)
     for m in plan["modules"]:
+        if wanted and m.get("id") not in wanted:
+            continue
         if not m.get("path"):
+            if wanted:
+                print(f"module {m.get('id')} has no path, so it gets no contract")
             continue
         path = root / norm(m["path"]) / "README.md"
         mod_rows = [r for r in comp["rows"] if r["module"] == m["id"]]
@@ -1726,9 +1904,13 @@ def cmd_contracts(args):
             print(f"wrote {norm(os.path.relpath(path, root))}")
         else:
             print(f"would write {norm(os.path.relpath(path, root))}")
+            made += 1
     if args.write:
         append_log(root, {"event": "contracts", "written": made})
-    elif made == 0:
+        if made:
+            print("Run the project's own tests now: a new README can break tooling that treats every entry in a folder "
+                  "as an item. Remove the README for that module if it does.")
+    elif made:
         print("Add --write to create the missing ones. Existing READMEs are never overwritten.")
 
 
@@ -1745,8 +1927,8 @@ def agenticteam_tasks(plan, comp, team=None):
     tasks, by_phase = [], {}
     group_of = {}
     for ph in plan["phases"]:
-        owners = sorted({r["owner"] for r in comp["rows"] if r["phase"] == ph["id"] and r["status"] != "verified"} |
-                        {p["owner"] for p in comp["patterns"] if p["phase"] == ph["id"]} - {None})
+        owners = sorted(({r["owner"] for r in comp["rows"] if r["phase"] == ph["id"] and r["status"] != "verified"} |
+                         {p["owner"] for p in comp["patterns"] if p["phase"] == ph["id"]}) - {None})
         for o in owners:
             tid = f"bp-{ph['id']}-{o}".lower()
             for r in comp["rows"]:
@@ -1755,8 +1937,8 @@ def agenticteam_tasks(plan, comp, team=None):
     prev_ids = []
     for ph in plan["phases"]:
         ids_this = []
-        owners = sorted({r["owner"] for r in comp["rows"] if r["phase"] == ph["id"] and r["status"] != "verified"} |
-                        {p["owner"] for p in comp["patterns"] if p["phase"] == ph["id"]} - {None})
+        owners = sorted(({r["owner"] for r in comp["rows"] if r["phase"] == ph["id"] and r["status"] != "verified"} |
+                         {p["owner"] for p in comp["patterns"] if p["phase"] == ph["id"]}) - {None})
         for o in owners:
             tid = f"bp-{ph['id']}-{o}".lower()
             files = [r for r in comp["rows"] if r["phase"] == ph["id"] and r["owner"] == o and r["status"] != "verified"]
@@ -1802,7 +1984,8 @@ def cmd_export(args):
         print("# Generated from .blueprint/blueprint.json owner rules (last match wins).")
         for rule in plan["owners"]:
             handle = gh.get(rule["owner"])
-            pat = rule["pattern"] if rule["pattern"].startswith(("/", "*")) else "/" + rule["pattern"]
+            pat = norm(rule["pattern"])  # forward slashes: GitHub reads a backslash as an escape
+            pat = pat if pat.startswith(("/", "*")) else "/" + pat
             if handle:
                 print(f"{pat} {handle}")
             else:
@@ -1979,6 +2162,7 @@ def main(argv=None):
 
     p = add("contracts", cmd_contracts, "list or write README contracts for module folders")
     p.add_argument("--write", action="store_true")
+    p.add_argument("--module", action="append", metavar="ID", help="only this module (repeatable); default: every module with a path")
 
     p = add("export", cmd_export, "print codeowners, csv, json, or AgenticTeam add-task commands")
     p.add_argument("format", choices=["codeowners", "csv", "json", "agenticteam"])
@@ -2012,6 +2196,8 @@ def main(argv=None):
         except (ValueError, OSError):
             pass
     try:
+        if os.environ.get("APP_BLUEPRINT_SELFTEST_CRASH") == "1":  # test hook for the incident path
+            raise RuntimeError("selftest crash")
         args.fn(args)
     except (SystemExit, KeyboardInterrupt):
         raise

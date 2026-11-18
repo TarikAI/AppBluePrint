@@ -44,10 +44,10 @@
   ],
   "owners": [
     {"pattern": "*", "owner": "cto-architect", "note": "default owner for anything not listed below"},
-    {"pattern": "crates/", "owner": "backend-engineer"},
+    {"pattern": "/crates/", "owner": "backend-engineer"},
     {"pattern": "crates/snag-core/src/lib.rs", "owner": "backend-lead", "note": "shared contract: the lead owns the core types"},
-    {"pattern": "crates/snag-api/migrations/", "owner": "backend-lead", "note": "the schema is a shared contract"},
-    {"pattern": "apps/web/", "owner": "frontend-engineer"}
+    {"pattern": "/crates/snag-api/migrations/", "owner": "backend-lead", "note": "the schema is a shared contract"},
+    {"pattern": "/apps/web/", "owner": "frontend-engineer"}
   ],
   "roster": [
     {"id": "cto-architect", "kind": "agent", "harness": "agenticteam", "role": "Owns workspace config and the plan"},

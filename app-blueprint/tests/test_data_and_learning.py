@@ -178,30 +178,26 @@ class DataTest(Base):
 
 class LearningTest(Base):
     def test_crash_records_incident(self):
-        self.plan["files"] = ["oops"]
-        self.save()
-        r = self.run_bp("validate")
+        r = self.run_bp("validate", env={"APP_BLUEPRINT_SELFTEST_CRASH": "1"})
         self.assertEqual(r.returncode, 70, r.stdout + r.stderr)
         self.assertIn("Recorded as incident", r.stderr)
         inc = self.store_records("incidents.jsonl")
         self.assertEqual(len(inc), 1)
         rec = inc[0]
         self.assertEqual(rec["command"], "validate")
-        self.assertEqual(rec["error"], "AttributeError")
+        self.assertEqual(rec["error"], "RuntimeError")
         self.assertTrue(all(f.startswith("blueprint.py:") for f in rec["frames"]))
         self.assertNotIn(str(self.dir), json.dumps(rec))
         self.assertEqual(rec["project"], self.dir.name)
         r = self.run_bp("report")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("Title: [bug] AttributeError", r.stdout)
+        self.assertIn("Title: [bug] RuntimeError", r.stdout)
         self.assertIn("Nothing has been sent", r.stderr)
         self.assertNotIn(str(self.dir), r.stdout)
         self.assertNotIn(self.dir.name, r.stdout)
 
     def test_capture_can_be_turned_off(self):
-        self.plan["files"] = ["oops"]
-        self.save()
-        r = self.run_bp("validate", env={"APP_BLUEPRINT_NO_CAPTURE": "1"})
+        r = self.run_bp("validate", env={"APP_BLUEPRINT_NO_CAPTURE": "1", "APP_BLUEPRINT_SELFTEST_CRASH": "1"})
         self.assertEqual(r.returncode, 70)
         self.assertIn("Not recorded", r.stderr)
         r = self.run_bp("feedback", "--kind", "bug", "--note", "x", env={"APP_BLUEPRINT_NO_CAPTURE": "1"})

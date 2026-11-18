@@ -46,3 +46,33 @@ Every entry must pass `python maintainers/learn.py scan-private`.
 - **Evidence:** Found while building the mind map view: after "fit", the map still showed a horizontal scrollbar.
 - **Change made:** `fit` in `app-blueprint/assets/mindmap.js` measures inside the padding and re-measures once. Shipped in 1.1.0.
 - **Test:** Manual check in `examples/snag-desk/.blueprint/map.html`: open the Mind map tab, press Expand all, then Fit, and confirm there is no horizontal scrollbar. There is no automated browser test yet.
+
+## L-004: Unanchored folder patterns match at every depth
+
+- **Date:** 2026-11-18
+- **Kind:** guidance
+- **Part:** `SKILL.md step 5` (owner rules), `command:sync` (default ignore)
+- **Lesson:** A folder name without a leading slash matches a folder of that name at any depth, in owner rules and in ignore rules alike. Anchor a folder to the root with a leading `/`. An ignore rule should yield to the plan only narrowly: to an individually planned file, or to a pattern whose glob names every folder of a plain folder rule; a broader override pulls vendor folders in and defeats the user's own ignore.
+- **Evidence:** Candidates c-cf8599d6 and c-5a1a611f (tool 1.2.0): tracked files in nested harness folders were invisible to `sync`, and an `agents/` owner rule took a nested `agents/` folder as well as the root one.
+- **Change made:** The three harness-folder defaults are anchored; an ignore rule yields only to an individually planned file or to a pattern that names the ignored folder; `sync` reports tracked files dropped by default rules; `validate` warns about a bare folder-name owner rule that matches at several depths; SKILL.md step 5 and `references/schema.md` explain `docs/` against `/docs/`. Shipped in 1.3.0.
+- **Test:** `app-blueprint/tests/test_ignore_anchor.py` and `app-blueprint/tests/test_owner_anchor.py`.
+
+## L-005: Contracts can break folder-as-item tooling
+
+- **Date:** 2026-11-18
+- **Kind:** guidance
+- **Part:** `SKILL.md step 8`, `command:contracts`
+- **Lesson:** A generated README is a new entry in its folder. Where a project's tests treat every entry of a folder as an item (a skill, a plugin, a migration), the README breaks them. Contracts are optional: list first, write per module, run the project's own checks, and remove a README that breaks them.
+- **Evidence:** Candidate c-55831b76 (tool 1.2.0): `contracts --write` created a README in a folder whose tests expected only item folders.
+- **Change made:** `contracts --module ID` limits the modules; after writing, the command tells you to run the project's tests; SKILL.md step 8 describes the safe order. Shipped in 1.3.0.
+- **Test:** `app-blueprint/tests/test_contracts_module.py`. The guidance in SKILL.md step 8 is a manual check: after `contracts --write`, run the project's test suite and confirm no new README is treated as an item.
+
+## L-006: Malformed plan entries must be validation errors, not crashes
+
+- **Date:** 2026-11-18
+- **Kind:** bug
+- **Part:** `command:validate`, plan loading
+- **Lesson:** A plan is hand-edited JSON, so any entry can have the wrong shape. Check shapes once, when the plan loads, report every bad entry together with how to fix it, and prove it by fuzzing instead of listing cases. A crash tells the user nothing.
+- **Evidence:** Candidate c-62072a1b (tool 1.2.0): `"files": ["oops"]` ended in an unexpected error (exit 70) instead of a message; it was also the only way the tests had to force a crash.
+- **Change made:** `load_plan` checks the types of the known fields in every section and exits 1 naming each bad entry; a `null` section or field counts as missing, and keys the code reads directly are filled with empty values that `validate` reports. Tests that need a crash use `APP_BLUEPRINT_SELFTEST_CRASH=1`. Shipped in 1.3.0.
+- **Test:** `app-blueprint/tests/test_plan_shapes.py`, and `app-blueprint/tests/test_plan_fuzz.py`, which sets each key of the example blueprint (top level, `app`, `approach`, every entry of every list section and every `uses` entry) to ten wrong values and deletes it in turn: 2,695 mutations, none may crash the load, validate, sync data scan, views, exports, contracts, status or guard paths. It proves nothing for other plan shapes or for the commands that write state (`claim`, `mark`, `verify`).

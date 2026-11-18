@@ -18,10 +18,10 @@ Ownership follows the rules below in order; **the last matching rule wins**, as 
 | # | Pattern | Owner | Override | Wins |
 |---|---|---|---|---|
 | 1 | `*` | cto-architect |  | 3 |
-| 2 | `crates/` | backend-engineer |  | 4 |
+| 2 | `/crates/` | backend-engineer |  | 4 |
 | 3 | `crates/snag-core/src/lib.rs` | backend-lead |  | 1 |
-| 4 | `crates/snag-api/migrations/` | backend-lead |  | 1 |
-| 5 | `apps/web/` | frontend-engineer |  | 4 |
+| 4 | `/crates/snag-api/migrations/` | backend-lead |  | 1 |
+| 5 | `/apps/web/` | frontend-engineer |  | 4 |
 
 ## Data ownership
 
