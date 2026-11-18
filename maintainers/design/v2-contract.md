@@ -657,7 +657,7 @@ All 1.x keys keep their meaning, including `ignoredTracked` (`{"count": N, "path
 3. `ev = checks["evaluation"]` (the current evaluation, below). If `ev` gives `fail` for any criterion → `failed`.
 4. `lo` = minimum item rank (0 when there are no items); `hi` = maximum.
 5. `commandPass` = every criterion that has `verify` has result `pass` via `command`.
-6. `lo == 4`, `commandPass`, and at least one criterion: `accepted` if every criterion without `verify` has result `pass` through `ev` (vacuously true when all criteria have `verify`, but then `ev` must exist), else `verified`.
+6. `lo == 4`, `commandPass`, and at least one criterion: `accepted` if every criterion without `verify` has result `pass` through `ev` (when all criteria have `verify`, `ev` must exist and name at least one criterion with result `pass`), else `verified`.
 7. `lo >= 3` → `built`.
 8. `hi >= 1` → `building`.
 9. → `planned`.
@@ -670,7 +670,7 @@ All 1.x keys keep their meaning, including `ignoredTracked` (`{"count": N, "path
 
 **`verified` is not behaviour-checked.** `verified` means every file verified and every command criterion passing, nothing more. Wherever a feature status is shown (`status`, `status --feature`, FEATURES.md, ROADMAP.md, the map, `status --json` as `awaitingEvaluation`), a `verified` feature that has criteria without `verify` not yet passed shows the count: `verified, 2 criteria await evaluation`. A feature whose criteria all lack `verify` is shown the same way (`verified, 3 of 3 criteria await evaluation`) and is never presented as behaviour-checked before it is accepted.
 
-**Current evaluation** (`records.latest_evaluation`): the latest `evaluation` record whose proof is current, every criterion it names still exists with the recorded digest, and whose `by` is in the roster and independent under today's plan (not the feature `owner`, owns no item). Any other evaluation is **not current and is ignored**. Editing a criterion makes the evaluation not current, and a newly added criterion without `verify` is `unknown` until evaluated, so either returns an accepted feature to `verified`, not to `failed`. The verdict is recomputed when read: `fail` if any criterion's result in it is `fail`; `pass` if every criterion without `verify` has `pass` at a sufficient level; otherwise `partial`.
+**Current evaluation** (`records.latest_evaluation`): the latest `evaluation` record whose proof is current, every criterion it names still exists with the recorded digest, and whose `by` is in the roster and independent under today's plan (not the feature `owner`, owns no item). Any other evaluation is **not current and is ignored**. Editing a criterion makes the evaluation not current, and a newly added criterion without `verify` is `unknown` until evaluated, so either returns an accepted feature to `verified`, not to `failed`. The verdict is recomputed when read: `fail` if any criterion's result in it is `fail`; `pass` if every criterion without `verify` has `pass` at a sufficient level; otherwise `partial`. An evaluation with no criterion results is recorded with verdict `partial` and never makes a feature `accepted`; when every criterion has `verify`, the evaluator must give `--result` for at least one criterion, at a level that satisfies it.
 
 Milestone done (2.3) and every "N of M" in the views count only `accepted` features and `done` tasks.
 
