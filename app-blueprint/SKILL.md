@@ -90,7 +90,7 @@ Rules while drafting:
 
 - `roster[]`: everyone who writes files. Use AgenticTeam agent ids when the team builds (`backend-engineer`, `frontend-engineer`, …; `harness: "agenticteam"`), harness names for single agents (`claude-code`, `codex`), and people with a `github` handle.
 - `owners[]`: ordered path globs, **last match wins** as in CODEOWNERS. Put a fallback first (`**`), then specific rules. A later rule nested inside an earlier one is a normal refinement. A later rule that only **partly** overlaps an earlier rule of another owner (for example `crates/*/tests/**` after `crates/store/**`) makes ownership depend on rule order: `validate` reports it as an error unless that rule says `"override": true`. It also reports every planned file or pattern without an owner.
-- Anchor root-only files with a leading slash: `/package.json` is the root manifest, while `package.json` matches every package.json in the repo.
+- Anchor root-only files and folders with a leading slash: `/package.json` is the root manifest, while `package.json` matches every package.json in the repo. The same holds for folders: `docs/` matches any folder named docs at any depth, and `/docs/` only the one at the root. `validate` warns when a bare folder name matches both.
 - Shared contracts belong to a lead, not to a builder.
 - With AgenticTeam, run `validate --team .agentic-team/team.json` (or the AgenticTeam repo's `team.json`). It checks that every owner is a real agent with `workspace-write` access; review roles such as qa-lead or code-reviewer can never own files.
 

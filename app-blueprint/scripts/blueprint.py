@@ -449,6 +449,26 @@ def validate_plan(plan, team=None):
         elif wins[i] == 0:
             W(f"owner rule {i + 1} ({r.get('pattern')} -> {r.get('owner')}) never wins: later rules override every match")
 
+    # A bare folder-name rule ("agents/") matches that folder at any depth, like CODEOWNERS. Warn when it
+    # covers planned items in the root folder and in a nested one, which is rarely what was meant.
+    label_target = {label: target for target, label in items}
+    for i, r in enumerate(rules):
+        core = str(r.get("pattern") or "").strip().rstrip("/")
+        if not core or "/" in core or "*" in core or "?" in core:
+            continue
+        root_hit, nested = False, None
+        for label in sorted(covers[i]):
+            parts = norm(label_target.get(label, "")).lstrip("/").split("/")
+            for k, part in enumerate(parts[:-1]):
+                if part == core:
+                    if k == 0:
+                        root_hit = True
+                    elif nested is None:
+                        nested = "/".join(parts)
+        if root_hit and nested:
+            W(f"owner rule {i + 1} ({r['pattern']} -> {r.get('owner')}) matches that folder name at any depth: "
+              f"it also matches {nested}. Write /{core}/ for the root folder only.")
+
     validate_data(plan, E, W)
 
     # AgenticTeam roster check

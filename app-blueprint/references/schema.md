@@ -100,6 +100,7 @@ Owner rule: `{ "pattern": "<glob>", "owner": "<roster id>", "override": true|fal
 - A later rule that **partly** overlaps an earlier rule of a different owner (it shares some paths and also takes paths the earlier rule does not cover) makes ownership depend on rule order. `validate` reports it as an error unless the later rule has `"override": true`.
 - Every planned file and every pattern glob must have an owner.
 - A rule that matches nothing, or never wins, is a warning.
+- A bare folder name (`docs/`, `agents/`) matches every folder of that name at any depth, as in CODEOWNERS. Write `/docs/` for the root folder only. `validate` warns when such a rule matches planned items both in the root folder and in a nested one.
 
 Roster entry: `{ "id", "kind": "agent"|"human", "harness": "agenticteam"|"claude-code"|"codex"|..., "role", "github": "@handle", "lane" }`. With `validate --team team.json`, every `harness: "agenticteam"` agent must exist in team.json, and owners of files must have `workspace-write` access.
 
@@ -110,7 +111,8 @@ Roster entry: `{ "id", "kind": "agent"|"human", "harness": "agenticteam"|"claude
 | `*` | anything inside one folder level |
 | `**` | any number of folders |
 | `?` | one character |
-| `docs/` or `docs` | the folder and everything inside it |
+| `docs/` or `docs` | any folder named docs, at any depth, and everything inside it |
+| `/docs/` | only the root folder docs, and everything inside it |
 | `*.md` (no slash) | at any depth |
 | `/README.md` or `apps/web/x` (has a slash) | anchored at the repo root |
 | `package.json` (no slash) | every package.json at any depth; write `/package.json` for the root one |
