@@ -34,7 +34,7 @@ LABEL = {"planned": "planned", "claimed": "claimed", "ondisk": "on disk", "built
          "verified": "verified", "blocked": "blocked"}
 DEFAULT_IGNORE = [".git/", "node_modules/", "target/", "dist/", "build/", ".next/", ".turbo/",
                   ".venv/", "venv/", "__pycache__/", ".pytest_cache/", "coverage/", ".DS_Store",
-                  ".idea/", ".vscode/", ".blueprint/", ".agentic-team/", ".claude/", ".codex/"]
+                  ".idea/", ".vscode/", ".blueprint/", "/.agentic-team/", "/.claude/", "/.codex/"]
 WRITE_ACCESS = {"workspace-write"}
 
 HERE = Path(__file__).resolve().parent
@@ -1065,14 +1065,42 @@ def cmd_db_check(args):
 
 # ----------------------------------------------------------------------------- disk scan and status
 
-def repo_files(root, plan):
+def pattern_prefix_dir(glob):
+    """The literal folder a pattern glob starts in ('dist/gen/*.txt' -> 'dist/gen'); '' if it starts with a wildcard."""
+    p = norm(glob).lstrip("/")
+    head = re.split(r"[*?]", p, 1)[0]
+    return head.rsplit("/", 1)[0] if "/" in head else ""
+
+
+def repo_files(root, plan, ignored_tracked=None):
+    """Files to compare with the plan. The plan wins over ignore: a planned file or a pattern instance is
+    never dropped. If ignored_tracked is a list, tracked files that DEFAULT_IGNORE dropped are appended to it."""
     ignore = DEFAULT_IGNORE + list(plan.get("ignore", []))
+    planned = {norm(f.get("path", "")) for f in plan["files"]}
+    pat_rx = [pattern_instance_rx(p.get("glob", "")) for p in plan["patterns"] if p.get("glob")]
+    pat_dirs = [d for d in (pattern_prefix_dir(p.get("glob", "")) for p in plan["patterns"] if p.get("glob")) if d]
+
+    def wanted(path):
+        return path in planned or any(rx.match(path) for rx in pat_rx)
+
+    def dropped(path, rules):
+        return not wanted(path) and any(glob_match(g, path) for g in rules)
+
+    def planned_inside(rel):
+        return (any(f.startswith(rel + "/") for f in planned)
+                or any((d + "/").startswith(rel + "/") or (rel + "/").startswith(d + "/") for d in pat_dirs))
+
     files = None
     try:
         out = subprocess.run(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
                              cwd=root, capture_output=True, timeout=60)
         if out.returncode == 0:
             files = [norm(p) for p in out.stdout.decode("utf-8", "replace").split("\0") if p]
+            if ignored_tracked is not None:
+                tr = subprocess.run(["git", "ls-files", "--cached", "-z"], cwd=root, capture_output=True, timeout=60)
+                if tr.returncode == 0:
+                    tracked = {norm(p) for p in tr.stdout.decode("utf-8", "replace").split("\0") if p}
+                    ignored_tracked.extend(sorted(p for p in tracked if (root / p).is_file() and dropped(p, DEFAULT_IGNORE)))
     except (OSError, subprocess.SubprocessError):
         files = None
     if files is None:
@@ -1080,10 +1108,12 @@ def repo_files(root, plan):
         for dirpath, dirnames, filenames in os.walk(root):
             rel_dir = norm(os.path.relpath(dirpath, root))
             rel_dir = "" if rel_dir == "." else rel_dir
-            dirnames[:] = [d for d in dirnames if not any(glob_match(g, (rel_dir + "/" if rel_dir else "") + d + "/x") for g in ignore)]
+            dirnames[:] = [d for d in dirnames
+                           if not any(glob_match(g, (rel_dir + "/" if rel_dir else "") + d + "/x") for g in ignore)
+                           or planned_inside((rel_dir + "/" if rel_dir else "") + d)]
             for fn in filenames:
                 files.append((rel_dir + "/" if rel_dir else "") + fn)
-    return sorted(p for p in files if (root / p).is_file() and not any(glob_match(g, p) for g in ignore))
+    return sorted(p for p in files if (root / p).is_file() and not dropped(p, ignore))
 
 
 def git_head(root):
@@ -1152,7 +1182,8 @@ def cmd_sync(args):
     root = find_root(args.root)
     plan = load_plan(root)
     state = load_state(root)
-    disk = repo_files(root, plan)
+    ignored_tracked = []
+    disk = repo_files(root, plan, ignored_tracked)
     disk_set = set(disk)
     planned = {f["path"] for f in plan["files"]}
     module_readmes = {norm(m.get("path", "")).rstrip("/") + "/README.md" for m in plan["modules"] if m.get("path")}
@@ -1173,6 +1204,7 @@ def cmd_sync(args):
     missing_modify = [f["path"] for f in plan["files"] if f.get("action") == "modify" and f["path"] not in disk_set]
     state["patterns"] = patterns
     state["unplanned"] = unplanned
+    state["ignoredTracked"] = {"count": len(ignored_tracked), "paths": ignored_tracked[:20]}
     state["missingModify"] = missing_modify
     state["syncedAt"] = now_iso()
     state["head"] = git_head(root)
@@ -1193,6 +1225,9 @@ def cmd_sync(args):
                 print("    +", p)
             if len(unplanned) > 15:
                 print(f"    ... and {len(unplanned) - 15} more (see map.html, Drift)")
+        if ignored_tracked:
+            print(f"  Ignored by default rules: {len(ignored_tracked)} tracked file(s) (e.g. {', '.join(ignored_tracked[:3])}). "
+                  "Plan them or cover them with a pattern to track them.")
         if missing_modify:
             print(f"  Planned to modify but missing: {len(missing_modify)}")
             for p in missing_modify[:10]:
