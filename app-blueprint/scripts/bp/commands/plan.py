@@ -1,0 +1,227 @@
+"""commands.plan: init, validate, render, contracts, export, moved from blueprint.py 1.3.0 (contract 1.5).
+
+init --refresh-tool differs from 1.3.0 as contract 1.5 row b says: the 1.7 copy order, the upgrade message and the
+"already the project's copy" early return.
+"""
+import csv
+import json
+import os
+import sys
+from pathlib import Path
+
+from bp.version import TOOL_VERSION
+from bp.core import append_log, bp_dir, die, find_root, norm, read_json, write_json
+from bp.learn import _copy_version, copy_layout
+from bp.plan import SKELETON, load_plan, load_state, owner_of, save_state
+from bp.validate import record_friction, validate_plan
+from bp.views.render import render_all
+from bp.export import agenticteam_tasks, shq
+from bp.install import copy_tool
+
+
+def cmd_validate(args):
+    root = find_root(args.root)
+    plan = load_plan(root)
+    team = None
+    if args.team:
+        team = read_json(Path(args.team))
+        if team is None:
+            die(f"team file not found: {args.team}")
+    errors, warnings = validate_plan(plan, team)
+    for w in warnings:
+        print("warning:", w)
+    for e in errors:
+        print("error:", e)
+    n_files, n_pat = len(plan["files"]), len(plan["patterns"])
+    if errors:
+        record_friction(root, errors)
+        print(f"\n{len(errors)} error(s), {len(warnings)} warning(s). The blueprint is not ready.")
+        sys.exit(1)
+    res = f", {len(plan['resources'])} data resources" if plan["resources"] else ""
+    print(f"OK: {n_files} files, {n_pat} patterns, {len(plan['modules'])} modules, "
+          f"{len(plan['phases'])} phases, {len(plan['roster'])} owners{res}. {len(warnings)} warning(s).")
+
+
+def cmd_render(args):
+    root = find_root(args.root)
+    plan = load_plan(root)
+    errors, _ = validate_plan(plan)
+    if errors and not args.force:
+        die(f"The blueprint has {len(errors)} error(s); run validate first (or render --force for a draft view).")
+    state = load_state(root)
+    if args.check:
+        stale = render_all(root, plan, state, check=True)
+        if stale:
+            print("Out of date: " + ", ".join(stale) + ". Run: blueprint.py render")
+            sys.exit(1)
+        print("Views are current.")
+        return
+    render_all(root, plan, state)
+
+
+CONTRACT_TEMPLATE = """# {name}
+
+<!-- Folder contract from the app blueprint. The owner keeps it true as the code lands. -->
+
+## Overview
+{purpose}
+
+Owner: {owner}. Layer: {layer}. Depends on: {deps}.
+
+## Interface
+{interface}
+
+## Invariants
+- TBD by {owner}: rules every caller and change must keep.
+
+## Side effects
+- TBD by {owner}: database writes, network calls, files, events.
+
+## Verification
+- Run: `{verify}`
+"""
+
+
+def cmd_contracts(args):
+    from bp.status import compute
+    root = find_root(args.root)
+    plan = load_plan(root)
+    comp = compute(root, plan, load_state(root))
+    made = 0
+    wanted = list(args.module or [])
+    unknown = [w for w in wanted if w not in {m.get("id") for m in plan["modules"]}]
+    if unknown:
+        die(f"unknown module id(s): {', '.join(unknown)}. Known: {', '.join(str(m.get('id')) for m in plan['modules'])}", 64)
+    for m in plan["modules"]:
+        if wanted and m.get("id") not in wanted:
+            continue
+        if not m.get("path"):
+            if wanted:
+                print(f"module {m.get('id')} has no path, so it gets no contract")
+            continue
+        path = root / norm(m["path"]) / "README.md"
+        mod_rows = [r for r in comp["rows"] if r["module"] == m["id"]]
+        produces = sorted({p for r in mod_rows for p in r["produces"]})
+        owner = owner_of(plan, norm(m["path"]).rstrip("/") + "/README.md")[0] or "(unowned)"
+        text = CONTRACT_TEMPLATE.format(
+            name=m["id"], purpose=m.get("purpose", ""), owner=owner, layer=m.get("layer", "-"),
+            deps=", ".join(m.get("dependsOn", [])) or "nothing",
+            interface="\n".join(f"- {p}" for p in produces) or "- (no produces listed in the blueprint yet)",
+            verify=m.get("verify") or "set a verify command on the module")
+        if path.exists():
+            print(f"keep  {norm(os.path.relpath(path, root))} (exists)")
+            continue
+        if args.write:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+            made += 1
+            print(f"wrote {norm(os.path.relpath(path, root))}")
+        else:
+            print(f"would write {norm(os.path.relpath(path, root))}")
+            made += 1
+    if args.write:
+        append_log(root, {"event": "contracts", "written": made})
+        if made:
+            print("Run the project's own tests now: a new README can break tooling that treats every entry in a folder "
+                  "as an item. Remove the README for that module if it does.")
+    elif made:
+        print("Add --write to create the missing ones. Existing READMEs are never overwritten.")
+
+
+def cmd_export(args):
+    from bp.data import data_view
+    from bp.status import compute
+    root = find_root(args.root)
+    plan = load_plan(root)
+    state = load_state(root)
+    comp = compute(root, plan, state)
+    fmt = args.format
+    if fmt == "codeowners":
+        gh = {r["id"]: r.get("github") for r in plan["roster"]}
+        print("# Generated from .blueprint/blueprint.json owner rules (last match wins).")
+        for rule in plan["owners"]:
+            handle = gh.get(rule["owner"])
+            pat = norm(rule["pattern"])  # forward slashes: GitHub reads a backslash as an escape
+            pat = pat if pat.startswith(("/", "*")) else "/" + pat
+            if handle:
+                print(f"{pat} {handle}")
+            else:
+                print(f"# {pat} {rule['owner']}  (agent or no GitHub handle in roster)")
+    elif fmt == "csv":
+        wr = csv.writer(sys.stdout, lineterminator="\n")
+        wr.writerow(["kind", "path", "action", "module", "phase", "owner", "status", "contract", "purpose", "verify"])
+        for r in comp["rows"]:
+            wr.writerow(["file", r["path"], r["action"], r["module"], r["phase"], r["owner"], r["status"], r["contract"], r["purpose"], r["verify"]])
+        for p in comp["patterns"]:
+            wr.writerow(["pattern", p["glob"], "create", p["module"], p["phase"], p["owner"], f"{len(p['instances'])} on disk", False, p["purpose"], p["verify"]])
+    elif fmt == "json":
+        print(json.dumps({"app": plan["app"], "phases": plan["phases"], "roster": plan["roster"], "rows": comp["rows"],
+                          "patterns": comp["patterns"], "unplanned": state.get("unplanned", []), "syncedAt": state.get("syncedAt"),
+                          "data": data_view(plan, state)},
+                         indent=2, ensure_ascii=False))
+    elif fmt == "agenticteam":
+        team = read_json(Path(args.team)) if args.team else None
+        tasks = agenticteam_tasks(plan, comp, team)
+        bad = [t for t in tasks if t.get("writable") is False]
+        if bad:
+            for t in bad:
+                print(f"error: {t['owner']} cannot write files in AgenticTeam (access is not workspace-write): {t['id']}", file=sys.stderr)
+            sys.exit(1)
+        if args.json:
+            print(json.dumps(tasks, indent=2, ensure_ascii=False))
+            return
+        cli = "python .agentic-team/bin/agentic_team.py"
+        print("# AgenticTeam build tasks generated from the app blueprint. Review, then run in order.")
+        for t in tasks:
+            parts = [cli, "add-task", "--project .", "--id", t["id"], "--title", shq(t["title"]), "--owner", t["owner"], "--stage", t["stage"],
+                     "--action", t["action"], "--target", t["target"]]
+            parts += [x for p in t["paths"] for x in ("--path", shq(p))]
+            parts += [x for d in t["dependsOn"] for x in ("--depends-on", d)]
+            parts += [x for i in t["inputs"] for x in ("--input", i)]
+            parts += [x for a in t["acceptance"] for x in ("--acceptance", shq(a))]
+            parts += [x for c in t["checks"] for x in ("--check", shq(c))]
+            parts += [x for v in t.get("verifies", []) for x in ("--verifies", v)]
+            print(" ".join(parts))
+    else:
+        die(f"unknown format {fmt}", 64)
+
+
+def cmd_init(args):
+    root = Path(args.root).resolve() if args.root else Path.cwd().resolve()
+    d = bp_dir(root)
+    plan_path = d / "blueprint.json"
+    if args.refresh_tool:
+        if not plan_path.exists():
+            die("No blueprint here to refresh.")
+        bin_dir = d / "bin"
+        layout, old = copy_layout(bin_dir), _copy_version(bin_dir) or "unknown"
+        if not copy_tool(root):
+            return  # run from the project's own copy: copy_tool said what to run instead
+        if layout == "single-file":
+            print(f"Upgraded .blueprint/bin from the single-file tool {old} to the package tool {TOOL_VERSION}.")
+        else:
+            print(f"Refreshed .blueprint/bin to tool {TOOL_VERSION}.")
+        return
+    if plan_path.exists():
+        die(f"{plan_path} already exists. Edit it, or use --refresh-tool to update the copied script.", 1)
+    d.mkdir(parents=True, exist_ok=True)
+    plan = json.loads(json.dumps(SKELETON))
+    plan["app"]["name"] = args.name or root.name
+    plan["app"]["preset"] = args.preset or ""
+    write_json(plan_path, plan)
+    save_state(root, {"files": {}, "patterns": {}, "unplanned": [], "syncedAt": None, "head": None})
+    (d / "log.jsonl").touch()
+    copy_tool(root)
+    readme = d / "README.md"
+    if not readme.exists():
+        readme.write_text(
+            "# .blueprint\n\n"
+            "- `blueprint.json`: the plan. Agents propose changes; a person approves them.\n"
+            "- `state.json`, `log.jsonl`: progress. Written only by `bin/blueprint.py`.\n"
+            "- `STRUCTURE.md`, `ROSTER.md`, `map.html`: generated views. Do not edit.\n\n"
+            "Common commands (run from the repo root):\n\n"
+            "```\npython .blueprint/bin/blueprint.py validate\npython .blueprint/bin/blueprint.py sync\n"
+            "python .blueprint/bin/blueprint.py status --next\npython .blueprint/bin/blueprint.py owner <path>\n```\n",
+            encoding="utf-8")
+    append_log(root, {"event": "init", "name": plan["app"]["name"], "preset": plan["app"]["preset"], "tool": TOOL_VERSION})
+    print(f"Created .blueprint/ in {root}. Next: fill blueprint.json, then run validate and render.")
