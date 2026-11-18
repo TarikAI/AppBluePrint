@@ -5,7 +5,7 @@ Status: **contract for waves 0 to 3.** Sibling of [`maintainers/SPEC.md`](../SPE
 How to read it: every name (field, command, flag, status, code, path) is defined once, in the section that owns it, and used the same way everywhere. "Must" is a rule a test checks. Where a choice was arbitrary it is made and stated. A builder who meets a choice this file does not settle stops and asks the orchestrator (decisions come up, not sideways).
 
 Conventions used everywhere:
-- "1.x" (and "1.2" where it describes current behaviour) means tool 1.3.0 at `fix/wave0-loop` df5dc8e, merged into `v2` before wave 0.
+- "1.x" (and "1.2" where it describes current behaviour) means tool 1.3.0 as merged into `v2` (merge `9ef5c64`; `fec67ee`, the commit `w0/a1-split` was cut from, has the same `blueprint.py`).
 - JSON: UTF-8, camelCase keys, written with `json.dumps(obj, indent=2, ensure_ascii=False) + "\n"` (today's `write_json`). JSON Lines: one object per line, readers skip blank or malformed lines and keep the first of duplicate ids (as SPEC.md).
 - Paths in any stored record: repo-relative or target-relative, forward slashes, never absolute, never a home folder.
 - Digests: the string `sha256:<64 lowercase hex>`.
@@ -58,8 +58,9 @@ app-blueprint/scripts/
       features_md.py           FEATURES.md
     study/
       __init__.py              empty apart from a docstring (importing a lane must not import the others)
-      engine.py                study record, Target, Emitter, run_study()
+      engine.py                study record, Target, Emitter, run_study(), manifest_facts()
       safety.py                limits, safe zip and folder walking, secret scrubbing, excerpts
+      keys.py                  canonical route, path-template, framework and language keys; json_shape()
       source.py                source lane (inventory, frameworks, routes, import graph)
       trace.py                 study trace
       jsscan.py                JavaScript bundle analyzer shared by web, desktop, mobile
@@ -100,19 +101,21 @@ version
 core
 globs
 learn
-study/safety, study/jsscan, study/asar, study/axml, study/aabproto, study/dex   (import only core; evidence needs them)
+study/safety     (imports core only)
+study/keys       (imports core only)
+study/jsscan, study/asar, study/axml, study/aabproto, study/dex   (import core, safety and keys)
 migrate          (pure; imports core only)
 plan             (imports migrate for the in-memory upgrade)
 rules, data
 status
 verify
-evidence         (imports study/safety and study/asar for freshness and scrubbing)
+evidence         (imports study/safety only; other readers reach freshness through the resolver table, 5.6)
 unknowns
 features
 records          (imports features for feature_items)
 roadmap          (reads ctx["features"]; imports no other domain module)
 signals
-study/engine     (study record, Target, Emitter, run_study, shared keys and helpers, 6.3)
+study/engine     (study record, Target, Emitter, run_study, manifest_facts; imports keys, 6.3)
 study/source, trace, web, desktop, mobile, datafiles, compare, capture, importers
 study/synth, study/adopt   (adopt imports plan, migrate, features, unknowns)
 registry         (imports nothing statically; importlib only)
@@ -130,17 +133,19 @@ Rules: domain modules (`rules` … `signals`, `study/*`) never import `registry`
 
 Signatures are the contract; private helpers are free. `E`/`W` are the finding callbacks of section 1.4.
 
+**Who writes what.** W0-A1 writes exactly the 1.x names of table 1.5 (with their 1.x signatures and behaviour), plus the launcher, `api`, `learn.copy_layout`, `install.TOOL_FILES` and the 1.7 `copy_tool`; `cli.main` keeps the 1.x argparse body. Every other name below in a W0-A1 module is W0-A2's, and is marked ² (W0-A2 also adapts the 1.5 functions to the 2.0 signatures shown). Names in modules owned by later workstreams are theirs (section 11).
+
 | Module | Public names |
 |---|---|
-| `version` | `TOOL_VERSION` (1.9.N on `v2`, 1.6), `MIN_SCHEMA2_TOOL`, `SCHEMA_VERSION = 2`, `SUPPORTED_SCHEMAS = (1, 2)`, `STATE_VERSION = 2` |
-| `core` | `TOOL_HOME = Path(core.__file__).resolve().parent.parent` (the folder holding the launcher); `find_root(arg_root) -> Path`; `bp_dir(root) -> Path`; `now_iso() -> str`; `read_json(path, default=None)`; `write_json(path, data)`; `write_text_if_changed(path, text) -> bool`; `read_jsonl(path) -> list[dict]`; `append_jsonl(path, rec)`; `append_log(root, event)`; `norm(p) -> str`; `file_sha(path) -> str` (sha1, 1.x); `proof_digest(path) -> str` (4.5); `sha256_bytes(b) -> str`; `canonical_json(obj) -> bytes`; `content_id(prefix, obj, n) -> str` (prefix + first n hex of sha256 of canonical JSON); `slug(text, max_len=40) -> str` (lowercase, runs of non `[a-z0-9]` to `-`, trimmed, `"x"` if empty); `read_text_safe(path, limit=1_000_000)`; `_git(root, *args) -> str`; `git_head(root)`; `git_ls_files(root) -> list[str] or None`; `find_asset(name) -> Path or None`; `die(msg, code=1)`; `class BlueprintError(SystemExit)`: `BlueprintError(error, message, *, entry=None, next=None, code=1)` with `.error` (the identifier of 7.3), `.code` (the int exit status, as `SystemExit` uses it), `.message`, `.entry`, `.next`; `emit(args, command, data, human_lines)` (prints the 7.1 envelope with `--json`, else the lines) |
+| `version` | W0-A1: `TOOL_VERSION = "1.9.0"` and `SCHEMA_VERSION = 1` only. W0-A2: `SCHEMA_VERSION = 2`², `SUPPORTED_SCHEMAS = (1, 2)`², `STATE_VERSION = 2`², `MIN_SCHEMA2_TOOL`²; the `TOOL_VERSION` line is the orchestrator's after W0-A1 (1.6) |
+| `core` | `TOOL_HOME = Path(core.__file__).resolve().parent.parent` (the folder holding the launcher); `find_root(arg_root) -> Path`; `bp_dir(root) -> Path`; `now_iso() -> str`; `read_json(path, default=None)`; `write_json(path, data)`; `write_text_if_changed(path, text) -> bool`; `read_jsonl(path) -> list[dict]`; `append_log(root, event)`; `norm(p) -> str`; `file_sha(path) -> str` (sha1, 1.x); `proof_digest(path) -> str`² (4.5); `sha256_bytes(b) -> str`²; `canonical_json(obj) -> bytes`²; `content_id(prefix, obj, n) -> str`² (prefix + first n hex of sha256 of canonical JSON); `slug(text, max_len=40) -> str`² (lowercase, runs of non `[a-z0-9]` to `-`, trimmed, `"x"` if empty); `read_text_safe(path, limit=1_000_000)`; `_git(root, *args) -> str`; `git_head(root)`; `git_ls_files(root) -> list[str] or None`²; `find_asset(name) -> Path or None`; `die(msg, code=1)`; `class BlueprintError(SystemExit)`²: `BlueprintError(error, message, *, entry=None, next=None, code=1)` with `.error` (the identifier of 7.3), `.code` (the int exit status, as `SystemExit` uses it), `.message`, `.entry`, `.next`; `emit(args, command, data, human_lines)`² (prints the 7.1 envelope with `--json`, else the lines); `append_jsonl(path, rec)`² |
 | `globs` | `glob_rx(pattern)`, `glob_match(pattern, path)`, `pattern_instance_rx(glob)` |
 | `learn` | `ISSUES_URL`, `NO_CAPTURE_ENV`, `FEEDBACK_KINDS`; `store_dir()`, `capture_on()`, `project_identity(root)`, `project_ident(root)`, `redact(text, root=None)`, `store_append(name, rec)`, `record_incident(args, exc)`, `installed_skill_versions() -> dict`, `copy_layout(bin_dir) -> "package" or "single-file" or "missing"`, `_version_tuple(v)` |
 | `migrate` | `upgrade_plan(raw: dict) -> dict` (pure, returns a new dict); `upgrade_state(raw: dict) -> dict`; `plan_version(raw) -> int` |
-| `plan` | `ACTIONS`, `ROSTER_KINDS`, `STATES`, `GLYPH`, `LABEL`, `DEFAULT_IGNORE`, `WRITE_ACCESS`, `SKELETON` (version 2), `SECTIONS_V2 = ("milestones", "features", "tasks", "unknowns")`; the 1.3.0 shape names (1.5) and `V2_FIELDS` (3.3); `load_plan(root) -> dict` (any supported version, upgraded in memory, 3.3); `load_raw_plan(root) -> dict` (parsed JSON, untouched); `load_state(root)`, `save_state(root, state)`; `owner_of(plan, path)`; `phase_index(plan)`; `module_index(plan)`; `item_verify(plan, item)`; `planned_file(plan, path)`; `section_index(plan, name) -> dict[id, entry]`; `features_of(item) -> list[str]` |
-| `rules` | `CODES`; `validate(plan, E, W, vctx)` (the 1.x core rules, same messages, same order); `validate_team(plan, team, E)`; `uniq(items, key, label, E) -> set` |
-| `data` | everything in the 1.x data section unchanged; `CODES` (the store/resource/uses entries); `validate(plan, E, W, vctx)` calls `validate_data(plan, E, W)` |
-| `status` | `folder_rule_segments(rule)`, `repo_files(root, plan, ignored_tracked=None)`, `effective_status(root, plan, state, f)`, `compute(root, plan, state) -> comp`, `summarize(rows, key)`, `next_ready(plan, rows, owner=None, blocked_phases=frozenset())`, `guard_decision(root, plan, path, by)` (1.x rules, unchanged), `set_file_state(root, path, new_state, by, note=None)`, `proof_inputs(root, plan, paths) -> dict[path, digest]`, `proof_current(root, plan, proof) -> bool`, `class Hasher` (per-run cache keyed by `(path, size, mtime_ns)`) |
+| `plan` | `ACTIONS`, `ROSTER_KINDS`, `STATES`, `GLYPH`, `LABEL`, `DEFAULT_IGNORE`, `WRITE_ACCESS`, `SKELETON` (version 2 from W0-A2), `SECTIONS_V2 = ("milestones", "features", "tasks", "unknowns")`²; the 1.3.0 shape names (1.5) and `V2_FIELDS`² (3.3); `load_plan(root) -> dict` (from W0-A2: any supported version, upgraded in memory, 3.3); `load_raw_plan(root) -> dict`² (parsed JSON, untouched); `load_state(root)`, `save_state(root, state)`; `owner_of(plan, path)`; `phase_index(plan)`; `module_index(plan)`; `item_verify(plan, item)`; `planned_file(plan, path)`; `section_index(plan, name) -> dict[id, entry]`²; `features_of(item) -> list[str]`² |
+| `rules` | `CODES`²; `validate(plan, E, W, vctx)` (the 1.x core rules, same messages, same order; hook signature²); `validate_team(plan, team, E)`; `uniq(items, key, label, E) -> set` |
+| `data` | everything in the 1.x data section unchanged; `CODES`² (the store/resource/uses entries); `validate(plan, E, W, vctx)`² calls `validate_data(plan, E, W)` |
+| `status` | `folder_rule_segments(rule)`, `repo_files(root, plan, ignored_tracked=None)`, `effective_status(root, plan, state, f)`, `compute(root, plan, state) -> comp`, `summarize(rows, key)`, `next_ready(plan, rows, owner=None, blocked_phases=frozenset())` (the parameter²), `guard_decision(root, plan, path, by)` (1.x rules, unchanged), `set_file_state(root, path, new_state, by, note=None)`, `proof_inputs(root, plan, paths) -> dict[path, digest]`², `proof_current(root, plan, proof) -> bool`², `class Hasher`² (per-run cache keyed by `(path, size, mtime_ns)`) |
 | `verify` | `verify_groups(plan, phase=None, owner=None, only=None) -> dict[cmd, list[path]]`; `run_check(cmd, cwd, timeout) -> {"result", "exit", "durationMs"}` (result `pass`, `fail`, `timeout` or `error`); `record_file_proofs(root, plan, state, cmd, paths, result)` |
 | `evidence` | section 5.9 |
 | `unknowns` | `CODES`; `validate(plan, E, W, vctx)`; `blocking(plan) -> {"phases": set, "milestones": set, "features": set, "by": dict[target, list[uid]]}`; `context(root, plan, state, ctx)`; `refuse(action, root, plan, path, by) -> str or None` |
@@ -149,7 +154,7 @@ Signatures are the contract; private helpers are free. `E`/`W` are the finding c
 | `roadmap` | `CODES`; `validate(plan, E, W, vctx)`; `set_task(root, plan, tid, status, by, note=None, force=False)`; `context(root, plan, state, ctx)` (reads `ctx["features"]`); `roster_sections(ctx)`; `map_payload(ctx)`; `status_lines(ctx, args)`; `status_json(ctx)` |
 | `signals` | `record(root, signal, code)` (9.4) |
 | `registry` | `DOMAIN`, `VIEWS`, `COMMAND_TABLE`; `modules(kind) -> list[module]`; `hook(name) -> callable or None` (the single module defining it); `collect(hook, *args) -> list[(name, result)]`; `codes() -> list[(regex, code)]`; `signal(root, signal, code)`; `refusal(action, root, plan, path, by) -> str or None` |
-| `validate` | `VALIDATION_CODES` (assembled, 7.4); `classify_error(msg) -> str`; `validate_findings(plan, team=None, evidence_ids=None, root=None) -> list[Finding]`; `validate_plan(plan, team=None, evidence_ids=None, root=None) -> (errors: list[str], warnings: list[str])`; `record_friction(root, findings_or_errors)` |
+| `validate` | `VALIDATION_CODES` (W0-A1: the 1.x list; W0-A2: assembled from hooks, 7.4); `classify_error(msg) -> str`; `validate_findings(plan, team=None, evidence_ids=None, root=None) -> list[Finding]`²; `validate_plan(plan, team=None, evidence_ids=None, root=None) -> (errors: list[str], warnings: list[str])` (new parameters²; raw dicts, 3.3); `record_friction(root, findings_or_errors)` |
 | `views.context` | `build_context(root, plan, state) -> ctx` |
 | `views.structure` | `build_tree`, `tree_lines`, `md_cell`, `render_structure(plan, state, comp, ctx=None)` |
 | `views.roster` | `render_roster(plan, state, comp, ctx=None)` |
@@ -181,7 +186,7 @@ COMMAND_TABLE = {   # every subcommand of 2.0 -> its module
 
 `modules(kind)` imports `bp.<name>` for each DOMAIN or VIEWS name in order and returns those that exist. A module that does not exist yet (`ModuleNotFoundError` whose `name` is exactly that module) is skipped; any other import error propagates (a bug, so an incident). `cli.main` creates a subparser for **every** name in `COMMAND_TABLE`, with help text from a static dict in `cli`. If the module exists, `module.register(name, parser)` adds the arguments and sets `fn`; if not, the parser accepts `argparse.REMAINDER` and its handler raises `not-built`. Command handlers import what they need inside the function and turn a `ModuleNotFoundError` for a `bp.*` module into `not-built`, so a missing lane never breaks other commands between waves. A wave-4 test asserts every listed module exists.
 
-Every 2.0 flag on a 1.x command (7.2) is declared by W0-A2 in `commands/plan.py` or `commands/progress.py` and reaches its implementation through a hook; an absent hook gives `not-built`. Handlers read every attribute added in 2.0 with `getattr(args, name, default)`, because 1.x tests call `cmd_*` with a bare `Namespace` of the 1.x attributes.
+Every 2.0 flag on a 1.x command (7.2) is declared by W0-A2 in `commands/plan.py`, `commands/progress.py` or `commands/learn.py` and reaches its implementation through a hook; an absent hook gives `not-built`. Handlers read every attribute added in 2.0 with `getattr(args, name, default)`, because 1.x tests call `cmd_*` with a bare `Namespace` of the 1.x attributes.
 
 Hooks (all optional; a module defines only what it needs):
 
@@ -189,7 +194,7 @@ Hooks (all optional; a module defines only what it needs):
 |---|---|---|---|
 | `CODES` | `list[(regex, code)]` | `validate.VALIDATION_CODES` | the new modules in DOMAIN order, then `data.CODES`, then `rules.CODES` (those two together are exactly the 1.x list in its 1.x order; the legacy entries are broad, so they go last) |
 | `validate` | `(plan, E, W, vctx) -> None` | `validate_findings` | DOMAIN order (`rules` first); `rules.validate_team` after all hooks (1.x order: core, data, team) |
-| `context` | `(root, plan, state, ctx) -> None` adds keys | `build_context` | DOMAIN order: `unknowns` before `records` before `features` before `roadmap`, so each reads what the earlier ones added |
+| `context` | `(root, plan, state, ctx) -> None` adds keys | `build_context` | DOMAIN order: `unknowns` before `records` before `features` before `roadmap`, so each reads what the earlier ones added; a reader treats a missing key as empty (before W3-V lands, every criterion is `unknown` and `commandPass` is false) |
 | `file_tags` | `(ctx) -> dict[path or glob, list[str]]` | STRUCTURE.md | concatenated in DOMAIN order |
 | `roster_sections` | `(ctx) -> list[(title, markdown)]` | ROSTER.md | appended after the 1.x sections |
 | `views` | `(ctx) -> dict[filename, text]` | `render_all` | defined by the VIEWS modules; `{}` when the view should not exist (8) |
@@ -216,11 +221,11 @@ Hooks (all optional; a module defines only what it needs):
 
 ### 1.5 Where each 1.x name goes
 
-Mechanical move from `app-blueprint/scripts/blueprint.py` at the 1.3.0 head (`fix/wave0-loop` df5dc8e) as merged into `v2`. Bodies change only where this file says so.
+Mechanical move from `app-blueprint/scripts/blueprint.py` at `fec67ee` (same content as merge `9ef5c64`). Bodies change only where this file says so.
 
 | 1.x name | 2.0 module |
 |---|---|
-| `TOOL_VERSION`, `SCHEMA_VERSION` | `version` (`SCHEMA_VERSION` becomes 2) |
+| `TOOL_VERSION`, `SCHEMA_VERSION` | `version` (`SCHEMA_VERSION` stays 1 in W0-A1; W0-A2 sets 2) |
 | `ACTIONS`, `ROSTER_KINDS`, `STATES`, `GLYPH`, `LABEL`, `DEFAULT_IGNORE`, `WRITE_ACCESS`, `SKELETON`, `load_plan`, `load_state`, `save_state`, `owner_of`, `phase_index`, `module_index`, `item_verify`, `planned_file` | `plan` |
 | `json_kind`, `LIST_SECTIONS`, `ID_SECTIONS`, `STRING_FIELDS`, `STRING_LIST_FIELDS`, `REQUIRED_KEYS`, `check_entry`, `check_plan_shapes`, `normalize_plan` | `plan` |
 | `HERE` | `core.TOOL_HOME` (api also exports `HERE = TOOL_HOME`) |
@@ -246,24 +251,25 @@ Mechanical move from `app-blueprint/scripts/blueprint.py` at the 1.3.0 head (`fi
 | **any other top-level name** (including names added to 1.3.x after this table was written) | the module of its only caller; if callers span modules, the lowest of them in the 1.2 import order |
 | module bindings of the 1.x file (`argparse`, `csv`, `hashlib`, `json`, `os`, `platform`, `re`, `secrets`, `shutil`, `sqlite3`, `subprocess`, `sys`, `traceback`, `Path`, `_dt`, `io`) | re-exported by `api` (`test_plan_fuzz` patches `bp.subprocess.run`) |
 
-`tests/data/v1/blueprint-1.3.0.py` is a frozen copy of the 1.x file at that head (committed, so shallow CI checkouts need no git history). `test_package.test_every_1x_name` parses it with `ast` and asserts every top-level function, class, assignment and import binding is an attribute of the launcher module.
+`tests/data/v1/blueprint-1.3.0.py` is a frozen copy of that file at `fec67ee` (committed, so shallow CI checkouts need no git history). `test_package.test_every_1x_name` parses it with `ast` and asserts every top-level function, class, assignment and import binding is an attribute of the launcher module.
 
 Errors in moved code: every code path reachable from a 1.x name keeps `die()` and its exact text. `BlueprintError` (a `SystemExit` subclass, 1.3) is raised only by code added in 2.0; because it is a `SystemExit`, direct callers such as `test_plan_fuzz` see the exit code they expect, and `cli.main` prints it before its incident handler (which already passes `SystemExit` through).
 
-**W0 rule.** The 1.3.0 test suite (`test_blueprint.py`, `test_data_and_learning.py`, `test_presets.py`, `test_contracts_module.py`, `test_ignore_anchor.py`, `test_owner_anchor.py`, `test_plan_shapes.py`, `test_plan_fuzz.py`) passes unchanged, except the one assertion in (a) below; and `STRUCTURE.md` and `ROSTER.md` rendered for the v1 example and for every plan of the fuzz corpus are byte-identical to 1.3.0's (goldens in `tests/data/v1/`). Intended differences from 1.3.0 behaviour, and nothing else:
+**W0 rule.** The 1.3.0 test suite (`test_blueprint.py`, `test_data_and_learning.py`, `test_presets.py`, `test_contracts_module.py`, `test_ignore_anchor.py`, `test_owner_anchor.py`, `test_plan_shapes.py`, `test_plan_fuzz.py`) passes unchanged, except the one assertion in (a) below; and `STRUCTURE.md` and `ROSTER.md` are byte-identical to 1.3.0's: for the v1 example against goldens stored in `tests/data/v1/`, and for every plan of the fuzz corpus that both tools load, against the frozen `tests/data/v1/blueprint-1.3.0.py` imported by path at test time (no stored goldens for the corpus). Intended differences from 1.3.0 behaviour, and nothing else:
 
 | # | Difference | Lands in |
 |---|---|---|
 | a | incident `frames` name the module files (`rules.py:120:validate`); the 1.3.0 assertion `startswith("blueprint.py:")` becomes the regex `^[\w.]+\.py:\d+:[\w<>]+$` (Python 3.10 and 3.11 frames include `<listcomp>`, `<genexpr>`) | W0-A1 |
 | b | `init --refresh-tool`: the new copy order and messages, and the "already the copy" early return (1.7) | W0-A1 |
-| c | `doctor`: layout and schema lines (1.7) | W0-A1 |
-| d | `validate` adds the `schema-v1` warning; `status` ends with the schema line for v1 plans (3.3) | W0-A2 |
+| c | `doctor`: layout and schema lines (1.7), without any mention of `migrate` (W0-A1 messages never name it) | W0-A1 |
+| d | `validate` adds the `schema-v1` warning; `status` ends with the schema line for v1 plans (3.3); the `migrate` hints of 1.7 and 3.3 appear only once `bp/commands/migrate.py` exists (W0-B tests them) | W0-A2 |
 | e | `init` writes version 2 | W0-A2 |
 | f | `status --json` and `export json` gain the keys `features`, `milestones`, `tasks`, `unknowns` (empty lists for a v1 plan) | W0-A2 |
 | g | `state.json` gains `stateVersion`, `tasks`, `files[*].verified.inputs` | W0-A2 |
 | h | proof hashing normalises text line endings (4.5); 1.x proofs on CRLF files go stale once | W0-A2 |
 | i | the guard refuses protected `.blueprint/` paths (4.8) | W3-V |
 | j | learn.py keys incidents by `file:function` (9.4) | W3-L |
+| k | the top-level `version` is checked at load: a missing version is `blueprint.json: version is required`, a non-integer is `version must be a whole number`, an integer other than 1 or 2 is `schema-too-new` (1.3.0 reported these only in `validate`, as `version must be 1`); all exit 1 | W0-A2 |
 
 ### 1.6 Launcher, `api`, version line
 
@@ -296,7 +302,7 @@ try:
     from bp.api import *        # noqa: F401,F403  (every 1.x public name)
     from bp.api import __all__  # noqa: F401
     from bp.cli import main     # noqa: F401
-except ImportError as _e:
+except Exception as _e:                            # ImportError, SyntaxError, OSError, UnicodeDecodeError, ...
     if __name__ != "__main__":
         raise
     sys.stderr.write("The tool copy at %s is incomplete (%s). Run: python <skill>/scripts/blueprint.py "
@@ -308,7 +314,7 @@ if __name__ == "__main__":
     main()
 ```
 
-`realpath` and `normcase` make the comparison hold across case and 8.3 short-path forms on Windows (for example `RUNNER~1` in CI temp folders), so a good `bp` is never purged and loaded twice. A version mismatch between the launcher and `bp/` (a mixed copy) is treated like a missing package.
+`realpath` and `normcase` make the comparison hold across case and 8.3 short-path forms on Windows (for example `RUNNER~1` in CI temp folders), so a good `bp` is never purged and loaded twice. A version mismatch between the launcher and `bp/` (a mixed copy), or any exception while loading the package (a module with newer syntax, a damaged or unreadable file), is treated like a missing package when run as a script; loaded as a module (tests), the exception is re-raised.
 
 Checked against the current tests: they load the script with `importlib.util.spec_from_file_location(...)` and `exec_module`, then use module attributes (`bp.validate_plan`, `bp.load_plan`, `bp.cmd_status`, `bp.subprocess`, …); the star import makes them attributes of that module object. `test_blueprint.py` runs `[python, scripts/blueprint.py, ...]` and `[python, .blueprint/bin/blueprint.py, ...]` as subprocesses; both work because the launcher finds `bp/` beside itself. Verified with a mock package: names exposed, a foreign `bp` replaced, runs from a copy, no `__pycache__` written.
 
@@ -330,7 +336,7 @@ Version: the single source is `bp/version.py` with the line `TOOL_VERSION = "x.y
 
 `copy_tool(root, _stop_after=None)` (the parameter exists for tests only):
 1. If `TOOL_HOME` resolves to `.blueprint/bin` itself, print `This is already the project's copy (tool X). Run the skill's script to refresh it: python <skill>/scripts/blueprint.py init --refresh-tool` and return (exit 0).
-2. **package**: write the package into `.blueprint/bin/bp.new/`, then swap: `os.replace(bin/bp, bin/bp.old)` if it exists, `os.replace(bin/bp.new, bin/bp)`, delete `bin/bp.old`. On Windows `PermissionError` retry each replace up to 5 times, 0.2 s apart, then fail with exit 1 naming the folder.
+2. **package**: first delete any leftover `bin/bp.new/` and `bin/bp.old/` from an earlier interrupted refresh; write the package into `bin/bp.new/`, then swap: `os.replace(bin/bp, bin/bp.old)` if it exists, `os.replace(bin/bp.new, bin/bp)`, delete `bin/bp.old` (if that fails, for example a Windows lock, it stays and the next refresh removes it). On Windows `PermissionError` retry each replace up to 5 times, 0.2 s apart, then fail with exit 1 naming the folder.
 3. **launcher**: temp file plus `os.replace`.
 4. **assets**: the same, one by one.
 5. **VERSION** last.
@@ -339,17 +345,18 @@ Interrupted states, and what the guard does in each (a test stops the copy after
 
 | Stopped after | Launcher on disk | Result |
 |---|---|---|
+| inside step 2 (no `bp/`, only `bp.old/` or `bp.new/`) | old launcher | from 1.9+: `guard`/`hook pre` exit 2, others exit 1 with the refresh message; from 1.x: the single file keeps working |
 | step 2 (from 1.x) | the old single file | the old 1.x tool keeps working; it ignores `bp/` |
 | step 2 (from 1.9+) | old launcher, new `bp/` | version mismatch: `guard`/`hook pre` exit 2, others exit 1 with the refresh message |
 | step 3 or 4 | new launcher, new `bp/` | works; a missing asset only skips `map.html` (1.x message) |
 | before step 5 | complete | works; `doctor` still says out of date until `VERSION` is written |
 
-Upgrading a 1.x single-file copy is the same call. The command prints `Upgraded .blueprint/bin from the single-file tool <old> to the package tool <new>.` when `learn.copy_layout()` was `single-file` before the copy, and, for a version 1 blueprint, `Your blueprint is schema version 1. It keeps working. To use milestones, features, tasks and unknowns, run: python .blueprint/bin/blueprint.py migrate`.
+Upgrading a 1.x single-file copy is the same call. The command prints `Upgraded .blueprint/bin from the single-file tool <old> to the package tool <new>.` when `learn.copy_layout()` was `single-file` before the copy, and, for a version 1 blueprint from W0-A2 on, `Your blueprint is schema version 1. It keeps working.`, followed, once `bp/commands/migrate.py` exists, by ` To use milestones, features, tasks and unknowns, run: python .blueprint/bin/blueprint.py migrate`. W0-A1 prints neither line.
 
 `learn.copy_layout(bin_dir)`: `package` if `bin_dir/bp/version.py` exists; `single-file` if only `bin_dir/blueprint.py` exists; else `missing`. `doctor` (changes in 2.0):
 - installed skills: version from `app-blueprint/scripts/bp/version.py`, else from `app-blueprint/scripts/blueprint.py` (1.x installs).
 - project copy: version from `VERSION`; if missing, from the `TOOL_VERSION` line of `bp/version.py`, else of `blueprint.py`; the layout is printed: `this project's tool copy: 1.3.0 (single-file)`. A single-file copy is always reported out of date by a 1.9+ tool.
-- schema: `blueprint.json schema: 1 (run migrate to use 2.0 planning)` or `2`.
+- schema: `blueprint.json schema: 1` or `2` (W0-A1 reads it as 1.3.0 does); from W0-A2 the `1` line adds ` (run migrate to use 2.0 planning)` once `bp/commands/migrate.py` exists, and the copy is compared with `MIN_SCHEMA2_TOOL`.
 - `--strict` exits 1 when the copy is out of date (unchanged).
 
 `init` (new project) writes `SKELETON` (version 2, section 2.1) and copies the tool as above.
@@ -569,8 +576,8 @@ W0-B commits this as `app-blueprint/references/example-blueprint-v2.json` (fixin
 ### 3.1 `upgrade_plan(raw)` (pure; used by `migrate` and by `load_plan` in memory)
 
 1. If `raw["version"] == 2`, return a copy unchanged.
-2. If `raw["version"] == 1` (or the key is missing and every top-level key is a 1.2 key, treated as 1): copy every key in its original order, set `version` to 2, and append `milestones`, `features`, `tasks`, `unknowns` as `[]` for each one missing. Nothing else changes: no file, pattern, owner, decision or unknown key is touched, reordered or normalized.
-3. Any other version: `BlueprintError("schema-too-new")`.
+2. If `raw["version"] == 1` (an int; a missing or non-integer version never reaches this function, 3.3): copy every key in its original order, set `version` to 2, and append `milestones`, `features`, `tasks`, `unknowns` as `[]` for each one missing. Nothing else changes: no file, pattern, owner, decision or unknown key is touched, reordered or normalized.
+3. Any other version: `BlueprintError("schema-too-new", "blueprint.json is schema version N; this tool reads 1 and 2", next="update the skill, then run init --refresh-tool")`.
 
 Lossless: removing the four added empty arrays and setting `version` back to 1 gives a dict equal to the input (test over every 1.x fixture and the 1.2 example). Idempotent: `upgrade_plan(upgrade_plan(x)) == upgrade_plan(x)`.
 
@@ -580,7 +587,7 @@ A state without `stateVersion` is version 1. Upgrade: add `"stateVersion": 2` an
 
 ### 3.3 Commands meeting a version 1 file
 
-`load_plan` (W0-A2) reads the raw JSON; runs the 1.3.0 `check_plan_shapes` (exit 1 with the 1.3.0 messages) plus the 2.0 checks: the top-level `version` must be an integer (`type(v) is int`; `true`, `1.0` and `"1"` are load errors `blueprint.json: version must be a whole number (got boolean)`), and the new sections and fields are type-checked against a per-section table `plan.V2_FIELDS` built from the Type columns of 2.3 to 2.7 (the global `STRING_FIELDS` is not applied to the new sections, so `features[].source`, an object, passes). A type error in a new section is a load error (exit 1, 1.3.0 message format, e.g. `blueprint.json: features[0].criteria must be a list (got string)`); W1 modules therefore never see a wrongly typed value. It then runs `upgrade_plan` in memory, sets `plan["_from"] = 1` for a version 1 file, runs `normalize_plan` (null means missing, extended to the new sections) and normalizes paths as 1.x does. Every command works on the upgraded plan:
+`load_plan` (W0-A2) reads the raw JSON; runs the 1.3.0 `check_plan_shapes` (exit 1 with the 1.3.0 messages) plus the 2.0 checks: the top-level `version` must be present (`blueprint.json: version is required`) and an integer (`type(v) is int`; `true`, `1.0` and `"1"` are load errors `blueprint.json: version must be a whole number (got boolean)`), and the new sections and fields are type-checked against a per-section table `plan.V2_FIELDS` built from the Type columns of 2.3 to 2.7 (the global `STRING_FIELDS` is not applied to the new sections, so `features[].source`, an object, passes). A type error in a new section is a load error (exit 1, 1.3.0 message format, e.g. `blueprint.json: features[0].criteria must be a list (got string)`); W1 modules therefore never see a wrongly typed value. It then runs `upgrade_plan` in memory, sets `plan["_from"] = 1` for a version 1 file, runs `normalize_plan` (null means missing, extended to the new sections) and normalizes paths as 1.x does. Every command works on the upgraded plan:
 
 | Command | With a version 1 `blueprint.json` |
 |---|---|
@@ -589,6 +596,8 @@ A state without `stateVersion` is version 1. Upgrade: add `"stateVersion": 2` an
 | `task`, `accept` | fail with `unknown-task` / `unknown-feature` (there are none), exit 1 |
 | `study ...`, `evidence ...` | work, except `study adopt --write`: `schema-v1-write`, exit 1, next `blueprint.py migrate` |
 | `migrate` | section 3.4 |
+
+`validate_plan` given a dict directly (not through `load_plan`) first upgrades a copy in memory with `upgrade_plan` when its version is the int 1, so a version 1 dict still validates and gets the `schema-v1` warning; a `version` that is not the int 1 or 2 is the error `version must be 1 or 2` (code `version`). Direct callers in the 1.3.0 suite keep passing: `test_presets` and `test_owner_anchor` pass version 1 dicts and assert no errors while filtering warnings by text, so the added warning is harmless; `test_plan_fuzz` passes `load_plan` results, and its bad versions now exit 1 at load, which it accepts.
 
 Writers of `blueprint.json` (`migrate`, `study adopt --write`) start from `load_raw_plan`, change the raw dict, and write it with `write_json`; they never write a `load_plan` result (which has normalized paths, dropped nulls and `_` keys). A version 2 plan read by a 1.3.0 copy: its `validate` says only `version must be 1`, while `sync`, `status` and `guard` run on what they understand; `migrate` prevents this by refusing to run while `.blueprint/bin` is older than `MIN_SCHEMA2_TOOL` (see 12.2 for a 1.3.x message).
 
@@ -626,7 +635,7 @@ blueprint.py migrate [--dry-run] [--force] [--json]
 }
 ```
 
-All 1.2 keys keep their meaning. New: `stateVersion`, `tasks`, `files[*].verified.inputs`. `sha` keeps being written (sha1, of the normalised content, 4.5), so a 1.x tool reading this state still works (on CRLF checkouts it sees those files as unverified). Feature status is never stored; it is derived on every run. Verification records live in their own files (4.6).
+All 1.x keys keep their meaning, including `ignoredTracked` (`{"count": N, "paths": [first 20]}`: tracked files the default ignore rules drop, written by `sync` since 1.3.0). New: `stateVersion`, `tasks`, `files[*].verified.inputs`. `sha` keeps being written (sha1, of the normalised content, 4.5), so a 1.x tool reading this state still works (on CRLF checkouts it sees those files as unverified). Feature status is never stored; it is derived on every run. Verification records live in their own files (4.6).
 
 ### 4.2 The ladders
 
@@ -645,19 +654,23 @@ All 1.2 keys keep their meaning. New: `stateVersion`, `tasks`, `files[*].verifie
 
 1. `feature.draft` → `draft`.
 2. any item `blocked`, or the feature, its milestone, or the phase of any of its planned files is blocked by an unknown (2.6) → `blocked`.
-3. `ev = checks["evaluation"]` (the current evaluation, below). If `ev` and its verdict is `fail` → `failed`.
+3. `ev = checks["evaluation"]` (the current evaluation, below). If `ev` gives `fail` for any criterion → `failed`.
 4. `lo` = minimum item rank (0 when there are no items); `hi` = maximum.
 5. `commandPass` = every criterion that has `verify` has result `pass` via `command`.
-6. `lo == 4`, `commandPass`, and at least one criterion: `accepted` if `ev` and its verdict is `pass`, else `verified`.
+6. `lo == 4`, `commandPass`, and at least one criterion: `accepted` if every criterion without `verify` has result `pass` through `ev` (vacuously true when all criteria have `verify`, but then `ev` must exist), else `verified`.
 7. `lo >= 3` → `built`.
 8. `hi >= 1` → `building`.
 9. → `planned`.
 
 **Criterion with `verify` (command criterion).** Take the feature's `check` records for that criterion that are current: proof current (4.5), `criterionDigest` equal to `sha256` of the canonical criterion object as it is now, and `cmd` equal to the criterion's `verify` now. The **latest** decides: `pass` only if its `result` is `pass` and its `level` satisfies the required level (2.9). No current record → `unknown`. A later `fail` overrides an earlier `pass`.
 
-**Criterion without `verify`.** It is passed only by an independent evaluation: its result is the current evaluation's per-criterion result, `pass` only if that is `pass` and the evaluation's level satisfies the required level. No owner action can pass it.
+**Criterion without `verify`.** It is passed only by an independent evaluation: `pass` only if the current evaluation records `pass` for it and the evaluation's level satisfies the required level; any other evaluation result, or none, leaves it `unknown` (a recorded `fail` makes the feature `failed`, rule 3). No owner action can pass it.
 
-**Current evaluation** (`records.latest_evaluation`): the latest `evaluation` record whose proof is current, whose `criteria` cover exactly the feature's current criterion ids with matching digests, and whose `by` is in the roster and independent under today's plan (not the feature `owner`, owns no item). Any other evaluation is **not current and is ignored**; adding or editing a criterion therefore returns an accepted feature to `verified`, not to `failed`. The verdict is recomputed when read: `pass` only when every criterion's result in the record is `pass` and, for criteria without `verify`, the record's level satisfies the required level; otherwise `fail`.
+**Evaluations and command criteria.** An evaluation records results only for the criteria it actually checked. For a criterion with `verify`, an evaluation result of `pass`, `unknown` or `skipped`, or no result, does not change its result, which comes from check records; an evaluation `fail` makes the feature `failed`.
+
+**`verified` is not behaviour-checked.** `verified` means every file verified and every command criterion passing, nothing more. Wherever a feature status is shown (`status`, `status --feature`, FEATURES.md, ROADMAP.md, the map, `status --json` as `awaitingEvaluation`), a `verified` feature that has criteria without `verify` not yet passed shows the count: `verified, 2 criteria await evaluation`. A feature whose criteria all lack `verify` is shown the same way (`verified, 3 of 3 criteria await evaluation`) and is never presented as behaviour-checked before it is accepted.
+
+**Current evaluation** (`records.latest_evaluation`): the latest `evaluation` record whose proof is current, every criterion it names still exists with the recorded digest, and whose `by` is in the roster and independent under today's plan (not the feature `owner`, owns no item). Any other evaluation is **not current and is ignored**. Editing a criterion makes the evaluation not current, and a newly added criterion without `verify` is `unknown` until evaluated, so either returns an accepted feature to `verified`, not to `failed`. The verdict is recomputed when read: `fail` if any criterion's result in it is `fail`; `pass` if every criterion without `verify` has `pass` at a sufficient level; otherwise `partial`.
 
 Milestone done (2.3) and every "N of M" in the views count only `accepted` features and `done` tasks.
 
@@ -676,7 +689,7 @@ Identity is self-asserted: `--by` is not authenticated, so independence rests on
 
 ### 4.5 Proofs
 
-**Hashing.** `core.proof_digest(path)`: a file that decodes as UTF-8 and contains no NUL byte is text and is hashed after normalising line endings (CRLF and lone CR become LF); any other file is hashed as raw bytes. The result is `sha256:<hex>`. The same function gives evidence digests for files in folder targets (5.1); archive members are hashed raw. So a checkout with CRLF on Windows and LF on Linux gives the same proofs.
+**Hashing.** `core.proof_digest(path)`: a file that decodes as UTF-8 and contains no NUL byte is text and is hashed after normalising line endings (CRLF and lone CR become LF); any other file is hashed as raw bytes. The result is `sha256:<hex>`. It streams in 64 KiB chunks: an incremental UTF-8 decoder checks the text rule while two hashes (raw and normalised, a trailing CR carried across chunk boundaries) are updated in one pass, and the normalised one is returned only if the whole file was text, so no file is read whole into memory. The same function gives evidence digests for files in folder targets (5.1); archive members are hashed raw. So a checkout with CRLF on Windows and LF on Linux gives the same proofs.
 
 `status.proof_inputs(root, plan, paths)`: the set is `paths` plus the transitive closure of `dependsOn` over planned files, computed with a visited set (file `dependsOn` cycles are not rejected by validate); pattern ids and globs in `dependsOn` are not followed (a stated limitation). Only files present on disk are kept, each mapped to `proof_digest`. Sorted keys.
 
@@ -702,7 +715,7 @@ Location: `.blueprint/verification/<feature-id>.jsonl`, one record per line, app
 
 `check` (command criteria only): `criterion`, `criterionDigest` (sha256 of the canonical criterion object when run), `cmd`, `result`, `level` (the criterion's `verifyLevel`, else `integration`), `exit` (int or null), `durationMs`, `repeat` (`{"n": N, "passed": k}`; result is `pass` only when `k == N`).
 
-`evaluation`: `verdict` (`pass` or `fail` when recorded; recomputed when read, 4.3), `mode` (7.2 `accept`), `level` (from the mode), `criteria` (`{cid: {"result", "note", "digest"}}` for every criterion of the feature), `evidence` (evidence ids), `independent: true`.
+`evaluation`: `verdict` (`pass`, `fail` or `partial` when recorded; recomputed when read, 4.3), `mode` (7.2 `accept`), `level` (from the mode), `criteria` (`{cid: {"result", "note", "digest"}}` for the criteria the evaluator checked only), `evidence` (evidence ids), `independent: true`.
 
 Readers (`load_records`) tolerate malformed lines and unknown fields, as SPEC.md readers do.
 
@@ -739,7 +752,9 @@ One JSON object. rea's record shape, in our names (rea field in brackets):
 | `at` | string | only for `evidence add` | lane records carry no time (determinism) |
 | `superseded` | bool | no | set by `--replace` on a kept record (5.5); not in the id |
 
-`source`: `artifact` = the target's basename (`acme-3.2.apk`) or `.` for a folder target; `path` = path inside the artifact or folder (`AndroidManifest.xml`, `src/routes/snags.ts`), or `null`; `line` 1-based or `null`; `offset` byte offset or `null`; `digest` = `core.proof_digest` of a file in a folder target (text normalised, 4.5), sha256 of the raw uncompressed bytes of an archive member, or `null` for unsourced agent notes. Nested members use `!/`: `outer.xapk!/base.apk!/AndroidManifest.xml`, `resources/app.asar!/main.js`; each `!/` step is resolved through `SafeZip` or `asar` by the suffix of the part before it; `excerpt` ≤ 160 chars, one line, scrubbed (6.2), or `null`.
+`source`: `artifact` = the target's basename (`acme-3.2.apk`) or `.` for a folder target; `path` = for a file target, relative to the artifact (`AndroidManifest.xml`, `base.apk!/AndroidManifest.xml` inside an XAPK); for a folder target, relative to the folder (`src/routes/snags.ts`, `resources/app.asar!/main.js`); or `null`. Each `!/` step enters a nested archive named by the part before it. `line` 1-based or `null`; `offset` byte offset or `null`.
+
+**Digest rule (the only one):** a single-file target as a whole (`target.digest`, 6.1) and each archive member (at any depth) are hashed as raw bytes (`sha256_bytes`); a file inside a folder target is hashed with `core.proof_digest` (text normalised, 4.5). `digest` is `null` for unsourced agent notes. `excerpt` ≤ 160 chars, one line, scrubbed (6.2), or `null`. `excerpt` ≤ 160 chars, one line, scrubbed (6.2), or `null`.
 
 ### 5.2 Id derivation
 
@@ -768,16 +783,16 @@ Record `coverage`: `complete` when the lane read the whole source unit within li
   traces/<slug>.json  study trace outputs (6.4)
 ```
 
-`--replace` (6.1) rewrites `evidence.jsonl` from the new run but keeps every old record whose id is cited by any `behaviours.json` or by `unknowns[].evidenceFor/evidenceAgainst`, with `superseded: true`; so re-studying edited code leaves cited evidence in place, where it shows as `stale`. `.blueprint/` is already in `DEFAULT_IGNORE`, so studies never show as drift. `evidence add` without `--study` uses `S-notes`, created on first use (`kind: notes`, own project). Git history is the audit trail; there are no revision chains and no paging.
+`--replace` (6.1) rewrites `evidence.jsonl` from the new run but keeps every old record whose id is cited by any `behaviours.json` or by `unknowns[].evidenceFor/evidenceAgainst`, with `superseded: true`; so re-studying edited code leaves cited evidence in place, where it shows as `stale`. Lanes, `synth`, `compare` and study `counts` ignore superseded records; freshness, citation checks and `evidence list` (which marks them) see them. A record re-emitted with the same id replaces the superseded one and clears the flag. `.blueprint/` is already in `DEFAULT_IGNORE`, so studies never show as drift. `evidence add` without `--study` uses `S-notes`, created on first use (`kind: notes`, own project). Git history is the audit trail; there are no revision chains and no paging.
 
 ### 5.6 Staleness
 
-`evidence.freshness(root, study, rec, target=None) -> "fresh" | "stale" | "missing" | "unknown"`:
+`evidence.freshness(root, study, rec, target=None, resolvers=None) -> "fresh" | "stale" | "missing" | "unknown"`. `resolvers` maps a file suffix to `fn(outer: bytes, inner_path: str, budget) -> bytes` (raises `Skip` when the member is missing). The zip family (`.apk .aab .apks .xapk .ipa .zip .jar`) is built in through `SafeZip`; other readers are passed in by the commands layer, which imports them lazily: `commands.evidence` and `commands.study` pass `{".asar": bp.study.asar.resolve}` when that module exists, so `evidence` imports nothing of W2-D, and a suffix with no resolver gives `unknown`. W2-D adds the asar freshness test. Steps:
 
 1. `source.digest` null → `unknown`.
 2. Locate the bytes: if `study.target.path` is set (target inside the project) use it; else the `--target PATH` given to `evidence stale`; else `unknown`.
 3. If the study has `target.digest` and the located artifact hashes to it → `fresh` for all its records (fast path).
-4. Folder target: the file at `source.path` (missing → `missing`). Archive target: the member at `source.path` read through `safety.SafeZip` (missing → `missing`). HAR or single file: the file itself.
+4. Split `source.path` at each `!/`. Folder target: the first part is a file under the folder; file target: the first part is a member of the artifact (or, with no `!/` and a non-archive target such as a HAR, the file itself). Each further part is read from the bytes of the previous one with the resolver for its suffix. A missing file or member → `missing`; no resolver → `unknown`.
 5. Digest equal → `fresh`, else `stale`.
 
 A stale record is shown with `⚠ stale` in views and `evidence list`; `study check` reports behaviours whose evidence is all stale; `study adopt` refuses behaviours whose evidence is all stale (`behaviour-stale`).
@@ -832,7 +847,7 @@ Not verified here: JADX and apktool folder layouts and `apktool.yml` keys come f
 |---|---|
 | `id` | study id; default `S-` + `slug(target basename without extension)`; exists already → `study-exists` unless `--replace` (rewrites `study.json` and `evidence.jsonl` keeping cited records, 5.5; keeps `behaviours.json`) |
 | `kind` | `source`, `web`, `desktop`, `mobile`, `data`, `compare`, `capture`, `import`, `notes` |
-| `target` | `{"name": basename, "path": repo-relative path or null, "digest": sha256 of a file target or null, "size": bytes or null, "own": bool}`; `path` is set only when the target is inside the project root (never store absolute paths) |
+| `target` | `{"name": basename, "path": repo-relative path or null, "digest": raw sha256 of a file target (5.1) or null, "size": bytes or null, "own": bool}`; `path` is set only when the target is inside the project root (never store absolute paths) |
 | `authorization` | `{"statement": text, "by": roster id or null, "at": time}` |
 | `tool` | TOOL_VERSION |
 | `at` | start time |
@@ -863,7 +878,7 @@ Skip reasons (closed list): `too-large`, `binary`, `unsupported`, `unsafe-path`,
 | wall time | 300 s per study, max 3,600; checked between units (files, members), each unit bounded by the size caps | `--time-limit S` |
 | excerpt | 160 chars | |
 
-Public: `LIMITS` (dict), `class Skip(Exception)` (`reason`), `class Stop(Exception)` (`stoppedBy`), `class Budget(limits, clock=time.monotonic)` (`file()`, `bytes(n)`, `check_time()`, `evidence(kind)`; raise `Stop`; the clock is injectable for tests), `scan_windows(text) -> iterator[(offset, chunk)]` (64 KiB windows with 1 KiB overlap; every regex scan of target text, secrets and lane patterns alike, runs per window, and every pattern starts with a literal prefix so no scan is quadratic; a 5 MiB single-line pathological input must finish within 10 s in CI), `class SafeZip(path_or_bytes, budget, depth=0)` (`members() -> list[(name, size)]`, `read(name, cap) -> bytes`), `walk(root, budget) -> iterator[relpath]`, `scrub(text) -> (text, found: list[str])`, `excerpt(text, col=0) -> str`, `SECRET_PATTERNS`.
+Public: `LIMITS` (dict), `class Skip(Exception)` (`reason`), `class Stop(Exception)` (`stoppedBy`), `class Budget(limits, clock=time.monotonic)` (`file()`, `bytes(n)`, `check_time()`, `evidence(kind)`; raise `Stop`; the clock is injectable for tests), `scan_windows(text) -> iterator[(offset, chunk)]` (64 KiB windows with 1 KiB overlap; every regex scan of target text, secrets and lane patterns alike, runs per window, and every pattern starts with a literal or an alternation of literals (`[sr]k_live_`, `(?i)bearer`, `\b(def|function|...)` qualify), never a leading `.*` or unbounded class, so no scan is quadratic; matches found twice in the 1 KiB overlap are deduplicated by their global offset; a 5 MiB single-line pathological input must finish within 10 s in CI), `class SafeZip(path_or_bytes, budget, depth=0)` (`members() -> list[(name, size)]`, `read(name, cap) -> bytes`), `walk(root, budget) -> iterator[relpath]`, `scrub(text) -> (text, found: list[str])`, `excerpt(text, col=0) -> str`, `SECRET_PATTERNS`.
 
 `SafeZip`: `zipfile.ZipFile` only for the central directory; never `extract`/`extractall`. For each member: name normalized (`\` to `/`); absolute names, drive letters, `..` parts and NUL → `unsafe-path` (Python's `zipfile` truncates names at NUL, so the NUL rule cannot be produced with the standard library and is not tested); `flag_bits & 0x1` → `encrypted`; Unix mode `(external_attr >> 16) & 0o170000 == 0o120000` → `symlink`; ratio rule → `ratio`. `read` streams with `ZipFile.open` and counts real bytes, stopping at `cap + 1` (header sizes are not trusted) → `too-large`. `zipfile.BadZipFile`, `NotImplementedError` (unsupported compression), `zlib.error`, `EOFError` → `Skip("malformed")` for the member or the archive.
 
@@ -892,7 +907,7 @@ def run_study(root, kind, target_path, study_id=None, authorization=None, own=Fa
               time_limit=300, lanes=None) -> dict      # returns the study record; writes study.json, evidence.jsonl
 ```
 
-Shared helpers in `engine` (lanes and importers use these, not each other): `path_template(path) -> str`; `route_key(method, path) -> str`; `json_shape(value, depth=4, max_keys=50) -> object` (key names and JSON types, arrays reduced to their first element); `manifest_facts(elements, em, *, path, digest, by, basis="observed", limitations=())` (the Android rows of 6.7 from `axml.parse`-shaped elements, also used for text manifests by the importers); `FRAMEWORKS` and `LANGUAGES`. Canonical keys:
+Shared helpers (lanes and importers use these, not each other). `study/keys.py` (imported by `jsscan`, `asar`, `engine` and every lane): `path_template(path) -> str`; `route_key(method, path) -> str`; `json_shape(value, depth=4, max_keys=50) -> object` (key names and JSON types, arrays reduced to their first element); `FRAMEWORKS`; `LANGUAGES`. `engine`: `manifest_facts(elements, em, *, path, digest, by, basis="observed", limitations=())` (the Android rows of 6.7 from `axml.parse`-shaped elements, also used for text manifests by the importers). Canonical keys (`keys.py`):
 
 | Thing | Rule |
 |---|---|
@@ -947,7 +962,7 @@ Bundles and HTML go through `jsscan.analyze(text, path, digest, em)`:
 
 Input: an `app.asar` file, an Electron app folder containing `resources/app.asar` or `resources/app/`, or a `.app`/install folder holding those. Other Electron-less desktop apps: `target-unsupported` with next `study import --from rea` (tier C).
 
-asar layout (verified against a real file): bytes 0..15 are four little-endian uint32: `4`, `headerSize`, `headerPayloadSize`, `jsonLength`; the header JSON is the `jsonLength` bytes at offset 16; file data starts at `8 + headerSize`. JSON: `{"files": {name: entry}}`, entry is a folder `{"files": {...}}` or a file `{"size": int, "offset": "<decimal string>", "unpacked"?: bool, "executable"?: bool, "integrity"?: {...}}` or a link `{"link": "..."}`. Reader rules: `jsonLength` ≤ 32 MiB and `16 + jsonLength ≤ file size`; offsets and sizes are checked against the file size; names containing `/`, `\`, `..` or NUL are `unsafe-path`; links are skipped (`symlink`); `unpacked` files are read from the sibling `app.asar.unpacked/` folder only if their real path stays inside it; recursion depth ≤ 64. `asar.py` public: `read_header(path) -> (tree, data_start)`, `iter_files(path, budget) -> iterator[(relpath, size, offset, unpacked)]`, `read_file(path, entry, cap) -> bytes`.
+asar layout (verified against a real file): bytes 0..15 are four little-endian uint32: `4`, `headerSize`, `headerPayloadSize`, `jsonLength`; the header JSON is the `jsonLength` bytes at offset 16; file data starts at `8 + headerSize`. JSON: `{"files": {name: entry}}`, entry is a folder `{"files": {...}}` or a file `{"size": int, "offset": "<decimal string>", "unpacked"?: bool, "executable"?: bool, "integrity"?: {...}}` or a link `{"link": "..."}`. Reader rules: `jsonLength` ≤ 32 MiB and `16 + jsonLength ≤ file size`; offsets and sizes are checked against the file size; names containing `/`, `\`, `..` or NUL are `unsafe-path`; links are skipped (`symlink`); `unpacked` files are read from the sibling `app.asar.unpacked/` folder only if their real path stays inside it; recursion depth ≤ 64. `asar.py` public: `read_header(path_or_bytes) -> (tree, data_start)`, `iter_files(path_or_bytes, budget) -> iterator[(relpath, size, offset, unpacked)]`, `read_file(path_or_bytes, entry, cap) -> bytes`, `resolve(outer: bytes, inner_path, budget) -> bytes` (the 5.6 resolver).
 
 | Kind | Key | Extracted from |
 |---|---|---|
@@ -1088,7 +1103,7 @@ Input: behaviours of S with `status: reviewed` that pass `study check` (others a
 
 Exit codes (unchanged): 0 ok; 1 error or findings; 2 guard refused, and also argparse usage errors (argparse's own exit code, unchanged from 1.x; a malformed `guard` or `hook pre` call therefore refuses, the safe direction); 3 not allowed (owner, independence, authorization, blocked); 64 usage errors the tool itself detects (`usage`); 70 unexpected error (incident).
 
-`--json` on every new command prints exactly one object on stdout: success `{"ok": true, "command": "<name and subcommand>", "data": {...}}`; failure `{"ok": false, "command": "...", "error": {"code", "message", "entry", "next"}}` with the same exit code. The 1.2 JSON outputs (`status --json`, `export json`, `export agenticteam --json`) keep their shape and only gain keys (via `status_json` hooks: `features`, `milestones`, `tasks`, `unknowns`).
+`--json` on every new command prints exactly one object on stdout: success `{"ok": true, "command": "<name and subcommand>", "data": {...}}`; failure `{"ok": false, "command": "...", "error": {"code", "message", "entry", "next"}}` with the same exit code; `error.code` is `BlueprintError.error` (the 7.3 identifier), never the exit status. The 1.2 JSON outputs (`status --json`, `export json`, `export agenticteam --json`) keep their shape and only gain keys (via `status_json` hooks: `features`, `milestones`, `tasks`, `unknowns`).
 
 Human errors go to stderr: `error: <message>` and, when known, `  next: <command or edit>`. `cli.main` prints a `BlueprintError` in this form and exits with its `.code`; 1.x code paths keep `die()` and their exact text (1.5). Every refusal and error names the entry it is about and the next command.
 
@@ -1107,7 +1122,7 @@ New or changed commands only; everything else is as 1.3.0. All take `--root`.
 | `claim` | as 1.2 | refused for a blocked phase: `apps/web/src/offline.ts is in phase P2, blocked by unknown U-offline (high, investigating). Resolve it first, or use --force if the lead says so.` | — | 0, 3 | state |
 | `verify` | 1.x flags plus `[--stale] [--feature F] [--criterion C] [--repeat N] [--by ID]` | 1.x per command; `--feature F --run` (through the `verify_feature` hook): per criterion `$ cmd`, `C1 pass (integration, 3/3)`; criteria without `verify` listed as `C3 is passed only by an independent evaluation (accept)` | `{"records": [rec]}` | 0 all pass, 1 any not pass | state; `verification/F.jsonl` |
 | `task` | `<task-id> todo|doing|done|blocked --by ID [--note TEXT] [--force] [--json]` | `T-domain: done (by owner)` | `{"task", "status", "by"}` | 0, 1, 3 (`wrong-owner`, `owner-action-human`), 64 (`blocked` without `--note`) | state, log |
-| `accept` | `<feature-id> --by ID --mode browser|device|cli|api|manual|code-only --result C1=pass --result C2=fail ... [--evidence ev-...]... [--note TEXT] [--json]` | `F-inbox: accepted by evaluator (browser, e2e)` or `F-inbox: failed (C2 fail, C3 unknown)` | `{"record": rec, "status": "<feature status after>"}` | 0 verdict pass, 1 verdict fail, 3 `not-independent` / `not-verified` (allowed from `verified`, `accepted` or `failed`, 4.4) | `verification/F.jsonl`, log |
+| `accept` | `<feature-id> --by ID --mode browser|device|cli|api|manual|code-only [--result C1=pass]... [--evidence ev-...]... [--note TEXT] [--json]` (`--result` only for criteria actually checked; command criteria need none) | `F-inbox: accepted by evaluator (browser, e2e)`, `F-inbox: failed (C2 fail)`, or `F-inbox: not accepted (C3 awaits evaluation)` | `{"record": rec, "status": "<feature status after>"}` | 0 verdict pass, 1 verdict fail or partial, 3 `not-independent` / `not-verified` (allowed from `verified`, `accepted` or `failed`, 4.4) | `verification/F.jsonl`, log |
 | `evidence add` | `--kind K --key K --claim TEXT --basis B [--study S] [--path P --line N] [--limitation TEXT]... [--link ev-...]... [--by ID] [--json]` (`--path` is repo-relative: `artifact` `.`, `digest` = `proof_digest` when the file exists else null, `excerpt` = line N scrubbed and cut to 160 chars, else null) | `Recorded ev-... in S-notes.` | `{"record"}` | 0, 1 | `studies/S/evidence.jsonl` |
 | `evidence list` | `[--study S] [--kind K] [--stale] [--json]` | one line per record: id, basis, freshness, claim | `{"records": [rec + "freshness"]}` | 0 | — |
 | `evidence show` | `<ev-id> [--json]` | the record | `{"record", "freshness"}` | 0, 1 | — |
@@ -1127,7 +1142,7 @@ New or changed commands only; everything else is as 1.3.0. All take `--root`.
 
 `accept --mode` to level: `browser`, `device`, `cli` → `e2e`; `api` → `integration`; `manual` → `manual`; `code-only` → `unit`. A `--result` value is `pass`, `fail`, `skipped` or `unknown`; criteria without a `--result` are `unknown`. Note **changes from the plan's wording**: `verify --record` is not a flag; `verify --feature F --run` always records.
 
-### 7.3 CLI error codes (`BlueprintError.code`)
+### 7.3 CLI error identifiers (`BlueprintError.error`; the exit status is `.code`)
 
 | Code | Exit | Meaning / next |
 |---|---|---|
@@ -1180,7 +1195,7 @@ New or changed commands only; everything else is as 1.3.0. All take `--root`.
 | `unknown-incomplete` | error | **`unknown <id>: needs question, severity and status`** |
 | `unknown-severity` | error | **`unknown <id>: severity must be`** low, medium, high or critical |
 | `unknown-status` | error | **`unknown <id>: status must be`** open, investigating, resolved or dropped |
-| `unknown-blocks` | error | **`unknown <id>: blocks `**`'<x>', which is no phase, milestone or feature` |
+| `unknown-blocks` | error | **`unknown <id>: blocks `**`'<x>', which is no phase, milestone or feature` / **`unknown <id>: blocks `**`'<x>', which names both a phase and a milestone; write phase:<x> or milestone:<x>` |
 | `unknown-experiment` | error | **`unknown <id>: investigating needs experiment`**`.plan, experiment.timebox (e.g. 2d) and experiment.exit` |
 | `unknown-resolved-no-decision` | error | **`unknown <id>: resolved needs decision`**, the id of the decisions[] entry that settles it |
 | `unknown-dropped-no-note` | error | **`unknown <id>: dropped needs notes`** saying why |
@@ -1205,7 +1220,7 @@ Milestones: N (done D) · Features: accepted A of F · Tasks: done T of K · Ope
 
 ## M1 Private beta · due 2027-01-15 · 1 of 2 features accepted
 Goal: ... Exit: ...
-| Feature | Status | Criteria passing | Owner |
+| Feature | Status (with the awaiting-evaluation count of 4.3) | Criteria passing | Owner |
 | Task | Owner | Status |        (owner actions marked "you")
 Blocked by: U-offline (high, investigating), ...
 
@@ -1216,7 +1231,7 @@ Blocked by: U-offline (high, investigating), ...
 
 ### 8.2 FEATURES.md (`views/features_md.py`)
 
-Per feature, in plan order: `## <glyph> F-id Title · <status>`, the statement, `kind · milestone · owner · level`, depends on, files (glyph + path, pattern globs with instance counts), a criteria table (`ID | Given | When | Then | Must not | Level | Check | Evaluation`; check shows `pass (integration, 3/3)`, `fail`, `stale`, `unknown`), latest evaluation (`by`, mode, verdict, date), unknowns blocking it, source study. Drafts last under `## Drafts`.
+Per feature, in plan order: `## <glyph> F-id Title · <status>` (with the awaiting-evaluation count of 4.3), the statement, `kind · milestone · owner · level`, depends on, files (glyph + path, pattern globs with instance counts), a criteria table (`ID | Given | When | Then | Must not | Level | Check | Evaluation`; check shows `pass (integration, 3/3)`, `fail`, `stale`, `unknown`), latest evaluation (`by`, mode, verdict, date), unknowns blocking it, source study. Drafts last under `## Drafts`.
 
 ### 8.3 STRUCTURE.md and ROSTER.md additions
 
@@ -1240,7 +1255,8 @@ Per feature, in plan order: `## <glyph> F-id Title · <status>`, the statement, 
 | Key | Shape | Hook owner |
 |---|---|---|
 | `rows[].features`, `rows[].infrastructure`, `rows[].stale` | list, bool, bool | `status.compute` (W0-A2 adds the keys, empty/false for v1) |
-| `features` | `[{"id", "title", "statement", "kind", "milestone", "owner", "level", "draft", "status", "items": [{"path", "status", "from"}], "itemCounts": {state: n}, "criteria": [{"id", "scenario", "action", "expected", "mustNot", "level", "result": "pass"|"fail"|"timeout"|"skipped"|"error"|"unknown", "resultLevel", "resultAt", "stale": bool, "evaluation": result or null}], "evaluation": {"verdict", "by", "mode", "level", "at"} or null, "blockedBy": [uid], "dependsOn", "source"}]` | features |
+| `features` | `[{"id", "title", "statement", "kind", "milestone", "owner", "level", "draft", "status", "items": [{"path", "status", "from"}], "itemCounts": {state: n}, "criteria": [{"id", "scenario", "action", "expected", "mustNot", "level", "result": "pass"|"fail"|"timeout"|"skipped"|"error"|"unknown", "resultLevel", "resultAt", "stale": bool, "evaluation": result or null}], "awaitingEvaluation": n, "evaluation": {"verdict", "by", "mode", "level", "at"} or null, "blockedBy": [uid], "dependsOn", "source"}]` | features |
+| (mapping) | `criteria[].result`, `resultLevel`, `resultAt` and `stale` are `ctx["checks"][fid]["criteria"][cid]` `result`, `level`, `at` and `stale` (1.4) | features |
 | `featureStates`, `featureGlyph`, `featureLabel`, `levels` | list, dict, dict, list | features |
 | `milestones` | `[{"id", "name", "goal", "due", "exit", "features": [fid], "tasks": [tid], "progress": {"features", "accepted", "tasks", "done"}, "done": bool, "overdue": bool, "blockedBy": [uid]}]` | roadmap |
 | `tasks` | `[{"id", "title", "owner", "milestone", "ownerAction", "dependsOn", "doneWhen", "status", "by", "at", "note"}]` | roadmap |
@@ -1319,7 +1335,7 @@ Each workstream writes its tests in its own files (section 11). A wrongly typed 
 | unknowns | each code; blocking of phase, milestone, feature; claim refusal; `status --next` skip | low/medium severity never blocks; resolved never blocks | experiment not an object, bad timebox |
 | records | check and evaluation records; proofs; stale after edit of an item and of a dependency; repeat; a check stops counting when the criterion's text or `verify` changes; a command without `verifyLevel` never satisfies `e2e` or `manual`; a no-verify criterion passes only through an evaluation; adding a criterion makes an evaluation not current (status back to `verified`, not `failed`); evaluator independence re-checked after an ownership change; re-accept from `accepted` and `failed` | `accept` by owner (3); accept with a file not verified (3); timeout counts as fail | malformed lines in `verification/*.jsonl` |
 | evidence | id stability (same fact, different claim or study → same id); freshness all four states; export byte-identical twice; import merge counts | import of a foreign format refused (`bad-bundle`) | truncated JSONL lines, record missing `kind`, data over 4 KB |
-| study core, safety | authorization required outside root; limits honoured; time limit stops with `truncated` | inside-root target needs no flag | zip-slip, zip bomb, encrypted member, symlink member and folder symlink pointing outside, nested depth 3, truncated zip |
+| study core, safety | authorization required outside root; limits honoured; time limit stops with `truncated` | the source lane on the project root and on a tracked folder needs no flag; an APK inside the project root does | zip-slip, zip bomb, encrypted member, symlink member and folder symlink pointing outside, nested depth 3, truncated zip |
 | each lane | every kind in its table emitted from its fixture with the right key | nothing emitted from an unrelated file | truncated or garbage bytes for every format it reads |
 | trace | route, path, symbol and literal seeds | `seed-not-found` | graph.json missing or corrupt |
 | capture, importers | capture with typed values replaced; rea, JADX and apktool fixtures | wrong `--from` for a folder | capture with wrong `format`, rea record without `subject` |
@@ -1371,20 +1387,20 @@ CI matrix unchanged (Linux and Windows, Python 3.10 and 3.12). Paths in tests us
 
 ## 11. Workstreams
 
-Paths: `scripts/` and `bp/` are under `app-blueprint/scripts/`; `assets/`, `references/`, `tests/` and `agents/` are under `app-blueprint/`; `maintainers/`, `examples/`, `install.py`, `README.md`, `.github/` and `.blueprint/` are at the repo root. No file is owned by two workstreams at the same time. There are exactly two handovers, both sequential: the W0-A1 files marked † pass to W0-A2 when W0-A1 merges (W0-A2 starts only then), and after W0-A1 merges the **orchestrator** owns the `TOOL_VERSION` lines in `bp/version.py` and the launcher (1.9.N bumps), `CHANGELOG.md` (each PR puts its entry in the PR description) and `examples/**` (regenerated with `maintainers/make_example.py` at each version bump). Every W1 and W3 workstream's acceptance includes `tests/test_plan_fuzz_v2.py` passing with its module loaded.
+Paths: `scripts/` and `bp/` are under `app-blueprint/scripts/`; `SKILL.md`, `assets/`, `references/`, `tests/` and `agents/` are under `app-blueprint/`; `maintainers/`, `examples/`, `install.py`, `README.md`, `.github/` and `.blueprint/` are at the repo root. No file is owned by two workstreams at the same time. There are exactly two handovers, both sequential: the W0-A1 files marked † pass to W0-A2 when W0-A1 merges (W0-A2 starts only then), and after W0-A1 merges the **orchestrator** owns the `TOOL_VERSION` lines in `bp/version.py` and the launcher (1.9.N bumps), `CHANGELOG.md` (each PR puts its entry in the PR description) and `examples/**` (regenerated with `maintainers/make_example.py` at each version bump). Every W1 and W3 workstream's acceptance includes `tests/test_plan_fuzz_v2.py` passing with its module loaded. Wave 1 builders may start once W0-B is merged; no wave 1 pull request is merged before W0-C is. The dogfood blueprint records final owners († files as W0-A2's; the version lines, `CHANGELOG.md` and `examples/**` as roster id `orchestrator`), and `check_owned.py` is used from wave 1 on; the orchestrator updates the dogfood owner rules only when this table changes.
 
 | Id | Delivers | Owns (exact files) | Depends on | Model | Acceptance check |
 |---|---|---|---|---|---|
-| **W0-A1** mechanical split | package split by 1.5, launcher (1.6), `api`, copied layout and `init --refresh-tool` (1.7), doctor version detection; no behaviour change beyond 1.5 rows a–c | `scripts/blueprint.py`; `bp/__init__.py`, `version.py`, `core.py`†, `globs.py`, `learn.py`, `plan.py`†, `rules.py`, `data.py`, `status.py`†, `verify.py`†, `validate.py`†, `export.py`, `install.py`, `api.py`, `cli.py`†; `bp/views/__init__.py`, `structure.py`†, `render.py`†, `roster.py`†; `bp/commands/__init__.py`, `plan.py`†, `progress.py`†, `data.py`, `learn.py`; `tests/support.py`, `tests/test_package.py`, `tests/data/v1/**`; the 1.3.0 tests (must pass unchanged except 1.5 row a): `tests/test_blueprint.py`, `test_data_and_learning.py`, `test_presets.py`, `test_contracts_module.py`, `test_ignore_anchor.py`, `test_owner_anchor.py`, `test_plan_shapes.py`, `test_plan_fuzz.py` | `fix/wave0-loop` merged into `v2` (record the merge commit in the brief) | Opus | 1.3.0 suite green; golden views byte-identical; `test_every_1x_name`; `test_version_lines_match`; interrupted-copy test (1.7) |
+| **W0-A1** mechanical split | package split by 1.5, launcher (1.6), `api`, copied layout and `init --refresh-tool` (1.7), doctor version detection; no behaviour change beyond 1.5 rows a–c | `scripts/blueprint.py`; `bp/__init__.py`, `version.py`†, `core.py`†, `globs.py`, `learn.py`, `plan.py`†, `rules.py`†, `data.py`†, `status.py`†, `verify.py`†, `validate.py`†, `export.py`, `install.py`, `api.py`, `cli.py`†; `bp/views/__init__.py`, `structure.py`†, `render.py`†, `roster.py`†; `bp/commands/__init__.py`, `plan.py`†, `progress.py`†, `data.py`, `learn.py`†; `tests/support.py`, `tests/test_package.py`, `tests/data/v1/**`; the 1.3.0 tests (must pass unchanged except 1.5 row a): `tests/test_blueprint.py`, `test_data_and_learning.py`, `test_presets.py`, `test_contracts_module.py`, `test_ignore_anchor.py`, `test_owner_anchor.py`, `test_plan_shapes.py`, `test_plan_fuzz.py` | 1.3.0 on `v2` (`fec67ee`) | Opus | 1.3.0 suite green; golden views byte-identical; `test_every_1x_name`; `test_version_lines_match`; interrupted-copy test (1.7) |
 | **W0-A2** 2.0 foundations | registry and hooks (1.4), findings and `E`/`W`, `BlueprintError`, envelope, proofs and `Hasher` (4.5), the declared 2.0 flags on 1.x commands, `views/context.py`, the map tab plug-in point, `bp/migrate.py` and the in-memory upgrade, V2 shape checks, rows d–h of 1.5 | new: `bp/registry.py`, `bp/migrate.py`, `bp/views/context.py`, `assets/map.template.html`, `tests/test_validate.py`, `tests/test_registry_hooks.py`, `tests/test_plan_fuzz_v2.py`; taken over from W0-A1: every file marked † | W0-A1 | Opus | W0 rule still holds; `upgrade_plan` lossless and idempotent; every hook called with a stub module; `test_plan_fuzz_v2` green over the v2 example with stub hooks |
 | **W0-B** migrate command | `migrate` (3.4), the v2 example | `bp/commands/migrate.py`, `references/example-blueprint-v2.json`, `tests/test_migrate.py` | W0-A2 | Sonnet | 3.4 rules; example validates once W1 lands (skipped until then via `registry.modules`) |
 | **W0-C** dogfood and ownership check | the repo's own `.blueprint/` with this table as roster and owner rules; the PR ownership check | `.blueprint/blueprint.json` (repo root) and the files `init` makes there; `maintainers/check_owned.py` | W0-B | Sonnet | `validate` passes; `check_owned.py` (12.1, decision 11) passes on a branch that touches only its own files and fails on one that touches another's |
-| **W1-R** roadmap | milestones, tasks, `task`, ROADMAP.md, Roadmap tab | `bp/roadmap.py`, `bp/commands/roadmap.py`, `bp/views/roadmap_md.py`, `assets/tab-roadmap.js`, `tests/test_roadmap.py` | W0-B | Sonnet | every 2.3/2.4 code; task ladder and owner-action rule; ROADMAP.md from the v2 example with a stub `ctx["features"]` |
-| **W1-F** features | features, criteria, file links, `feature_items`, `derive_status`, `status_card`, FEATURES.md, Features tab, mind map by feature | `bp/features.py`, `bp/views/features_md.py`, `assets/tab-features.js`, `assets/mindmap.js`, `tests/test_features.py` | W0-B | Sonnet | every 2.5/2.7/2.8 code; one test per rule of 4.3 with synthetic `checks`; FEATURES.md renders |
-| **W1-U** unknowns | unknowns, blocking, `refuse("claim")`, Unknowns tab | `bp/unknowns.py`, `assets/tab-unknowns.js`, `tests/test_unknowns.py` | W0-B | Sonnet | every 2.6 code; claim refusal; `status --next` skip |
+| **W1-R** roadmap | milestones, tasks, `task`, ROADMAP.md, Roadmap tab | `bp/roadmap.py`, `bp/commands/roadmap.py`, `bp/views/roadmap_md.py`, `assets/tab-roadmap.js`, `tests/test_roadmap.py` | starts after W0-B; merges after W0-C | Sonnet | every 2.3/2.4 code; task ladder and owner-action rule; ROADMAP.md from the v2 example with a stub `ctx["features"]` |
+| **W1-F** features | features, criteria, file links, `feature_items`, `derive_status`, `status_card`, FEATURES.md, Features tab, mind map by feature | `bp/features.py`, `bp/views/features_md.py`, `assets/tab-features.js`, `assets/mindmap.js`, `tests/test_features.py` | starts after W0-B; merges after W0-C | Sonnet | every 2.5/2.7/2.8 code; one test per rule of 4.3 with synthetic `checks`; FEATURES.md renders |
+| **W1-U** unknowns | unknowns, blocking, `refuse("claim")`, Unknowns tab | `bp/unknowns.py`, `assets/tab-unknowns.js`, `tests/test_unknowns.py` | starts after W0-B; merges after W0-C | Sonnet | every 2.6 code; claim refusal; `status --next` skip |
 | **W2-FX1** archive fixtures | 10.2 builders for APK, AAB, XAPK, IPA, asar and hostile archives; the aapt2 goldens | `tests/fixtures_archives.py`, `tests/test_fixtures_archives.py`, `tests/data/android/**`, `tests/data/README.md` | W0-A1 | Sonnet | each output passes a structural self-check that reuses no lane code (zip lists members, dex checksum verifies, plistlib loads) |
 | **W2-FX2** text fixtures | 10.2 builders for HAR, source map, bundle, SQLite, OpenAPI, GraphQL, proto, repo, rea/JADX/apktool, capture | `tests/fixtures_text.py`, `tests/test_fixtures_text.py` | W0-A1 | Sonnet | same kind of self-check (json loads, sqlite opens) |
-| **W2-E** evidence and study engine | evidence store (5), engine with the shared keys and helpers (6.3), safety (6.2), `evidence` and `study` commands, Studies tab | `bp/evidence.py`, `bp/study/__init__.py`, `bp/study/engine.py`, `bp/study/safety.py`, `bp/commands/evidence.py`, `bp/commands/study.py`, `assets/tab-studies.js`, `tests/test_evidence.py`, `tests/test_study_core.py` | W0-A2, W2-FX1, W2-FX2 | Opus | section 5; hostile archives; authorization rule; export byte-identical; 5 MiB pathological input under the time bound |
+| **W2-E** evidence and study engine | evidence store (5), engine and `keys` (6.3), safety (6.2), `evidence` and `study` commands, Studies tab | `bp/evidence.py`, `bp/study/__init__.py`, `bp/study/engine.py`, `bp/study/safety.py`, `bp/study/keys.py`, `bp/commands/evidence.py`, `bp/commands/study.py`, `assets/tab-studies.js`, `tests/test_evidence.py`, `tests/test_study_core.py` | W0-A2, W2-FX1, W2-FX2 | Opus | section 5; hostile archives; authorization rule; export byte-identical; 5 MiB pathological input under the time bound |
 | **W2-S** source and trace | source lane, import graph, `study trace` | `bp/study/source.py`, `bp/study/trace.py`, `tests/test_study_source.py` | W2-E | Opus | every 6.4 kind from the repo fixture; trace roles and depth; no `subprocess` outside `git_ls_files` |
 | **W2-W** web | HAR, source maps, `jsscan` | `bp/study/web.py`, `bp/study/jsscan.py`, `tests/test_study_web.py` | W2-E | Sonnet | every 6.5 kind; no header, cookie, query or body value stored; `sourcesContent` never written |
 | **W2-D** desktop | asar reader and desktop lane | `bp/study/asar.py`, `bp/study/desktop.py`, `tests/test_study_desktop.py` | W2-E, W2-W (`jsscan`) | Opus | every 6.6 kind; unpacked and link handling; header bounds |
@@ -1393,12 +1409,12 @@ Paths: `scripts/` and `bp/` are under `app-blueprint/scripts/`; `assets/`, `refe
 | **W2-T** tier B and C | capture and importers | `bp/study/capture.py`, `bp/study/importers.py`, `tests/test_study_import.py` | W2-E | Sonnet | 5.8 mapping per field; typed values replaced; tolerant of missing parts |
 | **W2-SY** synthesis | synth, check, adopt | `bp/study/synth.py`, `bp/study/adopt.py`, `tests/test_synth.py` | W2-E, W1-F, W1-U | Opus | 6.12 and 6.13 row by row; idempotence; copied-text check |
 | **W3-V** verification | records, criterion checks, `verify_feature`, acceptance, protected paths, `accept` | `bp/records.py`, `bp/commands/records.py`, `tests/test_records.py` | W1-F | Sonnet | section 4 tests; an evaluator accepts a fixture feature; owner refused |
-| **W3-A** agents | surveyor and evaluator; installing them | `agents/blueprint-surveyor.md`, `agents/blueprint-evaluator.md`, `install.py`, `tests/test_agents.py` | W2-SY, W3-V | Opus | `test_agents.py`: frontmatter fields present; every `blueprint.py <command> ...` line in the files parses with the real CLI (`--help` per subcommand, flags exist); plus one recorded run on fixtures attached to the PR |
-| **W3-R1** builder rules | agent rules and SKILL.md (modes for roadmap, features, unknowns, study, verify, accept; mutation protocol; council) | `SKILL.md`, `references/agent-rules.md`, `references/readiness-review.md` | W1, W2, W3-V | Sonnet | every command and flag named in them exists (`tests/test_docs.py` of W3-R2 checks) |
+| **W3-A** agents | surveyor and evaluator; installing them | `agents/blueprint-surveyor.md`, `agents/blueprint-evaluator.md`, `install.py` (repo root; not `bp/install.py`), `tests/test_agents.py` | W2-SY, W3-V | Opus | `test_agents.py`: frontmatter fields present; every `blueprint.py <command> ...` line in the files parses with the real CLI (`--help` per subcommand, flags exist); plus one recorded run on fixtures attached to the PR |
+| **W3-R1** builder rules | agent rules and SKILL.md (modes for roadmap, features, unknowns, study, verify, accept; mutation protocol; council) | `SKILL.md`, `references/agent-rules.md`, `references/readiness-review.md` | W1, W2, W3-V, W3-R2 (`test_docs.py`) | Sonnet | every command and flag named in them exists (`tests/test_docs.py` of W3-R2 checks) |
 | **W3-R2** references | schema reference, hooks doc (protected paths), integrations, README, docs check | `references/schema.md`, `references/hooks.md`, `references/integrations.md`, `README.md`, `tests/test_docs.py` | W1, W2, W3-V | Sonnet | `test_docs.py`: every field of section 2 appears in schema.md; every command in the docs parses with the real CLI |
 | **W3-L** loop upgrades | signals (9.4), incident keys `file:function`, SPEC.md, maintainer agents | `bp/signals.py`, `tests/test_signals.py`, `maintainers/learn.py`, `maintainers/tests/test_learn.py`, `maintainers/SPEC.md`, `maintainers/agents/blueprint-harvester.md`, `maintainers/agents/blueprint-fixer.md`, `maintainers/agents/blueprint-reviewer.md` | W0-A2 | Sonnet | rate-limited friction records with `signal`; promote groups them; incident keys include the file; maintainer tests green |
 
-Dependencies are acyclic: W0-A1 → W0-A2 → W0-B → W0-C and W1-*; W2-FX* → W0-A1; W2-E → W0-A2, W2-FX*; lanes → W2-E (W2-D, W2-M also → W2-W); W2-SY → W2-E, W1-F, W1-U; W3-V → W1-F; W3-A → W2-SY, W3-V; W3-R* → W1, W2, W3-V; W3-L → W0-A2.
+Dependencies are acyclic: W0-A1 → W0-A2 → W0-B → W0-C; W1-* start after W0-B and merge after W0-C; W2-FX* → W0-A1; W2-E → W0-A2, W2-FX*; lanes → W2-E (W2-D, W2-M also → W2-W); W2-SY → W2-E, W1-F, W1-U; W3-V → W1-F; W3-A → W2-SY, W3-V; W3-R2 → W1, W2, W3-V; W3-R1 → W3-R2 and the same; W3-L → W0-A2.
 
 Wave 4 (not detailed here) owns `tests/test_e2e.py` and `tests/test_registry.py` (W4-E2E); `maintainers/mutate.py`, `maintainers/mutations.json`, `.github/workflows/mutation.yml` (W4-M; `tests.yml` is not changed); `maintainers/make_example.py` changes (W4-X).
 
@@ -1419,9 +1435,9 @@ Wave 4 (not detailed here) owns `tests/test_e2e.py` and `tests/test_registry.py`
 | 9 | argparse usage errors keep exit 2; 64 is for usage errors the tool detects | 7.1 |
 | 10 | `TOOL_VERSION` is 1.9.N on `v2`, 2.0.0 in wave 4 | 1.6 |
 | 11 | No live guard hooks on builder agents in waves 1 to 3. Before merging, the orchestrator runs `python maintainers/check_owned.py --workstream <id> --base v2` (W0-C): it lists `git diff --name-only --diff-filter=ACMRD <base>...HEAD`, loads the dogfood blueprint through the launcher module, and exits 1 when any path is unplanned or owned by another roster id, printing each with its owner | 11 |
+| 12 | The only edit to the 1.3.0 tests: `test_crash_records_incident`'s frame assertion becomes the regex of 1.5 row a | 1.5 |
 
 ### 12.2 Still open
 
-1. **The single 1.3.0 test assertion that must change** (1.5 row a). The W0 rule says the 1.3.0 suite passes unchanged, but `test_crash_records_incident` asserts `startswith("blueprint.py:")` for every frame, which cannot hold once code lives in `bp/*.py`. Options: (a) change that one assertion to the regex (recommended; it is the point of the split); (b) make `record_incident` rewrite frame file names to `blueprint.py`, which loses the file that learn.py now keys on. **Recommendation: (a)**, listed as the only edit to the 1.3.0 tests.
-2. **A 1.3.x copy meeting a version 2 plan** says only `version must be 1` (3.3). A 1.3.1 patch could print `blueprint.json is schema version 2; this needs app-blueprint 1.9 or later: run python <skill>/scripts/blueprint.py init --refresh-tool`. One line: protects users who upgrade the skill on one machine but not another; costs one small release on `main`. **Recommendation:** do it if another 1.3.x release happens anyway; `migrate`'s refusal covers the common case.
+1. **A 1.3.x copy meeting a version 2 plan** says only `version must be 1` (3.3). A 1.3.1 patch could print `blueprint.json is schema version 2; this needs app-blueprint 1.9 or later: run python <skill>/scripts/blueprint.py init --refresh-tool`. One line: protects users who upgrade the skill on one machine but not another; costs one small release on `main`. **Recommendation:** do it if another 1.3.x release happens anyway; `migrate`'s refusal covers the common case.
 
