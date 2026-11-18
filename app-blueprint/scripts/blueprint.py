@@ -127,7 +127,7 @@ def glob_rx(pattern):
     """
     if pattern in _RX_CACHE:
         return _RX_CACHE[pattern]
-    p = pattern.strip()
+    p = pattern.strip().replace("\\", "/")
     anchored = p.startswith("/") or "/" in p.rstrip("/")
     p = p.lstrip("/")
     if p.endswith("/"):
@@ -196,13 +196,39 @@ def json_kind(v):
 
 
 LIST_SECTIONS = ("stack", "modules", "phases", "files", "patterns", "owners", "roster", "decisions", "stores", "resources")
-STRING_FIELDS = ("id", "path", "module", "phase", "owner", "pattern", "glob", "action", "kind", "store", "definedIn",
-                 "name", "purpose", "verify")
-STRING_LIST_FIELDS = ("dependsOn", "consumes", "produces", "aliases", "examples", "schema")
+ID_SECTIONS = ("modules", "phases", "patterns", "roster", "stores", "resources")  # sections whose ids are keys
+STRING_FIELDS = ("path", "module", "phase", "owner", "pattern", "glob", "action", "kind", "store", "definedIn",
+                 "name", "purpose", "verify", "layer", "instance", "role", "harness", "github", "lane", "goal", "exit",
+                 "part", "choice", "docs", "verified", "version", "decision", "why", "source", "host", "note",
+                 "resource", "access", "summary", "preset", "layout", "notes")
+STRING_LIST_FIELDS = ("dependsOn", "consumes", "produces", "aliases", "examples", "schema", "ac", "platforms")
+REQUIRED_KEYS = {"modules": ("id", "purpose"), "phases": ("id",), "roster": ("id",), "patterns": ("id", "glob"),
+                 "owners": ("pattern", "owner"), "stores": ("id",), "resources": ("id",), "files": ("path", "action")}
+
+
+def check_entry(label, item, bad, ids=False):
+    """Type-check one object's known fields; append a message per problem to bad."""
+    for fld in (("id",) if ids else ()) + STRING_FIELDS:
+        if item.get(fld) is not None and not isinstance(item[fld], str):
+            bad.append(f"{label}.{fld} must be a string (got {json_kind(item[fld])})")
+    for fld in STRING_LIST_FIELDS + ("uses",):
+        if item.get(fld) is None and fld not in item:
+            continue
+        val = item.get(fld)
+        if not isinstance(val, list):
+            bad.append(f"{label}.{fld} must be a list (got {json_kind(val)})")
+            continue
+        want, what = (dict, "an object") if fld == "uses" else (str, "a string")
+        for j, x in enumerate(val):
+            if not isinstance(x, want):
+                bad.append(f"{label}.{fld}[{j}] must be {what} (got {json_kind(x)})")
+            elif fld == "uses":
+                check_entry(f"{label}.uses[{j}]", x, bad)
 
 
 def check_plan_shapes(plan):
-    """Exit 1 with every shape problem at once, so a malformed plan never reaches code that assumes the shapes."""
+    """Exit 1 with every shape problem at once, so a malformed plan never reaches code that assumes the shapes.
+    A null section or field is treated as missing, not as an error."""
     if not isinstance(plan, dict):
         die(f"blueprint.json must be an object (got {json_kind(plan)})\n"
             "Fix it, then run: python .blueprint/bin/blueprint.py validate")
@@ -218,20 +244,7 @@ def check_plan_shapes(plan):
             if not isinstance(item, dict):
                 bad.append(f"{key}[{i}] must be an object (got {json_kind(item)})")
             else:
-                for fld in STRING_FIELDS:
-                    if item.get(fld) is not None and not isinstance(item[fld], str):
-                        bad.append(f"{key}[{i}].{fld} must be a string (got {json_kind(item[fld])})")
-                for fld in STRING_LIST_FIELDS + ("uses",):
-                    if fld not in item:
-                        continue
-                    val = item[fld]
-                    if not isinstance(val, list):
-                        bad.append(f"{key}[{i}].{fld} must be a list (got {json_kind(val)})")
-                        continue
-                    want, label = (dict, "an object") if fld == "uses" else (str, "a string")
-                    for j, x in enumerate(val):
-                        if not isinstance(x, want):
-                            bad.append(f"{key}[{i}].{fld}[{j}] must be {label} (got {json_kind(x)})")
+                check_entry(f"{key}[{i}]", item, bad, ids=key in ID_SECTIONS)
     ig = plan.get("ignore")
     if ig is not None:
         if not isinstance(ig, list):
@@ -242,11 +255,36 @@ def check_plan_shapes(plan):
                     bad.append(f"ignore[{i}] must be a string (got {json_kind(item)})")
     for key in ("app", "approach"):
         v = plan.get(key)
-        if v is not None and not isinstance(v, dict):
+        if v is None:
+            continue
+        if not isinstance(v, dict):
             bad.append(f"{key} must be an object (got {json_kind(v)})")
+        else:
+            check_entry(key, v, bad)
     if bad:
         die("\n".join("blueprint.json: " + b for b in bad)
             + "\nFix it, then run: python .blueprint/bin/blueprint.py validate")
+
+
+def normalize_plan(plan):
+    """After the shape check: null means missing, and keys the code reads directly always exist (validate reports
+    the empty ones)."""
+    for key in [k for k, v in plan.items() if v is None]:
+        del plan[key]
+    for key in LIST_SECTIONS:
+        for item in plan.get(key) or []:
+            for k in [k for k, v in item.items() if v is None]:
+                del item[k]
+            for k in REQUIRED_KEYS.get(key, ()):
+                item.setdefault(k, "")
+            for u in item.get("uses") or []:
+                for k in [k for k, v in u.items() if v is None]:
+                    del u[k]
+                u.setdefault("resource", "")
+    for key in ("app", "approach"):
+        if isinstance(plan.get(key), dict):
+            for k in [k for k, v in plan[key].items() if v is None]:
+                del plan[key][k]
 
 
 def load_plan(root):
@@ -258,6 +296,7 @@ def load_plan(root):
     except json.JSONDecodeError as e:
         die(f"blueprint.json is not valid JSON: {e}")
     check_plan_shapes(plan)
+    normalize_plan(plan)
     for key, default in (("stack", []), ("modules", []), ("phases", []), ("files", []),
                          ("patterns", []), ("owners", []), ("roster", []), ("decisions", []),
                          ("ignore", []), ("approach", {}), ("app", {}), ("stores", []), ("resources", [])):
@@ -1098,7 +1137,7 @@ def cmd_db_check(args):
 
 def folder_rule_segments(rule):
     """The folder names of a plain folder rule ('src/legacy/' -> ['src', 'legacy']); None for any other rule."""
-    r = rule.strip()
+    r = rule.strip().replace("\\", "/")
     if not r.endswith("/") or any(c in r for c in "*?["):
         return None
     return [x for x in r.strip("/").split("/") if x] or None
@@ -1888,8 +1927,8 @@ def agenticteam_tasks(plan, comp, team=None):
     tasks, by_phase = [], {}
     group_of = {}
     for ph in plan["phases"]:
-        owners = sorted({r["owner"] for r in comp["rows"] if r["phase"] == ph["id"] and r["status"] != "verified"} |
-                        {p["owner"] for p in comp["patterns"] if p["phase"] == ph["id"]} - {None})
+        owners = sorted(({r["owner"] for r in comp["rows"] if r["phase"] == ph["id"] and r["status"] != "verified"} |
+                         {p["owner"] for p in comp["patterns"] if p["phase"] == ph["id"]}) - {None})
         for o in owners:
             tid = f"bp-{ph['id']}-{o}".lower()
             for r in comp["rows"]:
@@ -1898,8 +1937,8 @@ def agenticteam_tasks(plan, comp, team=None):
     prev_ids = []
     for ph in plan["phases"]:
         ids_this = []
-        owners = sorted({r["owner"] for r in comp["rows"] if r["phase"] == ph["id"] and r["status"] != "verified"} |
-                        {p["owner"] for p in comp["patterns"] if p["phase"] == ph["id"]} - {None})
+        owners = sorted(({r["owner"] for r in comp["rows"] if r["phase"] == ph["id"] and r["status"] != "verified"} |
+                         {p["owner"] for p in comp["patterns"] if p["phase"] == ph["id"]}) - {None})
         for o in owners:
             tid = f"bp-{ph['id']}-{o}".lower()
             files = [r for r in comp["rows"] if r["phase"] == ph["id"] and r["owner"] == o and r["status"] != "verified"]

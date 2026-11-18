@@ -17,7 +17,7 @@
 | `owners[]` | objects | ordered owner rules, last match wins |
 | `roster[]` | objects | everyone who can own files |
 | `decisions[]` | objects | `id`, `decision`, `why`, `source` |
-| `ignore[]` | globs | extra paths `sync` never reports as drift. A planned file is never ignored. A path that matches a pattern is kept only when the ignore rule is a plain folder rule (like `src/legacy/`) and the pattern's glob names that folder (`src/legacy/**/*.py` does, `src/**/*.py` does not). Wildcard rules such as `*.lock` yield only to individually planned files |
+| `ignore[]` | globs | extra paths `sync` never reports as drift. A planned file is never ignored. A path that matches a pattern is kept only when every ignore rule that matches the path ends in `/` with no wildcard (like `src/legacy/`) and the pattern's glob names every folder of each such rule (`src/legacy/**/*.py` does, `src/**/*.py` does not). Wildcard rules such as `*.lock` yield only to individually planned files |
 | `stores[]` | objects | databases and storage services, see below |
 | `resources[]` | objects | tables, env vars, APIs and other things the code connects to, see below |
 

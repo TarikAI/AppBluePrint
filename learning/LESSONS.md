@@ -72,7 +72,7 @@ Every entry must pass `python maintainers/learn.py scan-private`.
 - **Date:** 2026-11-18
 - **Kind:** bug
 - **Part:** `command:validate`, plan loading
-- **Lesson:** A plan is hand-edited JSON, so any entry can have the wrong shape. Check shapes once, when the plan loads, and report every bad entry together with how to fix it. A crash tells the user nothing.
+- **Lesson:** A plan is hand-edited JSON, so any entry can have the wrong shape. Check shapes once, when the plan loads, report every bad entry together with how to fix it, and prove it by fuzzing instead of listing cases. A crash tells the user nothing.
 - **Evidence:** Candidate c-62072a1b (tool 1.2.0): `"files": ["oops"]` ended in an unexpected error (exit 70) instead of a message; it was also the only way the tests had to force a crash.
-- **Change made:** `load_plan` checks every section and exits 1 naming each bad entry. Tests that need a crash use `APP_BLUEPRINT_SELFTEST_CRASH=1`. Shipped in 1.3.0.
-- **Test:** `app-blueprint/tests/test_plan_shapes.py`.
+- **Change made:** `load_plan` checks the types of the known fields in every section and exits 1 naming each bad entry; a `null` section or field counts as missing, and keys the code reads directly are filled with empty values that `validate` reports. Tests that need a crash use `APP_BLUEPRINT_SELFTEST_CRASH=1`. Shipped in 1.3.0.
+- **Test:** `app-blueprint/tests/test_plan_shapes.py`, and `app-blueprint/tests/test_plan_fuzz.py`, which sets each key of the example blueprint (top level, `app`, `approach`, every entry of every list section and every `uses` entry) to ten wrong values and deletes it in turn: 2,695 mutations, none may crash the load, validate, sync data scan, views, exports, contracts, status or guard paths. It proves nothing for other plan shapes or for the commands that write state (`claim`, `mark`, `verify`).

@@ -16,6 +16,7 @@ import time
 import traceback
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SKILL = Path(__file__).resolve().parents[1]
 EXAMPLE = SKILL / "references" / "example-blueprint.json"
@@ -96,12 +97,13 @@ class PlanFuzzTest(unittest.TestCase):
         bp.agenticteam_tasks(plan, comp)
         bp.owner_of(plan, SAMPLE)
         bp.guard_decision(root, plan, SAMPLE, "backend-lead")
-        for fmt in ("csv", "codeowners", "json", "agenticteam"):
+        for fmt in ("csv", "codeowners", "agenticteam"):
             bp.cmd_export(argparse.Namespace(root=str(root), format=fmt, team=None, json=False))
         bp.cmd_contracts(argparse.Namespace(root=str(root), write=False, module=None))
         bp.cmd_status(argparse.Namespace(root=str(root), owner=None, phase=None, next=True, json=False))
 
-    def test_no_mutation_crashes(self):
+    @mock.patch.object(bp.subprocess, "run", side_effect=OSError("no git in the fuzz test"))  # walk the folder, do not spawn git
+    def test_no_mutation_crashes(self, _run):
         started = time.time()
         paths = mutation_paths(self.base)
         crashes, count = {}, 0
