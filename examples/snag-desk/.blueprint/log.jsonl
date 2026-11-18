@@ -1,7 +1,7 @@
-{"event": "init", "name": "Snag Desk", "preset": "rust-agent-engine", "tool": "1.3.0", "at": "2026-11-18T18:33:49Z"}
-{"event": "claimed", "path": "apps/web/src/api.ts", "by": "frontend-engineer", "note": null, "at": "2026-11-18T18:33:49Z"}
-{"event": "built", "path": "crates/snag-api/src/main.rs", "by": "backend-engineer", "note": null, "at": "2026-11-18T18:33:49Z"}
-{"event": "verify", "cmd": "python -c \"pass\"", "ok": true, "files": 2, "at": "2026-11-18T18:33:50Z"}
-{"event": "verify", "cmd": "python -c \"pass\"", "ok": true, "files": 3, "at": "2026-11-18T18:33:50Z"}
-{"event": "blocked", "path": "apps/web/package.json", "by": "frontend-engineer", "note": "waiting on the generated API client", "at": "2026-11-18T18:33:50Z"}
-{"event": "sync", "head": "443c2d3", "counts": {"planned": 2, "claimed": 1, "ondisk": 2, "built": 1, "verified": 5, "blocked": 1}, "unplanned": 1, "dataIssues": 3, "at": "2026-11-18T18:33:50Z"}
+{"event": "init", "name": "Snag Desk", "preset": "rust-agent-engine", "tool": "1.3.0", "at": "2026-11-18T18:54:26Z"}
+{"event": "claimed", "path": "apps/web/src/api.ts", "by": "frontend-engineer", "note": null, "at": "2026-11-18T18:54:26Z"}
+{"event": "built", "path": "crates/snag-api/src/main.rs", "by": "backend-engineer", "note": null, "at": "2026-11-18T18:54:26Z"}
+{"event": "verify", "cmd": "python -c \"pass\"", "ok": true, "files": 2, "at": "2026-11-18T18:54:26Z"}
+{"event": "verify", "cmd": "python -c \"pass\"", "ok": true, "files": 3, "at": "2026-11-18T18:54:27Z"}
+{"event": "blocked", "path": "apps/web/package.json", "by": "frontend-engineer", "note": "waiting on the generated API client", "at": "2026-11-18T18:54:27Z"}
+{"event": "sync", "head": "ccda64e", "counts": {"planned": 2, "claimed": 1, "ondisk": 2, "built": 1, "verified": 5, "blocked": 1}, "unplanned": 1, "dataIssues": 3, "at": "2026-11-18T18:54:27Z"}
