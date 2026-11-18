@@ -1984,7 +1984,8 @@ def cmd_export(args):
         print("# Generated from .blueprint/blueprint.json owner rules (last match wins).")
         for rule in plan["owners"]:
             handle = gh.get(rule["owner"])
-            pat = rule["pattern"] if rule["pattern"].startswith(("/", "*")) else "/" + rule["pattern"]
+            pat = norm(rule["pattern"])  # forward slashes: GitHub reads a backslash as an escape
+            pat = pat if pat.startswith(("/", "*")) else "/" + pat
             if handle:
                 print(f"{pat} {handle}")
             else:
