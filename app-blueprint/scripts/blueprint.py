@@ -185,6 +185,59 @@ def pattern_instance_rx(glob):
 
 # ----------------------------------------------------------------------------- loading
 
+def json_kind(v):
+    if v is None:
+        return "null"
+    if isinstance(v, bool):
+        return "boolean"
+    if isinstance(v, (int, float)):
+        return "number"
+    return {str: "string", list: "list", dict: "object"}.get(type(v), type(v).__name__)
+
+
+LIST_SECTIONS = ("stack", "modules", "phases", "files", "patterns", "owners", "roster", "decisions", "stores", "resources")
+FILE_LIST_FIELDS = ("uses", "dependsOn", "consumes", "produces")
+
+
+def check_plan_shapes(plan):
+    """Exit 1 with every shape problem at once, so a malformed plan never reaches code that assumes the shapes."""
+    if not isinstance(plan, dict):
+        die(f"blueprint.json must be an object (got {json_kind(plan)})\n"
+            "Fix it, then run: python .blueprint/bin/blueprint.py validate")
+    bad = []
+    for key in LIST_SECTIONS:
+        v = plan.get(key)
+        if v is None:
+            continue
+        if not isinstance(v, list):
+            bad.append(f"{key} must be a list (got {json_kind(v)})")
+            continue
+        for i, item in enumerate(v):
+            if not isinstance(item, dict):
+                bad.append(f"{key}[{i}] must be an object (got {json_kind(item)})")
+            elif key == "files":
+                if "path" in item and not isinstance(item["path"], str):
+                    bad.append(f"files[{i}].path must be a string (got {json_kind(item['path'])})")
+                for fld in FILE_LIST_FIELDS:
+                    if fld in item and not isinstance(item[fld], list):
+                        bad.append(f"files[{i}].{fld} must be a list (got {json_kind(item[fld])})")
+    ig = plan.get("ignore")
+    if ig is not None:
+        if not isinstance(ig, list):
+            bad.append(f"ignore must be a list (got {json_kind(ig)})")
+        else:
+            for i, item in enumerate(ig):
+                if not isinstance(item, str):
+                    bad.append(f"ignore[{i}] must be a string (got {json_kind(item)})")
+    for key in ("app", "approach"):
+        v = plan.get(key)
+        if v is not None and not isinstance(v, dict):
+            bad.append(f"{key} must be an object (got {json_kind(v)})")
+    if bad:
+        die("\n".join("blueprint.json: " + b for b in bad)
+            + "\nFix it, then run: python .blueprint/bin/blueprint.py validate")
+
+
 def load_plan(root):
     path = bp_dir(root) / "blueprint.json"
     if not path.exists():
@@ -193,6 +246,7 @@ def load_plan(root):
         plan = read_json(path)
     except json.JSONDecodeError as e:
         die(f"blueprint.json is not valid JSON: {e}")
+    check_plan_shapes(plan)
     for key, default in (("stack", []), ("modules", []), ("phases", []), ("files", []),
                          ("patterns", []), ("owners", []), ("roster", []), ("decisions", []),
                          ("ignore", []), ("approach", {}), ("app", {}), ("stores", []), ("resources", [])):
@@ -2012,6 +2066,8 @@ def main(argv=None):
         except (ValueError, OSError):
             pass
     try:
+        if os.environ.get("APP_BLUEPRINT_SELFTEST_CRASH") == "1":  # test hook for the incident path
+            raise RuntimeError("selftest crash")
         args.fn(args)
     except (SystemExit, KeyboardInterrupt):
         raise

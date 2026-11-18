@@ -106,6 +106,8 @@ Community records only corroborate: a group made only of community records never
 
 Set `APP_BLUEPRINT_NO_CAPTURE=1` to turn off all writes to the store.
 
+Set `APP_BLUEPRINT_SELFTEST_CRASH=1` to make any command raise `RuntimeError("selftest crash")` after argument parsing (tests use it to exercise the incident path).
+
 ## learn.py commands (maintainers only; standard library, Python 3.10+)
 
 | Command | Effect |
