@@ -55,7 +55,7 @@ python app-blueprint/scripts/blueprint.py <command> ...
 
      ```
      git add <test file>
-     git commit -m "Add failing test for <candidate-id>: <behaviour>" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+     git commit -m "Add failing test for <candidate-id>: <behaviour>" -m "<the Co-Authored-By line your dispatch gives you>"
      ```
 
 5. **Fix the minimum.** Change only what the test and the evidence need.
@@ -96,7 +96,7 @@ python app-blueprint/scripts/blueprint.py <command> ...
 11. **Commit.** Write the message to a temporary file outside the repo and run `git commit -F <file>`. Subject: imperative, under 72 characters. Body: what was wrong, what changed, the test that proves it, the candidate id. The last line is exactly:
 
     ```
-    Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+    <the Co-Authored-By line your dispatch gives you>
     ```
 
     Never use `--no-verify`. If a hook fails, fix the cause.
