@@ -24,7 +24,7 @@ Before `init`, run the script beside this file: `python <this skill folder>/scri
 python .blueprint/bin/blueprint.py <command>      # on Windows, `py -3` also works
 ```
 
-Commands: `init`, `validate [--team team.json]`, `render [--check]`, `sync [--strict]`, `status [--owner X] [--phase P] [--next]`, `owner <path>`, `claim <path> --by X`, `mark <path> built|blocked|planned --by X`, `verify [--phase P] [--run]`, `guard <path> --by X`, `contracts [--write]`, `export codeowners|csv|json|agenticteam`, `db-check --sqlite F | --schema-dump F`, `feedback`, `report`, `doctor`. Each has `--help`. Exit codes: 0 ok, 1 error, 2 guard refused, 3 not allowed (wrong owner, unplanned path), 64 bad usage, 70 unexpected error (recorded as an incident).
+Commands: `init`, `validate [--team team.json]`, `render [--check]`, `sync [--strict]`, `status [--owner X] [--phase P] [--next]`, `owner <path>`, `claim <path> --by X`, `mark <path> built|blocked|planned --by X`, `verify [--phase P] [--run]`, `guard <path> --by X`, `contracts [--write] [--module ID]`, `export codeowners|csv|json|agenticteam`, `db-check --sqlite F | --schema-dump F`, `feedback`, `report`, `doctor`. Each has `--help`. Exit codes: 0 ok, 1 error, 2 guard refused, 3 not allowed (wrong owner, unplanned path), 64 bad usage, 70 unexpected error (recorded as an incident).
 
 In a repo that already has a blueprint, run `doctor` first. It tells you if the repo's copy of the tool is older than the installed skill; if so, run `python <this skill folder>/scripts/blueprint.py init --refresh-tool`.
 
@@ -115,7 +115,7 @@ Go through the findings with the user and fix what they accept.
 2. Optional: install the write guard and auto-sync hooks from [references/hooks.md](references/hooks.md). In Claude Code they block unplanned or foreign writes and refresh the map after each write.
 3. AgenticTeam builds: `export agenticteam --team <team.json>` prints one `add-task` per owner and phase, with owned `--path`s, dependencies, checks and a verification task per phase. Show the commands to the user; the orchestrator runs them in the 04_build stage. See [references/integrations.md](references/integrations.md).
 4. People on GitHub: `export codeowners > .github/CODEOWNERS` (only roster entries with a `github` handle produce active lines).
-5. Optional: `contracts --write` creates a README contract in each module folder (overview, interface from `produces`, invariants, side effects, verification) and never overwrites an existing README.
+5. Optional: contracts create a README in a module folder (overview, interface from `produces`, invariants, side effects, verification) and never overwrite an existing README. Run `contracts` without `--write` first to list what it would create. When in doubt, write per module (`contracts --write --module ID`). Then run the project's own checks: a new README can break tooling that treats every entry in a folder as an item (a folder of skills, plugins or migrations). Remove the README for that module if it does.
 
 ## Existing code
 

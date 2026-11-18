@@ -1813,8 +1813,12 @@ def cmd_contracts(args):
     plan = load_plan(root)
     comp = compute(root, plan, load_state(root))
     made = 0
+    wanted = list(args.module or [])
+    unknown = [w for w in wanted if w not in {m.get("id") for m in plan["modules"]}]
+    if unknown:
+        die(f"unknown module id(s): {', '.join(unknown)}. Known: {', '.join(str(m.get('id')) for m in plan['modules'])}", 64)
     for m in plan["modules"]:
-        if not m.get("path"):
+        if not m.get("path") or (wanted and m.get("id") not in wanted):
             continue
         path = root / norm(m["path"]) / "README.md"
         mod_rows = [r for r in comp["rows"] if r["module"] == m["id"]]
@@ -1837,6 +1841,9 @@ def cmd_contracts(args):
             print(f"would write {norm(os.path.relpath(path, root))}")
     if args.write:
         append_log(root, {"event": "contracts", "written": made})
+        if made:
+            print("Run the project's own tests now: a new README can break tooling that treats every entry in a folder "
+                  "as an item. Remove the README for that module if it does.")
     elif made == 0:
         print("Add --write to create the missing ones. Existing READMEs are never overwritten.")
 
@@ -2088,6 +2095,7 @@ def main(argv=None):
 
     p = add("contracts", cmd_contracts, "list or write README contracts for module folders")
     p.add_argument("--write", action="store_true")
+    p.add_argument("--module", action="append", metavar="ID", help="only this module (repeatable); default: every module with a path")
 
     p = add("export", cmd_export, "print codeowners, csv, json, or AgenticTeam add-task commands")
     p.add_argument("format", choices=["codeowners", "csv", "json", "agenticteam"])
