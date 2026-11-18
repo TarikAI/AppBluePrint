@@ -4,7 +4,7 @@
 
 A small snag tracker: a Rust engine records snags and an inbox web app lets a person review them.
 
-**12 planned files, 1 patterns.** Status: ○ planned 2, ◔ claimed 1, ◑ on disk 2, ● built 1, ✔ verified 5, ▲ blocked 1. Last sync: 2026-11-06T13:46:32Z at `e2372d9`.
+**12 planned files, 1 patterns.** Status: ○ planned 2, ◔ claimed 1, ◑ on disk 2, ● built 1, ✔ verified 5, ▲ blocked 1. Last sync: 2026-11-18T18:18:19Z at `ef4aef9`.
 
 ## Stack
 

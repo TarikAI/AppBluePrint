@@ -24,7 +24,7 @@ import sys
 import traceback
 from pathlib import Path
 
-TOOL_VERSION = "1.2.0"
+TOOL_VERSION = "1.2.1"
 SCHEMA_VERSION = 1
 ACTIONS = ("create", "modify", "delete")
 ROSTER_KINDS = ("agent", "human")

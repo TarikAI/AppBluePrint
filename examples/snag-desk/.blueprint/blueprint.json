@@ -266,7 +266,7 @@
       "note": "default owner for anything not listed below"
     },
     {
-      "pattern": "crates/",
+      "pattern": "/crates/",
       "owner": "backend-engineer"
     },
     {
@@ -275,12 +275,12 @@
       "note": "shared contract: the lead owns the core types"
     },
     {
-      "pattern": "crates/snag-api/migrations/",
+      "pattern": "/crates/snag-api/migrations/",
       "owner": "backend-lead",
       "note": "the schema is a shared contract"
     },
     {
-      "pattern": "apps/web/",
+      "pattern": "/apps/web/",
       "owner": "frontend-engineer"
     }
   ],

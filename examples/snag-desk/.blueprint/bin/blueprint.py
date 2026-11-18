@@ -24,7 +24,7 @@ import sys
 import traceback
 from pathlib import Path
 
-TOOL_VERSION = "1.2.0"
+TOOL_VERSION = "1.2.1"
 SCHEMA_VERSION = 1
 ACTIONS = ("create", "modify", "delete")
 ROSTER_KINDS = ("agent", "human")
@@ -34,7 +34,7 @@ LABEL = {"planned": "planned", "claimed": "claimed", "ondisk": "on disk", "built
          "verified": "verified", "blocked": "blocked"}
 DEFAULT_IGNORE = [".git/", "node_modules/", "target/", "dist/", "build/", ".next/", ".turbo/",
                   ".venv/", "venv/", "__pycache__/", ".pytest_cache/", "coverage/", ".DS_Store",
-                  ".idea/", ".vscode/", ".blueprint/", ".agentic-team/", ".claude/", ".codex/"]
+                  ".idea/", ".vscode/", ".blueprint/", "/.agentic-team/", "/.claude/", "/.codex/"]
 WRITE_ACCESS = {"workspace-write"}
 
 HERE = Path(__file__).resolve().parent
@@ -185,6 +185,59 @@ def pattern_instance_rx(glob):
 
 # ----------------------------------------------------------------------------- loading
 
+def json_kind(v):
+    if v is None:
+        return "null"
+    if isinstance(v, bool):
+        return "boolean"
+    if isinstance(v, (int, float)):
+        return "number"
+    return {str: "string", list: "list", dict: "object"}.get(type(v), type(v).__name__)
+
+
+LIST_SECTIONS = ("stack", "modules", "phases", "files", "patterns", "owners", "roster", "decisions", "stores", "resources")
+FILE_LIST_FIELDS = ("uses", "dependsOn", "consumes", "produces")
+
+
+def check_plan_shapes(plan):
+    """Exit 1 with every shape problem at once, so a malformed plan never reaches code that assumes the shapes."""
+    if not isinstance(plan, dict):
+        die(f"blueprint.json must be an object (got {json_kind(plan)})\n"
+            "Fix it, then run: python .blueprint/bin/blueprint.py validate")
+    bad = []
+    for key in LIST_SECTIONS:
+        v = plan.get(key)
+        if v is None:
+            continue
+        if not isinstance(v, list):
+            bad.append(f"{key} must be a list (got {json_kind(v)})")
+            continue
+        for i, item in enumerate(v):
+            if not isinstance(item, dict):
+                bad.append(f"{key}[{i}] must be an object (got {json_kind(item)})")
+            elif key == "files":
+                if "path" in item and not isinstance(item["path"], str):
+                    bad.append(f"files[{i}].path must be a string (got {json_kind(item['path'])})")
+                for fld in FILE_LIST_FIELDS:
+                    if fld in item and not isinstance(item[fld], list):
+                        bad.append(f"files[{i}].{fld} must be a list (got {json_kind(item[fld])})")
+    ig = plan.get("ignore")
+    if ig is not None:
+        if not isinstance(ig, list):
+            bad.append(f"ignore must be a list (got {json_kind(ig)})")
+        else:
+            for i, item in enumerate(ig):
+                if not isinstance(item, str):
+                    bad.append(f"ignore[{i}] must be a string (got {json_kind(item)})")
+    for key in ("app", "approach"):
+        v = plan.get(key)
+        if v is not None and not isinstance(v, dict):
+            bad.append(f"{key} must be an object (got {json_kind(v)})")
+    if bad:
+        die("\n".join("blueprint.json: " + b for b in bad)
+            + "\nFix it, then run: python .blueprint/bin/blueprint.py validate")
+
+
 def load_plan(root):
     path = bp_dir(root) / "blueprint.json"
     if not path.exists():
@@ -193,6 +246,7 @@ def load_plan(root):
         plan = read_json(path)
     except json.JSONDecodeError as e:
         die(f"blueprint.json is not valid JSON: {e}")
+    check_plan_shapes(plan)
     for key, default in (("stack", []), ("modules", []), ("phases", []), ("files", []),
                          ("patterns", []), ("owners", []), ("roster", []), ("decisions", []),
                          ("ignore", []), ("approach", {}), ("app", {}), ("stores", []), ("resources", [])):
@@ -394,6 +448,26 @@ def validate_plan(plan, team=None):
             W(f"owner rule {i + 1} ({r.get('pattern')} -> {r.get('owner')}) matches no planned file or pattern")
         elif wins[i] == 0:
             W(f"owner rule {i + 1} ({r.get('pattern')} -> {r.get('owner')}) never wins: later rules override every match")
+
+    # A bare folder-name rule ("agents/") matches that folder at any depth, like CODEOWNERS. Warn when it
+    # covers planned items in the root folder and in a nested one, which is rarely what was meant.
+    label_target = {label: target for target, label in items}
+    for i, r in enumerate(rules):
+        core = str(r.get("pattern") or "").strip().rstrip("/")
+        if not core or "/" in core or "*" in core or "?" in core:
+            continue
+        root_hit, nested = False, None
+        for label in sorted(covers[i]):
+            parts = norm(label_target.get(label, "")).lstrip("/").split("/")
+            for k, part in enumerate(parts[:-1]):
+                if part == core:
+                    if k == 0:
+                        root_hit = True
+                    elif nested is None:
+                        nested = "/".join(parts)
+        if root_hit and nested:
+            W(f"owner rule {i + 1} ({r['pattern']} -> {r.get('owner')}) matches that folder name at any depth: "
+              f"it also matches {nested}. Write /{core}/ for the root folder only.")
 
     validate_data(plan, E, W)
 
@@ -1011,14 +1085,42 @@ def cmd_db_check(args):
 
 # ----------------------------------------------------------------------------- disk scan and status
 
-def repo_files(root, plan):
+def pattern_prefix_dir(glob):
+    """The literal folder a pattern glob starts in ('dist/gen/*.txt' -> 'dist/gen'); '' if it starts with a wildcard."""
+    p = norm(glob).lstrip("/")
+    head = re.split(r"[*?]", p, 1)[0]
+    return head.rsplit("/", 1)[0] if "/" in head else ""
+
+
+def repo_files(root, plan, ignored_tracked=None):
+    """Files to compare with the plan. The plan wins over ignore: a planned file or a pattern instance is
+    never dropped. If ignored_tracked is a list, tracked files that DEFAULT_IGNORE dropped are appended to it."""
     ignore = DEFAULT_IGNORE + list(plan.get("ignore", []))
+    planned = {norm(f.get("path", "")) for f in plan["files"]}
+    pat_rx = [pattern_instance_rx(p.get("glob", "")) for p in plan["patterns"] if p.get("glob")]
+    pat_dirs = [d for d in (pattern_prefix_dir(p.get("glob", "")) for p in plan["patterns"] if p.get("glob")) if d]
+
+    def wanted(path):
+        return path in planned or any(rx.match(path) for rx in pat_rx)
+
+    def dropped(path, rules):
+        return not wanted(path) and any(glob_match(g, path) for g in rules)
+
+    def planned_inside(rel):
+        return (any(f.startswith(rel + "/") for f in planned)
+                or any((d + "/").startswith(rel + "/") or (rel + "/").startswith(d + "/") for d in pat_dirs))
+
     files = None
     try:
         out = subprocess.run(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
                              cwd=root, capture_output=True, timeout=60)
         if out.returncode == 0:
             files = [norm(p) for p in out.stdout.decode("utf-8", "replace").split("\0") if p]
+            if ignored_tracked is not None:
+                tr = subprocess.run(["git", "ls-files", "--cached", "-z"], cwd=root, capture_output=True, timeout=60)
+                if tr.returncode == 0:
+                    tracked = {norm(p) for p in tr.stdout.decode("utf-8", "replace").split("\0") if p}
+                    ignored_tracked.extend(sorted(p for p in tracked if (root / p).is_file() and dropped(p, DEFAULT_IGNORE)))
     except (OSError, subprocess.SubprocessError):
         files = None
     if files is None:
@@ -1026,10 +1128,12 @@ def repo_files(root, plan):
         for dirpath, dirnames, filenames in os.walk(root):
             rel_dir = norm(os.path.relpath(dirpath, root))
             rel_dir = "" if rel_dir == "." else rel_dir
-            dirnames[:] = [d for d in dirnames if not any(glob_match(g, (rel_dir + "/" if rel_dir else "") + d + "/x") for g in ignore)]
+            dirnames[:] = [d for d in dirnames
+                           if not any(glob_match(g, (rel_dir + "/" if rel_dir else "") + d + "/x") for g in ignore)
+                           or planned_inside((rel_dir + "/" if rel_dir else "") + d)]
             for fn in filenames:
                 files.append((rel_dir + "/" if rel_dir else "") + fn)
-    return sorted(p for p in files if (root / p).is_file() and not any(glob_match(g, p) for g in ignore))
+    return sorted(p for p in files if (root / p).is_file() and not dropped(p, ignore))
 
 
 def git_head(root):
@@ -1098,7 +1202,8 @@ def cmd_sync(args):
     root = find_root(args.root)
     plan = load_plan(root)
     state = load_state(root)
-    disk = repo_files(root, plan)
+    ignored_tracked = []
+    disk = repo_files(root, plan, ignored_tracked)
     disk_set = set(disk)
     planned = {f["path"] for f in plan["files"]}
     module_readmes = {norm(m.get("path", "")).rstrip("/") + "/README.md" for m in plan["modules"] if m.get("path")}
@@ -1119,6 +1224,7 @@ def cmd_sync(args):
     missing_modify = [f["path"] for f in plan["files"] if f.get("action") == "modify" and f["path"] not in disk_set]
     state["patterns"] = patterns
     state["unplanned"] = unplanned
+    state["ignoredTracked"] = {"count": len(ignored_tracked), "paths": ignored_tracked[:20]}
     state["missingModify"] = missing_modify
     state["syncedAt"] = now_iso()
     state["head"] = git_head(root)
@@ -1139,6 +1245,9 @@ def cmd_sync(args):
                 print("    +", p)
             if len(unplanned) > 15:
                 print(f"    ... and {len(unplanned) - 15} more (see map.html, Drift)")
+        if ignored_tracked:
+            print(f"  Ignored by default rules: {len(ignored_tracked)} tracked file(s) (e.g. {', '.join(ignored_tracked[:3])}). "
+                  "Plan them or cover them with a pattern to track them.")
         if missing_modify:
             print(f"  Planned to modify but missing: {len(missing_modify)}")
             for p in missing_modify[:10]:
@@ -1704,8 +1813,12 @@ def cmd_contracts(args):
     plan = load_plan(root)
     comp = compute(root, plan, load_state(root))
     made = 0
+    wanted = list(args.module or [])
+    unknown = [w for w in wanted if w not in {m.get("id") for m in plan["modules"]}]
+    if unknown:
+        die(f"unknown module id(s): {', '.join(unknown)}. Known: {', '.join(str(m.get('id')) for m in plan['modules'])}", 64)
     for m in plan["modules"]:
-        if not m.get("path"):
+        if not m.get("path") or (wanted and m.get("id") not in wanted):
             continue
         path = root / norm(m["path"]) / "README.md"
         mod_rows = [r for r in comp["rows"] if r["module"] == m["id"]]
@@ -1728,6 +1841,9 @@ def cmd_contracts(args):
             print(f"would write {norm(os.path.relpath(path, root))}")
     if args.write:
         append_log(root, {"event": "contracts", "written": made})
+        if made:
+            print("Run the project's own tests now: a new README can break tooling that treats every entry in a folder "
+                  "as an item. Remove the README for that module if it does.")
     elif made == 0:
         print("Add --write to create the missing ones. Existing READMEs are never overwritten.")
 
@@ -1979,6 +2095,7 @@ def main(argv=None):
 
     p = add("contracts", cmd_contracts, "list or write README contracts for module folders")
     p.add_argument("--write", action="store_true")
+    p.add_argument("--module", action="append", metavar="ID", help="only this module (repeatable); default: every module with a path")
 
     p = add("export", cmd_export, "print codeowners, csv, json, or AgenticTeam add-task commands")
     p.add_argument("format", choices=["codeowners", "csv", "json", "agenticteam"])
@@ -2012,6 +2129,8 @@ def main(argv=None):
         except (ValueError, OSError):
             pass
     try:
+        if os.environ.get("APP_BLUEPRINT_SELFTEST_CRASH") == "1":  # test hook for the incident path
+            raise RuntimeError("selftest crash")
         args.fn(args)
     except (SystemExit, KeyboardInterrupt):
         raise
