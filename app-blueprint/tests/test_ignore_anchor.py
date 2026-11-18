@@ -11,7 +11,7 @@ import test_blueprint as tb
 GIT = shutil.which("git") is not None
 
 
-class IgnoreAnchorTest(unittest.TestCase):
+class Base(unittest.TestCase):
     def setUp(self):
         self.dir = Path(tempfile.mkdtemp(prefix="bp-ign-"))
         r = tb.run(["init", "--name", "Ignore"], self.dir)
@@ -36,6 +36,8 @@ class IgnoreAnchorTest(unittest.TestCase):
         state = json.loads((self.dir / ".blueprint" / "state.json").read_text(encoding="utf-8"))
         return r.stdout, state
 
+
+class IgnoreAnchorTest(Base):
     def test_nested_harness_folders_are_visible_and_root_ones_are_not(self):
         for rel in ("tests/golden/codex/.codex/config.toml", "pkg/.claude/x.md", "pkg/.agentic-team/t.json",
                     ".claude/settings.json", ".codex/c.toml", ".agentic-team/team.json", "node_modules/a/b.js"):
@@ -68,3 +70,51 @@ class IgnoreAnchorTest(unittest.TestCase):
                       "Plan them or cover them with a pattern to track them.", out)
         self.assertEqual(state["ignoredTracked"], {"count": 1, "paths": ["build/out.txt"]})
         self.assertEqual(state["unplanned"], ["src/a.py"])
+
+
+class IgnorePrecedenceTest(Base):
+    """Round two: the tool's own folder is not a notice, and a pattern overrides only a plain folder ignore it names."""
+
+    def instances(self, pid):
+        return sorted(self.sync()[1]["patterns"][pid]["instances"])
+
+    def git_add(self):
+        subprocess.run(["git", "init", "-q"], cwd=self.dir, check=True)
+        subprocess.run(["git", "add", "-f", "."], cwd=self.dir, check=True)
+
+    @unittest.skipUnless(GIT, "git is not installed")
+    def test_blueprint_folder_is_never_an_ignored_tracked_file(self):
+        self.touch("src/a.py")
+        self.git_add()
+        out, state = self.sync()
+        self.assertNotIn("Ignored by default rules", out)
+        self.assertEqual(state["ignoredTracked"], {"count": 0, "paths": []})
+
+    def test_pattern_naming_the_ignored_folder_matches_the_same_with_and_without_git(self):
+        self.touch(".claude/agents.md")
+        self.touch("pkg/.claude/b.md")
+        self.plan["patterns"] = [{"id": "agents", "glob": "**/.claude/*.md"}]
+        self.save()
+        want = [".claude/agents.md", "pkg/.claude/b.md"]
+        self.assertEqual(self.instances("agents"), want)
+        if GIT:
+            self.git_add()
+            self.assertEqual(self.instances("agents"), want)
+
+    def test_wildcard_pattern_does_not_pull_in_node_modules(self):
+        self.touch("src/a.test.ts")
+        self.touch("node_modules/x/a.test.ts")
+        self.plan["patterns"] = [{"id": "tests", "glob": "**/*.test.ts"}]
+        self.save()
+        self.assertEqual(self.instances("tests"), ["src/a.test.ts"])
+
+    def test_own_ignore_wins_unless_the_pattern_names_the_folder(self):
+        self.touch("src/legacy/old.py")
+        self.touch("src/ok.py")
+        self.plan["ignore"] = ["src/legacy/"]
+        self.plan["patterns"] = [{"id": "py", "glob": "src/**/*.py"}]
+        self.save()
+        self.assertEqual(self.instances("py"), ["src/ok.py"])
+        self.plan["patterns"] = [{"id": "py", "glob": "src/legacy/**/*.py"}]
+        self.save()
+        self.assertEqual(self.instances("py"), ["src/legacy/old.py"])
