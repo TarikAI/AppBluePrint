@@ -1,5 +1,6 @@
 """validate warns when a bare folder-name owner rule matches that folder at more than one depth."""
 import importlib.util
+import json
 import unittest
 from pathlib import Path
 
@@ -39,3 +40,8 @@ class OwnerAnchorTest(unittest.TestCase):
         self.assertEqual(self.warnings("agents/", ["skills/demo/agents/openai.yaml", "README.md"]), [])
         self.assertEqual(self.warnings("agents/", ["agents/a.md", "agents/b.md", "README.md"]), [])
         self.assertEqual(self.warnings("*.md"), [])
+
+    def test_example_blueprint_has_no_any_depth_warning(self):
+        plan = json.loads((SKILL / "references" / "example-blueprint.json").read_text(encoding="utf-8"))
+        _, warnings = bp.validate_plan(plan)
+        self.assertEqual([w for w in warnings if "at any depth" in w], [])

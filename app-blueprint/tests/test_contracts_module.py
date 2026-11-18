@@ -38,3 +38,9 @@ class ContractsModuleTest(unittest.TestCase):
         r = tb.run(["contracts", "--module", "nope"], self.dir)
         self.assertEqual(r.returncode, 64, r.stdout + r.stderr)
         self.assertIn("nope", r.stderr)
+
+    def test_module_without_a_path_says_so(self):
+        r = tb.run(["contracts", "--module", "repo"], self.dir)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("module repo has no path, so it gets no contract", r.stdout)
+        self.assertNotIn("Add --write", r.stdout)

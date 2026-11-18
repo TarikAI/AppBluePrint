@@ -100,7 +100,8 @@ class PresetTest(unittest.TestCase):
                     self.assertRegex(text, r"(?m)^## " + re.escape(heading), f"missing section {heading}")
                 plan = preset_to_plan(text)
                 self.assertGreaterEqual(len(plan["files"]), 8)
-                errors, _ = bp.validate_plan(plan)
+                errors, warnings = bp.validate_plan(plan)
+                self.assertEqual([w for w in warnings if 'at any depth' in w], [])
                 self.assertEqual(errors, [], "\n".join(errors))
                 owners = {r["owner"] for r in plan["owners"]}
                 self.assertFalse(owners & REVIEW_ONLY, f"review-only roles own files: {owners & REVIEW_ONLY}")
