@@ -17,7 +17,7 @@
 | `owners[]` | objects | ordered owner rules, last match wins |
 | `roster[]` | objects | everyone who can own files |
 | `decisions[]` | objects | `id`, `decision`, `why`, `source` |
-| `ignore[]` | globs | extra paths `sync` never reports as drift |
+| `ignore[]` | globs | extra paths `sync` never reports as drift. A planned file is never ignored. A path that matches a pattern is kept only when the ignore rule is a plain folder rule (like `src/legacy/`) and the pattern's glob names that folder (`src/legacy/**/*.py` does, `src/**/*.py` does not). Wildcard rules such as `*.lock` yield only to individually planned files |
 | `stores[]` | objects | databases and storage services, see below |
 | `resources[]` | objects | tables, env vars, APIs and other things the code connects to, see below |
 
@@ -131,3 +131,7 @@ Roster entry: `{ "id", "kind": "agent"|"human", "harness": "agenticteam"|"claude
 For `action: "delete"`, the file counts as verified once it is gone.
 
 Drift found by `sync`: files on disk that are not planned, not pattern instances, not ignored and not a module's `README.md`; and `modify` targets that are missing.
+
+Default ignores: `.git/`, `node_modules/`, `target/`, `dist/`, `build/`, `.next/`, `.turbo/`, `.venv/`, `venv/`, `__pycache__/`, `.pytest_cache/`, `coverage/`, `.DS_Store`, `.idea/`, `.vscode/` and `.blueprint/` match at any depth. `/.claude/`, `/.codex/` and `/.agentic-team/` are ignored at the repo root only, so a nested folder of those names (for example under `tests/`) is checked like any other folder.
+
+State fields set by `sync`: `unplanned`, `missingModify`, `patterns` (instances per pattern), `ignoredTracked` (`{"count": N, "paths": [up to 20]}`: git-tracked files the default ignore rules dropped, never counting `.blueprint/`; plan them or cover them with a pattern to track them), `syncedAt`, `head`, and `data` when stores or resources exist.

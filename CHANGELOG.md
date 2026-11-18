@@ -4,18 +4,19 @@ All notable changes to the app-blueprint skill. The format follows [Keep a Chang
 
 ## [Unreleased]
 
-## [1.2.1] - 2026-11-18
+## [1.3.0] - 2026-11-18
 
 ### Changed
 
-- `contracts` takes `--module ID` (repeatable) to list or write the README for chosen modules only; an unknown id exits 64. After writing, it reminds you to run the project's own tests, because a new README can break tooling that treats every entry in a folder as an item. SKILL.md step 8 says contracts are optional: list first, write per module when in doubt, then run the project's checks (c-55831b76).
+- `contracts --module ID` on a module without a path says so and exits 0, and the hint to add `--write` appears only when something is left to write. `contracts` takes `--module ID` (repeatable) to list or write the README for chosen modules only; an unknown id exits 64. After writing, it reminds you to run the project's own tests, because a new README can break tooling that treats every entry in a folder as an item. SKILL.md step 8 says contracts are optional: list first, write per module when in doubt, then run the project's checks (c-55831b76).
 - `validate` warns when an owner rule that is a bare folder name (`agents/`) matches that folder at the root and in a nested place. SKILL.md and `references/schema.md` now say that `docs/` matches any folder named docs and `/docs/` only the root one, and the example blueprint anchors its folder rules (c-5a1a611f).
 - The minimum Python version is now 3.10 (3.9 reached end of life and is no longer on GitHub's Ubuntu runners). CI tests 3.10 and 3.12.
 
 ### Fixed
 
-- A malformed `blueprint.json` (for example `"files": ["oops"]`) no longer crashes with an unexpected error. Every command exits 1 and names each bad entry, such as `blueprint.json: files[0] must be an object (got string)`, then says to fix it and run `validate` (c-62072a1b).
-- Tracked files in nested folders named `.claude`, `.codex` or `.agentic-team` (for example `tests/golden/codex/.codex/config.toml`) were invisible to `sync`. Those three default ignores now match the repo root only. A planned file, or a path matching a pattern, is never dropped by an ignore rule. `sync` says when default rules dropped tracked files, and records them as `ignoredTracked` in state (c-cf8599d6).
+- A malformed `blueprint.json` (for example `"files": ["oops"]`) no longer crashes with an unexpected error. Every command exits 1 and names each bad entry (wrong-typed text, list and `uses` fields included), such as `blueprint.json: files[0] must be an object (got string)`, then says to fix it and run `validate` (c-62072a1b).
+- Tracked files in nested folders named `.claude`, `.codex` or `.agentic-team` (for example `tests/golden/codex/.codex/config.toml`) were invisible to `sync`. Those three default ignores now match the repo root only. An ignore rule never drops a file that is individually planned. It also never drops a path that matches a pattern, but only when the rule is a plain folder rule (`.claude/`, `src/legacy/`, no wildcard) and the pattern's glob names every one of its folders (`**/.claude/*.md` names `.claude`; `src/**/*.py` does not name `legacy`, so your own `ignore: ["src/legacy/"]` still wins). Wildcard rules such as `*.lock` yield only to individually planned files. This holds with and without git. `sync` says when default rules dropped tracked files (never counting `.blueprint/`) and records up to 20 of them as `ignoredTracked` in state (c-cf8599d6).
+- Because `.claude/`, `.codex/` and `.agentic-team/` are now ignored at the repo root only, `guard` and the pre-write hook refuse unplanned writes into nested folders of those names, as they do for any other unplanned path (c-cf8599d6).
 - A feedback test failed on Windows runners, where temp folders can appear in 8.3 short form; the path was still removed.
 
 ## [1.2.0] - 2026-11-06

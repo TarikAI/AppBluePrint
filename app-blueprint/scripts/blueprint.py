@@ -24,7 +24,7 @@ import sys
 import traceback
 from pathlib import Path
 
-TOOL_VERSION = "1.2.1"
+TOOL_VERSION = "1.3.0"
 SCHEMA_VERSION = 1
 ACTIONS = ("create", "modify", "delete")
 ROSTER_KINDS = ("agent", "human")
@@ -196,7 +196,9 @@ def json_kind(v):
 
 
 LIST_SECTIONS = ("stack", "modules", "phases", "files", "patterns", "owners", "roster", "decisions", "stores", "resources")
-FILE_LIST_FIELDS = ("uses", "dependsOn", "consumes", "produces")
+STRING_FIELDS = ("id", "path", "module", "phase", "owner", "pattern", "glob", "action", "kind", "store", "definedIn",
+                 "name", "purpose", "verify")
+STRING_LIST_FIELDS = ("dependsOn", "consumes", "produces", "aliases", "examples", "schema")
 
 
 def check_plan_shapes(plan):
@@ -215,12 +217,21 @@ def check_plan_shapes(plan):
         for i, item in enumerate(v):
             if not isinstance(item, dict):
                 bad.append(f"{key}[{i}] must be an object (got {json_kind(item)})")
-            elif key == "files":
-                if "path" in item and not isinstance(item["path"], str):
-                    bad.append(f"files[{i}].path must be a string (got {json_kind(item['path'])})")
-                for fld in FILE_LIST_FIELDS:
-                    if fld in item and not isinstance(item[fld], list):
-                        bad.append(f"files[{i}].{fld} must be a list (got {json_kind(item[fld])})")
+            else:
+                for fld in STRING_FIELDS:
+                    if item.get(fld) is not None and not isinstance(item[fld], str):
+                        bad.append(f"{key}[{i}].{fld} must be a string (got {json_kind(item[fld])})")
+                for fld in STRING_LIST_FIELDS + ("uses",):
+                    if fld not in item:
+                        continue
+                    val = item[fld]
+                    if not isinstance(val, list):
+                        bad.append(f"{key}[{i}].{fld} must be a list (got {json_kind(val)})")
+                        continue
+                    want, label = (dict, "an object") if fld == "uses" else (str, "a string")
+                    for j, x in enumerate(val):
+                        if not isinstance(x, want):
+                            bad.append(f"{key}[{i}].{fld}[{j}] must be {label} (got {json_kind(x)})")
     ig = plan.get("ignore")
     if ig is not None:
         if not isinstance(ig, list):
@@ -1085,30 +1096,42 @@ def cmd_db_check(args):
 
 # ----------------------------------------------------------------------------- disk scan and status
 
-def pattern_prefix_dir(glob):
-    """The literal folder a pattern glob starts in ('dist/gen/*.txt' -> 'dist/gen'); '' if it starts with a wildcard."""
-    p = norm(glob).lstrip("/")
-    head = re.split(r"[*?]", p, 1)[0]
-    return head.rsplit("/", 1)[0] if "/" in head else ""
+def folder_rule_segments(rule):
+    """The folder names of a plain folder rule ('src/legacy/' -> ['src', 'legacy']); None for any other rule."""
+    r = rule.strip()
+    if not r.endswith("/") or any(c in r for c in "*?["):
+        return None
+    return [x for x in r.strip("/").split("/") if x] or None
 
 
 def repo_files(root, plan, ignored_tracked=None):
-    """Files to compare with the plan. The plan wins over ignore: a planned file or a pattern instance is
-    never dropped. If ignored_tracked is a list, tracked files that DEFAULT_IGNORE dropped are appended to it."""
+    """Files to compare with the plan. An ignored path is kept only if it is an individually planned file, or it
+    matches a pattern glob that names, as literal folder segments, every folder of the plain folder rule(s) that
+    drop it. If ignored_tracked is a list, tracked files that DEFAULT_IGNORE dropped are appended to it."""
     ignore = DEFAULT_IGNORE + list(plan.get("ignore", []))
     planned = {norm(f.get("path", "")) for f in plan["files"]}
-    pat_rx = [pattern_instance_rx(p.get("glob", "")) for p in plan["patterns"] if p.get("glob")]
-    pat_dirs = [d for d in (pattern_prefix_dir(p.get("glob", "")) for p in plan["patterns"] if p.get("glob")) if d]
+    pats = [(pattern_instance_rx(p["glob"]), norm(p["glob"]).lstrip("/").split("/"))
+            for p in plan["patterns"] if p.get("glob")]
 
-    def wanted(path):
-        return path in planned or any(rx.match(path) for rx in pat_rx)
+    def named_by(rules, gsegs):
+        for g in rules:
+            segs = folder_rule_segments(g)
+            if segs is None or not all(x in gsegs for x in segs):
+                return False
+        return True
 
-    def dropped(path, rules):
-        return not wanted(path) and any(glob_match(g, path) for g in rules)
+    def kept(path, rules):
+        if path in planned:
+            return True
+        hits = [g for g in rules if glob_match(g, path)]
+        return not hits or any(rx.match(path) and named_by(hits, gsegs) for rx, gsegs in pats)
 
     def planned_inside(rel):
-        return (any(f.startswith(rel + "/") for f in planned)
-                or any((d + "/").startswith(rel + "/") or (rel + "/").startswith(d + "/") for d in pat_dirs))
+        return any(f.startswith(rel + "/") for f in planned)
+
+    def prune(rel):
+        hits = [g for g in ignore if glob_match(g, rel + "/x")]
+        return bool(hits) and not planned_inside(rel) and not any(named_by(hits, gsegs) for _, gsegs in pats)
 
     files = None
     try:
@@ -1120,7 +1143,8 @@ def repo_files(root, plan, ignored_tracked=None):
                 tr = subprocess.run(["git", "ls-files", "--cached", "-z"], cwd=root, capture_output=True, timeout=60)
                 if tr.returncode == 0:
                     tracked = {norm(p) for p in tr.stdout.decode("utf-8", "replace").split("\0") if p}
-                    ignored_tracked.extend(sorted(p for p in tracked if (root / p).is_file() and dropped(p, DEFAULT_IGNORE)))
+                    ignored_tracked.extend(sorted(p for p in tracked if (root / p).is_file() and not kept(p, DEFAULT_IGNORE)
+                                                  and not p.startswith((".blueprint/", ".git/"))))
     except (OSError, subprocess.SubprocessError):
         files = None
     if files is None:
@@ -1128,12 +1152,10 @@ def repo_files(root, plan, ignored_tracked=None):
         for dirpath, dirnames, filenames in os.walk(root):
             rel_dir = norm(os.path.relpath(dirpath, root))
             rel_dir = "" if rel_dir == "." else rel_dir
-            dirnames[:] = [d for d in dirnames
-                           if not any(glob_match(g, (rel_dir + "/" if rel_dir else "") + d + "/x") for g in ignore)
-                           or planned_inside((rel_dir + "/" if rel_dir else "") + d)]
+            dirnames[:] = [d for d in dirnames if not prune((rel_dir + "/" if rel_dir else "") + d)]
             for fn in filenames:
                 files.append((rel_dir + "/" if rel_dir else "") + fn)
-    return sorted(p for p in files if (root / p).is_file() and not dropped(p, ignore))
+    return sorted(p for p in files if (root / p).is_file() and kept(p, ignore))
 
 
 def git_head(root):
@@ -1818,7 +1840,11 @@ def cmd_contracts(args):
     if unknown:
         die(f"unknown module id(s): {', '.join(unknown)}. Known: {', '.join(str(m.get('id')) for m in plan['modules'])}", 64)
     for m in plan["modules"]:
-        if not m.get("path") or (wanted and m.get("id") not in wanted):
+        if wanted and m.get("id") not in wanted:
+            continue
+        if not m.get("path"):
+            if wanted:
+                print(f"module {m.get('id')} has no path, so it gets no contract")
             continue
         path = root / norm(m["path"]) / "README.md"
         mod_rows = [r for r in comp["rows"] if r["module"] == m["id"]]
@@ -1839,12 +1865,13 @@ def cmd_contracts(args):
             print(f"wrote {norm(os.path.relpath(path, root))}")
         else:
             print(f"would write {norm(os.path.relpath(path, root))}")
+            made += 1
     if args.write:
         append_log(root, {"event": "contracts", "written": made})
         if made:
             print("Run the project's own tests now: a new README can break tooling that treats every entry in a folder "
                   "as an item. Remove the README for that module if it does.")
-    elif made == 0:
+    elif made:
         print("Add --write to create the missing ones. Existing READMEs are never overwritten.")
 
 
