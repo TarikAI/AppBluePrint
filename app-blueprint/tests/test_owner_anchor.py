@@ -45,3 +45,7 @@ class OwnerAnchorTest(unittest.TestCase):
         plan = json.loads((SKILL / "references" / "example-blueprint.json").read_text(encoding="utf-8"))
         _, warnings = bp.validate_plan(plan)
         self.assertEqual([w for w in warnings if "at any depth" in w], [])
+
+    def test_owner_rule_written_with_backslashes_matches(self):
+        plan = {"owners": [{"pattern": "src\\legacy\\", "owner": "a"}]}
+        self.assertEqual(bp.owner_of(plan, "src/legacy/x.py")[0], "a")

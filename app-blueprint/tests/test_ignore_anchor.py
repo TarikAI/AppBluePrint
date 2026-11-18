@@ -118,3 +118,10 @@ class IgnorePrecedenceTest(Base):
         self.plan["patterns"] = [{"id": "py", "glob": "src/legacy/**/*.py"}]
         self.save()
         self.assertEqual(self.instances("py"), ["src/legacy/old.py"])
+
+    def test_ignore_rule_written_with_backslashes_works(self):
+        self.touch("src/legacy/old.py")
+        self.touch("src/ok.py")
+        self.plan["ignore"] = ["src\\legacy\\"]
+        self.save()
+        self.assertEqual(self.sync()[1]["unplanned"], ["src/ok.py"])
