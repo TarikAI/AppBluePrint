@@ -256,6 +256,16 @@ class BlueprintTest(unittest.TestCase):
         r = self.tool("export", "csv")
         self.assertIn("pattern,apps/web/src/screens/*Screen.tsx", r.stdout)
 
+    def test_codeowners_export_uses_forward_slashes(self):
+        # GitHub reads a backslash in CODEOWNERS as an escape, so a rule typed with backslashes must be exported with slashes.
+        self.plan["owners"].append({"pattern": chr(92).join(["", "apps", "web", ""]), "owner": "frontend-engineer"})
+        self.plan["roster"][3]["github"] = "@web-dev"
+        self.save()
+        r = self.tool("export", "codeowners")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn(chr(92), r.stdout)
+        self.assertIn("/apps/web/ @web-dev", r.stdout)
+
     def test_copied_tool_runs_from_project(self):
         r = subprocess.run([PY, ".blueprint/bin/blueprint.py", "validate"], cwd=self.dir, capture_output=True, text=True, encoding="utf-8",
                            env=dict(os.environ, PYTHONIOENCODING="utf-8"))
