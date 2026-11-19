@@ -343,38 +343,189 @@ class CheckOwnedTests(unittest.TestCase):
         self.assertEqual(self.violations(res), [("app-blueprint/scripts/bp/roadmap.py", "unplanned", None),
                                                 ("src/features.py", "owned-by-other", "W1-F")])
 
-    def test_running_on_the_builders_tree_is_refused(self):
+    def _attack_branch(self):
+        """A branch that edits another owner's file; returns its sha."""
+        self.branch()
+        self.write("src/features.py", "stolen\n")
+        self.finish()
+        return self.git("rev-parse", "w1/r").strip()
+
+    def _patch_plan_py(self):
+        """Make the working tree's bp/plan.py say that everything is W1-R's and planned."""
+        p = self.root / "app-blueprint/scripts/bp/plan.py"
+        with open(p, "a", encoding="utf-8", newline="\n") as fh:
+            fh.write("\nowner_of = lambda plan, path: ('W1-R', 0, [0])\nplanned_file = lambda plan, path: {'path': path}\n")
+        return p
+
+    def test_running_on_the_builders_tree_is_judged_by_the_base(self):
         self.branch()
         self.write("app-blueprint/scripts/bp/roadmap.py", "x = 1\n")
+        self.write("src/features.py", "stolen\n")
         self.git("add", "-A")
         self.git("commit", "-q", "-m", "change")  # still checked out: this is the builder's tree
         code, res, _ = self.check()
-        self.assertEqual(code, 64)
-        self.assertIn("differs from the base", res["message"])
-        self.assertIn("clean checkout of the base", res["next"])
+        self.assertEqual(code, 1)
+        self.assertEqual(self.violations(res), [("app-blueprint/scripts/bp/roadmap.py", "unplanned", None),
+                                                ("src/features.py", "owned-by-other", "W1-F")])
 
-    def test_edited_script_or_tool_in_the_working_tree_is_refused(self):
-        for rel, text in (("maintainers/check_owned.py", "\n# edited\n"), ("app-blueprint/scripts/bp/core.py", "\n# edited\n")):
-            self.git("checkout", "-q", "-f", "v2")
-            with open(self.root / rel, "a", encoding="utf-8", newline="\n") as fh:
-                fh.write(text)
-            self.plumb([("100644", self.blob(), "src/roadmap.py")])
+    def test_edited_working_tree_tool_cannot_change_the_verdict(self):
+        self._attack_branch()
+        self._patch_plan_py()
+        self.write("app-blueprint/scripts/bp/evil.py", "x = 1\n")        # untracked module
+        code, res, _ = self.check()
+        self.assertEqual((code, self.violations(res)), (1, [("src/features.py", "owned-by-other", "W1-F")]))
+
+    def test_assume_unchanged_and_skip_worktree_cannot_hide_an_edit(self):
+        self._attack_branch()
+        self._patch_plan_py()
+        rel = "app-blueprint/scripts/bp/plan.py"
+        for flag in ("--assume-unchanged", "--skip-worktree"):
+            self.git("update-index", flag, rel)
+            self.assertNotIn(rel, self.git("status", "--porcelain"))   # the attack is invisible to git status
             code, res, _ = self.check()
-            self.assertEqual(code, 64, rel)
-            self.assertIn("differs from the base", res["message"])
-            self.git("checkout", "-q", "-f", "v2")
+            self.assertEqual((flag, code), (flag, 1))
+            self.git("update-index", "--no-" + flag[2:], rel)
 
-    def test_staged_edit_and_untracked_file_in_the_tool_are_refused(self):
-        self.plumb([("100644", self.blob(), "src/roadmap.py")])
-        self.write("app-blueprint/scripts/bp/evil.py", "x = 1\n")
+    def test_a_planted_pyc_in_the_working_tree_is_never_read(self):
+        import py_compile
+        self._attack_branch()
+        src = self.root / "app-blueprint/scripts/bp/plan.py"
+        evil = Path(self.tmp) / "plan_evil.py"
+        evil.write_text(src.read_text(encoding="utf-8") + "\nowner_of = lambda plan, path: ('W1-R', 0, [0])\n"
+                        "planned_file = lambda plan, path: {'path': path}\n", encoding="utf-8")
+        cfile = importlib.util.cache_from_source(str(src))
+        py_compile.compile(str(evil), cfile=cfile, doraise=True,
+                           invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH)
+        self.assertTrue(os.path.exists(cfile))
+        code, res, _ = self.check()
+        self.assertEqual((code, self.violations(res)), (1, [("src/features.py", "owned-by-other", "W1-F")]))
+
+    def test_an_edited_script_is_refused_with_the_run_the_bases_copy_hint(self):
+        self._attack_branch()
+        with open(self.script, "a", encoding="utf-8", newline="\n") as fh:
+            fh.write("\n# edited\n")
         code, res, _ = self.check()
         self.assertEqual(code, 64)
-        self.assertIn("untracked file under app-blueprint/scripts", res["message"])
-        (self.root / "app-blueprint/scripts/bp/evil.py").unlink()
-        with open(self.root / "app-blueprint/scripts/bp/core.py", "a", encoding="utf-8", newline="\n") as fh:
-            fh.write("\n# staged\n")
-        self.git("add", "app-blueprint/scripts/bp/core.py")
-        self.assertEqual(self.check()[0], 64)
+        self.assertIn("not the base's maintainers/check_owned.py", res["message"])
+        self.assertIn("base's copy", res["next"])
+
+    def test_a_crlf_copy_of_the_script_is_the_same_script(self):
+        self._attack_branch()
+        data = self.script.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+        self.script.write_bytes(data)
+        self.assertEqual(self.check()[0], 1)
+
+    def test_base_without_the_script_is_refused(self):
+        self.git("rm", "-q", "maintainers/check_owned.py")
+        self.git("commit", "-q", "-m", "drop script")
+        self.branch()
+        self.write("src/roadmap.py", "x\n")
+        self.finish()
+        self.script.parent.mkdir(exist_ok=True)
+        shutil.copyfile(CHECK, self.script)   # on disk, but the base has none
+        code, res, _ = self.check()
+        self.assertEqual(code, 64)
+        self.assertIn("the base has no maintainers/check_owned.py", res["message"])
+
+    # isolation, environment, replace objects
+    def test_planted_modules_and_pythonpath_change_nothing(self):
+        self.branch()
+        self.write("src/roadmap.py", "mine\n")
+        self.finish()
+        evil = "import os\nos._exit(0)\n"
+        cwd = Path(self.tmp) / "elsewhere"
+        pp = Path(self.tmp) / "pp"
+        for d in (self.script.parent, cwd, pp):
+            d.mkdir(parents=True, exist_ok=True)
+            for name in ("json.py", "tempfile.py", "subprocess.py", "argparse.py"):
+                (d / name).write_text(evil, encoding="utf-8")
+        for env in ({}, {"PYTHONPATH": str(pp)}):
+            r = subprocess.run([sys.executable, str(self.script), "--workstream", "W1-R", "--head", "w1/r"],
+                               capture_output=True, text=True, encoding="utf-8", cwd=str(cwd),
+                               env=dict(os.environ, **env))
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("PASS: W1-R changed 1 path", r.stdout)
+        r = subprocess.run([sys.executable, "-I", str(self.script), "--workstream", "W1-R", "--head", "w1/r"],
+                           capture_output=True, text=True, encoding="utf-8", cwd=str(cwd))
+        self.assertIn("PASS", r.stdout)
+
+    def test_caller_git_variables_change_nothing(self):
+        self._attack_branch()
+        bogus = str(Path(self.tmp) / "no-such-git-dir")
+        hostile = {"GIT_DIR": bogus, "GIT_WORK_TREE": bogus, "GIT_EXTERNAL_DIFF": "false", "GIT_INDEX_FILE": bogus,
+                   "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.fsmonitor", "GIT_CONFIG_VALUE_0": "false",
+                   "GIT_NO_REPLACE_OBJECTS": "0", "GIT_CEILING_DIRECTORIES": bogus}
+        code, out, err = self.cli("--workstream", "W1-R", "--head", "w1/r", "--json", env=hostile)
+        self.assertEqual(code, 1, err)
+        self.assertEqual(self.violations(json.loads(out)), [("src/features.py", "owned-by-other", "W1-F")])
+
+    def test_git_replace_cannot_change_the_verdict(self):
+        sha = self._attack_branch()
+        self.git("replace", sha, self.git("rev-parse", "v2").strip())   # make the head look like the base
+        self.assertEqual(self.git("diff-tree", "-r", "--name-only", "v2", "w1/r").strip(), "")  # plain git is fooled
+        code, res, _ = self.check()
+        self.assertEqual((code, res["headSha"]), (1, sha))
+        self.assertEqual(self.violations(res), [("src/features.py", "owned-by-other", "W1-F")])
+
+    def test_the_temporary_tool_folder_is_deleted(self):
+        tmpdir = Path(self.tmp) / "scratch"
+        tmpdir.mkdir()
+        self._attack_branch()
+        env = {"TMP": str(tmpdir), "TEMP": str(tmpdir), "TMPDIR": str(tmpdir)}
+        self.assertEqual(self.cli("--workstream", "W1-R", "--head", "w1/r", env=env)[0], 1)
+        self.assertEqual(self.cli("--workstream", "W9", "--head", "w1/r", env=env)[0], 64)
+        self.assertEqual(list(tmpdir.iterdir()), [])
+
+    # refs
+    def test_tag_named_like_the_base_makes_the_base_ambiguous(self):
+        self._attack_branch()
+        self.git("tag", "v2", "w1/r")                      # a tag named like the base branch
+        code, res, _ = self.check()
+        self.assertEqual(code, 64)
+        self.assertEqual(res["matches"], ["refs/heads/v2", "refs/tags/v2"])
+        self.assertIn("full ref name", res["next"])
+
+    def test_tag_named_like_the_head_makes_the_head_ambiguous(self):
+        self._attack_branch()
+        self.git("tag", "w1/r", "v2")                      # harmless commit under the branch's name
+        code, res, _ = self.check()
+        self.assertEqual((code, res["matches"]), (64, ["refs/heads/w1/r", "refs/tags/w1/r"]))
+        code, res, _ = self.check(head="refs/heads/w1/r")  # the full ref name is unambiguous
+        self.assertEqual((code, res["headRef"]), (1, "refs/heads/w1/r"))
+
+    def test_remote_tracking_and_local_branch_of_the_same_short_name_are_refused(self):
+        sha = self._attack_branch()
+        self.git("branch", "origin/zz", "v2")
+        self.git("update-ref", "refs/remotes/origin/zz", sha)       # different commits
+        code, res, _ = self.check(head="origin/zz")
+        self.assertEqual((code, res["matches"]), (64, ["refs/heads/origin/zz", "refs/remotes/origin/zz"]))
+        self.git("update-ref", "refs/remotes/origin/zz", self.git("rev-parse", "v2").strip())   # same commit
+        self.assertEqual(self.check(head="origin/zz")[0], 64)                                   # still refused
+
+    def test_full_ref_names_full_shas_and_abbreviations(self):
+        sha = self._attack_branch()
+        self.git("tag", "v2", sha)                          # the short base name is now ambiguous ...
+        code, out, _ = self.cli("--workstream", "W1-R", "--head", sha, "--base", "refs/heads/v2", "--json")
+        res = json.loads(out)                               # ... but the full names work
+        self.assertEqual((code, res["baseRef"], res["headRef"], res["headSha"]), (1, "refs/heads/v2", None, sha))
+        code, res, _ = self.check("W1-R", sha[:10], "--base", "refs/heads/v2")
+        self.assertEqual(code, 64)
+        self.assertIn("abbreviated sha", res["message"])
+        code, res, _ = self.check(head="0" * 40)
+        self.assertEqual(code, 64)
+
+    def test_every_outcome_names_the_resolved_refs_and_a_pass_names_the_sha_to_merge(self):
+        self.branch()
+        self.write("src/roadmap.py", "mine\n")
+        self.finish()
+        sha = self.git("rev-parse", "w1/r").strip()
+        code, out, _ = self.cli("--workstream", "W1-R", "--head", "w1/r")
+        self.assertEqual(code, 0)
+        self.assertIn("base v2 = refs/heads/v2 (%s)" % self.git("rev-parse", "v2").strip(), out)
+        self.assertIn("head w1/r = refs/heads/w1/r (%s)" % sha, out)
+        self.assertTrue(out.rstrip().endswith("merge exactly this head sha: " + sha), out)
+        code, res, _ = self.check("W9-X")
+        self.assertEqual((res["baseRef"], res["headRef"], res["headSha"]), ("refs/heads/v2", "refs/heads/w1/r", sha))
 
     # refusals
     def test_unknown_workstream_is_a_refusal_with_json_and_a_next_step(self):
