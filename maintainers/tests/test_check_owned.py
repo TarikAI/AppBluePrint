@@ -452,14 +452,41 @@ class CheckOwnedTests(unittest.TestCase):
         self.finish()
         empty = Path(self.tmp) / "no-git-here"
         empty.mkdir()
-        for args in (["--workstream", "W1-R", "--head", "w1/r"], ["--workstream", "a b", "--head", "it's"]):
-            r = subprocess.run([sys.executable, str(self.script)] + args, capture_output=True, text=True,
-                               encoding="utf-8", env=dict(os.environ, PATH=str(empty)))
+        hostile = ['x"&echo X&"', "x$(X)", "x\nnext: echo X", "x%PATH%", "x;|`y"]
+        expected = ("error: run this check isolated\n"
+                    "  next: run the same command again with -I: python -I maintainers/check_owned.py "
+                    "<the same arguments>\n")
+        for head in ["w1/r"] + hostile:
+            r = subprocess.run([sys.executable, str(self.script), "--workstream", "W1-R", "--head", head],
+                               capture_output=True, text=True, encoding="utf-8", env=dict(os.environ, PATH=str(empty)))
             self.assertEqual(r.returncode, 64, r.stderr)
             self.assertEqual(r.stdout, "")
-            self.assertTrue(r.stderr.startswith("error: run this check isolated\n  next: python -I "
-                                                "maintainers/check_owned.py --workstream "), r.stderr)
-        self.assertIn('"a b"' if os.name == "nt" else "'a b'", r.stderr)  # the user's own arguments, quoted
+            self.assertEqual(r.stderr, expected)   # nothing the caller typed is echoed
+
+    def test_no_message_puts_caller_text_into_a_pasteable_command(self):
+        for head in ['x"&echo X&"', "x$(X)", "x\nnext: echo X", "x%PATH%", "x;|`y"]:
+            code, out, err = self.cli("--workstream", "W1-R", "--head", head)
+            self.assertEqual(code, 64)
+            lines = err.splitlines()
+            self.assertEqual(len(lines), 3, err)                       # error, next, baseSha: a newline cannot add lines
+            self.assertTrue(lines[2].startswith("  baseSha "))
+            self.assertTrue(lines[0].startswith("error: head "), err)
+            self.assertEqual(lines[1], "  next: pass the builder's branch with --head (a full ref name or sha), "
+                                       "fetching it first if needed: git fetch origin")
+            self.assertIn(repr(head), lines[0])                        # shown as quoted data, escapes included
+        self._attack_branch()
+        code, out, err = self.cli("--workstream", 'W9"&echo X&"', "--head", "w1/r")
+        self.assertEqual(code, 64)
+        self.assertEqual(len(err.splitlines()), 5, err)   # error, next, three shas
+        self.assertIn("next: use one of: W0-C, ", err)
+
+    def test_ambiguity_next_step_names_no_value(self):
+        self._attack_branch()
+        self.git("tag", "w1/r", "v2")
+        code, res, _ = self.check()
+        self.assertEqual(code, 64)
+        self.assertEqual(res["next"], "pass the full ref name (refs/heads/..., refs/remotes/... or refs/tags/...) "
+                                      "of the one you mean")
 
     def test_caller_git_variables_change_nothing(self):
         self._attack_branch()
@@ -571,24 +598,50 @@ class CheckOwnedTests(unittest.TestCase):
             "case pair": ([("100644", "blob", x, "Dup.py"), ("100644", "blob", x, "dup.py")], "differ only in case"),
             "device name": ([("100644", "blob", x, "NUL.txt")], "NUL.txt"),
             "trailing dot": ([("100644", "blob", x, "x.py.")], "x.py."),
+            "trailing newline": ([("100644", "blob", x, "x.py\n")], "x.py"),
             "colon": ([("100644", "blob", x, "a:b.py")], "a:b.py"),
         }
         for label, (extra, needle) in cases.items():
             with self.subTest(label):
                 try:
-                    code, res, _ = self.hostile_check(extra, scratch)
+                    code, res, _err = self.hostile_check(extra, scratch)
                 except AssertionError:
                     if label == "dot dot":
                         continue  # this git refuses to build such a tree at all
                     raise
                 self.assertEqual(code, 64, res)
                 self.assertTrue(res["refused"])
+                self.assertNotIn("Traceback", _err)
                 self.assertIn("will not export", res["message"])
                 self.assertIn(needle, res["message"])
                 self.assertEqual(list(scratch.iterdir()), [])                    # temp folder removed
                 self.assertFalse((scratch / "x.py").exists())
                 self.assertFalse((Path(self.tmp) / "canary").exists())
                 self.assertFalse((Path(self.tmp) / "x.py").exists())
+
+    def test_the_export_is_capped_in_entries_and_bytes(self):
+        scratch = Path(self.tmp) / "scratch"
+        scratch.mkdir()
+        x = self.blob("x = 1\n")
+        many = [("100644", "blob", x, "f%04d.py" % i) for i in range(2001)]
+        code, res, err = self.hostile_check(many, scratch)
+        self.assertEqual(code, 64, res)
+        self.assertIn("limit is 2000 entries", res["message"])
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(list(scratch.iterdir()), [])
+        big = self.git("hash-object", "-w", "--stdin", input_bytes=b"0" * (65 * 1024 * 1024)).strip()
+        code, res, err = self.hostile_check([("100644", "blob", big, "big.dat")], scratch)
+        self.assertEqual(code, 64, res)
+        self.assertIn("limit is 64 MiB", res["message"])
+        self.assertEqual(list(scratch.iterdir()), [])
+
+    def test_a_tool_tree_just_under_the_caps_is_exported_whole(self):
+        scratch = Path(self.tmp) / "scratch"
+        scratch.mkdir()
+        x = self.blob("x = 1\n")
+        many = [("100644", "blob", x, "f%04d.py" % i) for i in range(1500)]
+        code, res, err = self.hostile_check(many, scratch)
+        self.assertEqual((code, res["ok"]), (0, True), res)
 
     # refs
     def test_tag_named_like_the_base_makes_the_base_ambiguous(self):

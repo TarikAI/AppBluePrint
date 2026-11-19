@@ -21,7 +21,7 @@ deliberately altered one: take the script from the base.)
     app-blueprint/scripts are read with `git cat-file` at the base sha. Every tree entry must be a regular file
     (mode 100644 or 100755) whose path parts match [A-Za-z0-9._-]+ and are not . or .., not a Windows device name,
     not ending in a dot, with no two names differing only in case; any other entry is a refusal naming it. The tool
-    is written to a fresh temporary folder (each target is confirmed to lie inside it), loaded from there by path
+    is read through one `git cat-file --batch` (at most 2000 entries and 64 MiB), written to a fresh temporary folder (each target is confirmed to lie inside it), loaded from there by path
     with bytecode writing off, and the folder is deleted afterwards. Nothing in the working tree is executed, so
     the script may run from any checkout.
   - The script's own bytes (CRLF read as LF) must equal maintainers/check_owned.py at the base sha, else it
@@ -45,15 +45,11 @@ import os
 import sys
 
 if __name__ == "__main__" and not sys.flags.isolated:
-    # Before any other import. Display only: this text is printed, never executed.
-    def _show(a):
-        if a and all(c.isalnum() or c in "-_./:=@" for c in a):
-            return a
-        if os.name == "nt":
-            return '"%s"' % a.replace('"', '\\"')
-        return "'%s'" % a.replace("'", "'\\''")
-    sys.stderr.write("error: run this check isolated" + chr(10) + "  next: python -I maintainers/check_owned.py "
-                     + " ".join(_show(a) for a in sys.argv[1:]) + chr(10))
+    # Before any other import. Nothing the caller typed is echoed: a ref name may hold characters that run commands
+    # when a line is pasted into a shell.
+    sys.stderr.write("error: run this check isolated" + chr(10)
+                     + "  next: run the same command again with -I: python -I maintainers/check_owned.py "
+                     + "<the same arguments>" + chr(10))
     sys.exit(64)
 
 import argparse  # noqa: E402
@@ -74,16 +70,34 @@ LAUNCHER_REL = TOOL_REL + "/blueprint.py"
 PLAN_REL = ".blueprint/blueprint.json"
 DIFF_FILTER = "ACMRDT"
 RUN_NEXT = "run the base's copy of this script: git show <base>:maintainers/check_owned.py"
-FULL_SHA = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
-ABBREV_SHA = re.compile(r"^[0-9a-fA-F]{4,39}$")
+FULL_SHA = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
+ABBREV_SHA = re.compile(r"[0-9a-fA-F]{4,39}")
+
+
+def safe(text):
+    """text with control characters and line separators written as escapes (one line, nothing raw)."""
+    out = []
+    for ch in str(text):
+        if ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ord(ch) < 32 or ord(ch) in (127, 0x85, 0x2028, 0x2029):
+            out.append("\\x%02x" % ord(ch) if ord(ch) < 256 else "\\u%04x" % ord(ch))
+        else:
+            out.append(ch)
+    return "".join(out)
 
 
 class Refusal(Exception):
-    """A refusal to judge (exit 64): the message says what is wrong, next says what to do."""
+    """A refusal to judge (exit 64): the message says what is wrong, next says what to do. Both are one line each.
+    A caller-controlled value appears only as data inside the message (repr-quoted), never inside a command."""
 
     def __init__(self, message, next_step, **info):
-        super().__init__(message)
-        self.next_step = next_step
+        super().__init__(safe(message))
+        self.next_step = safe(next_step)
         self.info = info
 
 
@@ -122,10 +136,10 @@ def list_refs(root):
 
 def resolve(root, refs, value, what):
     """(full ref name or None, commit sha) from a full ref, a full sha or a short name matching exactly one ref."""
-    if FULL_SHA.match(value):
+    if FULL_SHA.fullmatch(value):
         r = git(root, "rev-parse", "--verify", "--quiet", value.lower() + "^{commit}")
         if r.returncode != 0 or not text(r):
-            raise Refusal("%s %s is not a commit of this repository" % (what, value),
+            raise Refusal("%s %r is not a commit of this repository" % (what, value),
                           "fetch it (git fetch origin) or pass a full ref name")
         return None, text(r)
     if value.startswith("refs/"):
@@ -133,10 +147,11 @@ def resolve(root, refs, value, what):
     else:
         found = [p + value for p in ("refs/heads/", "refs/remotes/", "refs/tags/") if p + value in refs]
     if len(found) > 1:
-        raise Refusal("%s %r matches %d refs: %s" % (what, value, len(found), ", ".join(found)),
-                      "pass the full ref name, for example --%s %s" % (what, found[0]), matches=found)
+        raise Refusal("%s %r matches %d refs: %s" % (what, value, len(found), ", ".join(repr(f) for f in found)),
+                      "pass the full ref name (refs/heads/..., refs/remotes/... or refs/tags/...) of the one you mean",
+                      matches=found)
     if not found:
-        if ABBREV_SHA.match(value):
+        if ABBREV_SHA.fullmatch(value):
             raise Refusal("%s %r looks like an abbreviated sha, which is not accepted" % (what, value),
                           "pass the full 40-hex sha or a full ref name")
         nxt = ("pass an existing base with --base (for example --base origin/v2), or fetch it: git fetch origin"
@@ -146,7 +161,7 @@ def resolve(root, refs, value, what):
         raise Refusal("%s %r was not found among refs/heads, refs/remotes and refs/tags" % (what, value), nxt)
     r = git(root, "rev-parse", "--verify", "--quiet", found[0] + "^{commit}")
     if r.returncode != 0 or not text(r):
-        raise Refusal("%s %s does not point at a commit" % (what, found[0]), "pass a branch or a commit sha")
+        raise Refusal("%s %r does not point at a commit" % (what, found[0]), "pass a branch or a commit sha")
     return found[0], text(r)
 
 
@@ -164,8 +179,8 @@ def check_script_is_the_bases(root, base_sha):
         raise Refusal("this script is not the base's %s" % SELF_REL, RUN_NEXT)
 
 
-PART = re.compile(r"^[A-Za-z0-9._-]+$")
-DEVICE = re.compile(r"^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$", re.IGNORECASE)
+PART = re.compile(r"[A-Za-z0-9._-]+")
+DEVICE = re.compile(r"(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])", re.IGNORECASE)
 
 
 def hostile(path, why):
@@ -179,23 +194,49 @@ def check_entry(path, mode, typ):
     if not path.startswith(TOOL_REL + "/"):
         raise hostile(path, "outside %s" % TOOL_REL)
     for part in path.split("/"):
-        if part in (".", "..") or not PART.match(part):
+        if part in (".", "..") or not PART.fullmatch(part):
             raise hostile(path, "path part %r is not made of letters, digits, '.', '_' and '-'" % part)
-        if part.endswith(".") or DEVICE.match(part.split(".")[0]):
+        if part.endswith(".") or DEVICE.fullmatch(part.split(".")[0]):
             raise hostile(path, "path part %r is a reserved or ambiguous name" % part)
+
+
+MAX_ENTRIES = 2000
+MAX_BYTES = 64 * 1024 * 1024
+
+
+def read_blobs(root, shas):
+    """{sha: bytes} for every sha, through one `git cat-file --batch` process."""
+    uniq = sorted(set(shas))
+    r = git(root, "cat-file", "--batch", input_bytes=b"".join(s.encode("ascii") + b"\n" for s in uniq))
+    out, pos, data = {}, 0, r.stdout
+    for sha in uniq:
+        end = data.find(b"\n", pos)
+        head = data[pos:end].split() if end >= 0 else []
+        if len(head) != 3 or head[1] != b"blob" or head[0].decode("ascii", "replace") != sha:
+            raise Refusal("git could not read the blob %s of the base's %s" % (sha, TOOL_REL), "check the repository")
+        size = int(head[2])
+        out[sha] = data[end + 1:end + 1 + size]
+        if len(out[sha]) != size:
+            raise Refusal("git returned a short blob %s" % sha, "check the repository")
+        pos = end + 1 + size + 1
+    return out
 
 
 def export_tool(root, base_sha, dest):
     """app-blueprint/scripts at the base sha, written from its committed blobs into dest. Every entry is checked
-    before anything is written; an entry that is not a plain regular file is a refusal, never skipped."""
-    r = git(root, "ls-tree", "-r", "-z", "--full-tree", base_sha, "--", TOOL_REL)
-    entries, seen = [], {}
-    for raw in r.stdout.split(b"\0") if r.returncode == 0 else []:
-        if not raw:
-            continue
+    before anything is written; an entry that is not a plain regular file is a refusal, never skipped. At most
+    MAX_ENTRIES entries and MAX_BYTES bytes."""
+    r = git(root, "ls-tree", "-r", "-l", "-z", "--full-tree", base_sha, "--", TOOL_REL)
+    records = [raw for raw in (r.stdout.split(b"\0") if r.returncode == 0 else []) if raw]
+    if len(records) > MAX_ENTRIES:
+        raise Refusal("the base's %s has %d entries; the limit is %d entries" % (TOOL_REL, len(records), MAX_ENTRIES),
+                      "do not use this base: the real tool has about 40 files; have the orchestrator repair it")
+    entries, seen, total = [], {}, 0
+    for raw in records:
         meta, _, path = raw.decode("utf-8", "surrogateescape").partition(chr(9))
-        mode, typ, sha = meta.split()
+        mode, typ, sha, size = meta.split()
         check_entry(path, mode, typ)
+        total += int(size)
         parts = path.split("/")
         for i in range(1, len(parts) + 1):
             prefix = "/".join(parts[:i])
@@ -203,16 +244,22 @@ def export_tool(root, base_sha, dest):
             if first != prefix:
                 raise hostile(path, "%r and %r differ only in case" % (first, prefix))
         entries.append((path, sha))
+    if total > MAX_BYTES:
+        raise Refusal("the base's %s holds %d bytes; the limit is %d MiB" % (TOOL_REL, total, MAX_BYTES >> 20),
+                      "do not use this base: the real tool is well under 1 MiB; have the orchestrator repair it")
     if not entries:
         raise Refusal("the base has no %s" % TOOL_REL, "pass a base that has the tool with --base")
     inside = Path(dest).resolve()
+    targets = []
     for path, sha in entries:
         target = Path(dest).joinpath(*path.split("/"))
         if inside not in target.resolve().parents:
             raise hostile(path, "it would be written outside the temporary folder")
-        data = git(root, "cat-file", "blob", sha).stdout
+        targets.append((target, sha))
+    blobs = read_blobs(root, [sha for _t, sha in targets])
+    for target, sha in targets:
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(data)
+        target.write_bytes(blobs[sha])
     return Path(dest) / LAUNCHER_REL
 
 
@@ -233,7 +280,7 @@ def load_launcher(path):
 def load_base_plan(tool, root, base, base_sha, tmp):
     data = blob(root, base_sha, PLAN_REL)
     if data is None:
-        raise Refusal("the base %s has no %s, so there is no plan to judge by" % (base, PLAN_REL),
+        raise Refusal("the base %r has no %s, so there is no plan to judge by" % (base, PLAN_REL),
                       "merge the plan to the base first, or pass a base that has it with --base")
     plan_dir = Path(tmp) / "plan"
     (plan_dir / ".blueprint").mkdir(parents=True)
@@ -244,7 +291,7 @@ def load_base_plan(tool, root, base, base_sha, tmp):
         if isinstance(e, KeyboardInterrupt):
             raise
         first = (str(e).strip().splitlines() or [type(e).__name__])[0]
-        raise Refusal("the plan at the base %s (%s) does not load: %s" % (base, PLAN_REL, first),
+        raise Refusal("the plan at the base %r (%s) does not load: %s" % (base, PLAN_REL, first),
                       "the base's plan is the problem: on a checkout of the base run "
                       "python app-blueprint/scripts/blueprint.py validate and fix it there") from None
 
@@ -302,13 +349,13 @@ def run(workstream, base, head):
         mb = git(root, "merge-base", base_sha, head_sha)
         if mb.returncode != 0 or not text(mb):
             shallow = text(git(root, "rev-parse", "--is-shallow-repository")) == "true"
-            raise Refusal("%s and %s have no merge base" % (base, head),
+            raise Refusal("%r and %r have no merge base" % (base, head),
                           "this is a shallow clone: git fetch --unshallow" if shallow else
                           "the branch does not share history with the base: rebase or recreate it from the base")
         merge_base = info["mergeBase"] = text(mb)
         n = git(root, "rev-list", "--count", merge_base + ".." + head_sha)
         if n.returncode != 0 or int(text(n) or 0) == 0:
-            raise Refusal("nothing to check: %s has no commits beyond the merge-base %s" % (head, merge_base[:12]),
+            raise Refusal("nothing to check: %r has no commits beyond the merge-base %s" % (head, merge_base[:12]),
                           "check that --head names the builder's branch with its commits (not the base)")
         tmp = tempfile.mkdtemp(prefix="check-owned-")
         try:
@@ -331,7 +378,7 @@ def run(workstream, base, head):
 
 def ref_line(res, key):
     ref = res.get(key + "Ref")
-    return "%s %s = %s (%s)" % (key, res[key], ref or "full sha given", res[key + "Sha"])
+    return "%s %s = %s (%s)" % (key, safe(res[key]), safe(ref) if ref else "full sha given", res[key + "Sha"])
 
 
 def summary(res):
@@ -387,7 +434,7 @@ def main(argv=None):
                                        "instance)" % v["owner"] if v["owner"] else "")
             else:
                 extra = "owned by %s" % v["owner"]
-            shown = v["path"] if v["path"] == v["path"].strip() and "\n" not in v["path"] else repr(v["path"])
+            shown = v["path"] if safe(v["path"]) == v["path"] and v["path"] == v["path"].strip() else repr(v["path"])
             print("  %s  %s" % (shown, extra))
         if res["violations"]:
             print("  next: move the change to the owner's branch, or have the orchestrator change the plan "
