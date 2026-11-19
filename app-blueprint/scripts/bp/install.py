@@ -38,15 +38,19 @@ def _package_files():
 TOOL_FILES = _package_files() + [TOOL_HOME / "blueprint.py"] + _assets()
 
 
-def _replace(src, dst):
-    """os.replace, retried on Windows when another process holds the file or folder open."""
+def _replace(src, dst, in_use, undo=None):
+    """os.replace, retried on Windows when another process holds the file or folder open.
+
+    in_use is the path named in the error (the one being moved or overwritten); undo runs before exiting."""
     for attempt in range(6):
         try:
             os.replace(src, dst)
             return
         except PermissionError:
             if sys.platform != "win32" or attempt == 5:
-                die(f"Could not replace {dst}: it is in use (PermissionError). Close what holds it open, "
+                if undo:
+                    undo()
+                die(f"Could not replace {in_use}: it is in use (PermissionError). Close what holds it open, "
                     "then run: python <skill>/scripts/blueprint.py init --refresh-tool")
             time.sleep(0.2)
 
@@ -126,9 +130,18 @@ def copy_tool(root, _stop_after=None):
         _copy(src, new / rel)
         if _stop_after == "2-partial" and i == len(files) // 2:
             return written
-    if live.exists():
-        _replace(live, old)
-    _replace(new, live)
+    had_live = live.exists()
+    if had_live:
+        _replace(live, old, in_use=live)
+
+    def put_back():  # the new package could not take its place: keep the old one working
+        if had_live and not live.exists():
+            try:
+                os.replace(old, live)
+            except OSError:
+                pass
+
+    _replace(new, live, in_use=new, undo=put_back)
     try:
         _rmtree(old)  # best effort: the next refresh clears or moves aside what is left
     except OSError:
@@ -143,7 +156,7 @@ def copy_tool(root, _stop_after=None):
             _copy(src, tmp)
             if (dest / src.name).exists():
                 _writable(dest / src.name)  # Windows will not replace a read-only file
-            _replace(tmp, dest / src.name)
+            _replace(tmp, dest / src.name, in_use=dest / src.name)
             written.append(src.name)
         if _stop_after == step:
             return written
