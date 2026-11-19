@@ -51,3 +51,19 @@ What differs, and why:
   `strings()` of a fixture is that sorted union.
 * The attribute resource ids used by the builders (`fixtures_archives.RES_IDS`) are checked against the attr table of
   `android.jar` by `test_res_ids_match_android_jar` when the SDK is installed.
+
+### Which SDK the tests use, and what they tolerate
+
+The goldens were made with **build-tools 36.0.0 and platform android-36** (above). The tests that run `aapt2` or
+`dexdump` pick the highest installed version of each (build-tools and `platforms/android-*` are sorted by version number,
+looked up under `ANDROID_HOME`, `ANDROID_SDK_ROOT`, the default SDK folders, then `PATH`) and skip when none is found. They
+do not need the SDK that made the goldens:
+
+* `aapt2 link` stamps four attributes into `<manifest>` from the installed SDK (`android:compileSdkVersion`,
+  `android:compileSdkVersionCodename`, `platformBuildVersionCode`, `platformBuildVersionName`). The tests drop exactly these
+  (the `SDK_STAMPED` constant in `test_fixtures_archives.py`) from both sides before comparing a fresh link with the golden;
+  everything else, resource ids included, must still be equal. They also relink with other stamp values
+  (`--compile-sdk-version-code 37 --compile-sdk-version-name 17`) and with `--no-compile-sdk-metadata` to prove it.
+* The `RES_IDS` check against `android.jar` ignores an attribute that a platform does not have, and fails only on a different id.
+* The `aapt2 dump` and `dexdump` checks look for the package line, the version code and the header counts with patterns, not
+  for the exact layout of the tool's output.

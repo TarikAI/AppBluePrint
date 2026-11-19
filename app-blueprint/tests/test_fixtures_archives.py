@@ -554,6 +554,17 @@ class TestAxml(Base):
         self.assertNotEqual(ours, golden)  # only the line numbers differ: ours are element numbers, aapt2's are source lines
 
 
+# Attributes `aapt2 link` stamps into <manifest> from the installed SDK, not from the source XML: they change with the
+# platform android.jar and the build-tools (36 and "16" for the goldens; a newer SDK writes its own values).
+SDK_STAMPED = frozenset({"android:compileSdkVersion", "android:compileSdkVersionCodename",
+                         "platformBuildVersionCode", "platformBuildVersionName"})
+
+
+def without_sdk_stamps(elements):
+    """elements (read_axml / read_proto shape) without the SDK_STAMPED attributes; everything else is untouched."""
+    return [(d, n, {k: v for k, v in a.items() if k not in SDK_STAMPED}) for d, n, a in elements]
+
+
 def elements_from_xml(path):
     """The golden source XML read with ElementTree and typed with the schema knowledge a parser has (the test's own
     reading of the source, independent of the encoder)."""
@@ -949,13 +960,13 @@ class TestWithAapt2(Base):
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertIn("com.example.snagdesk", out.stdout)
         self.assertIn("snagdesk.example.test", out.stdout)
-        self.assertIn("android:versionCode(0x0101021b)=42", out.stdout)
+        self.assertRegex(out.stdout, r"versionCode\(0x0101021b\)=(\(type 0x10\))?(0x)?(2a|42)(?!\d)")
 
     def test_aapt2_badging_accepts_the_apk(self):
         apk = F.make_apk(self.tmp / "a.apk", F.SNAGDESK_MANIFEST, F.SNAGDESK_STRINGS, F.SNAGDESK_TYPES)
         out = run([AAPT2, "dump", "badging", str(apk)])
         self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertIn("package: name='com.example.snagdesk' versionCode='42' versionName='1.2.3'", out.stdout)
+        self.assertRegex(out.stdout, r"package: name='com\.example\.snagdesk' versionCode='42' versionName='1\.2\.3'")
 
     def test_aapt2_converts_our_proto_manifest_back_to_axml(self):
         proto_apk = F.make_apk(self.tmp / "p.apk", F.make_proto_manifest(F.SNAGDESK_MANIFEST), None, None,
@@ -967,24 +978,40 @@ class TestWithAapt2(Base):
         self.assertEqual(strip_ids(read_axml(converted)[2]), expected(F.SNAGDESK_MANIFEST))
         self.assertEqual(mask_lines(converted), mask_lines(F.make_axml(F.SNAGDESK_MANIFEST)))
 
+    def link(self, name, *extra, proto=False):
+        out = run([AAPT2, "link", *(["--proto-format"] if proto else []), "--manifest", str(DATA / "AndroidManifest.xml"),
+                   "-I", ANDROID_JAR, *extra, "-o", str(self.tmp / name)])
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        with zipfile.ZipFile(self.tmp / name) as z:
+            return z.read("AndroidManifest.xml")
+
     @unittest.skipUnless(ANDROID_JAR, "android.jar not found")
     def test_aapt2_links_the_golden_source_to_the_golden(self):
-        out = run([AAPT2, "link", "--manifest", str(DATA / "AndroidManifest.xml"), "-I", ANDROID_JAR, "-o",
-                   str(self.tmp / "l.apk")])
-        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
-        with zipfile.ZipFile(self.tmp / "l.apk") as z:
-            fresh = z.read("AndroidManifest.xml")
-        golden = (DATA / "manifest.axml").read_bytes()
-        # same elements, attributes and values even when the SDK is newer than the one that made the golden
-        self.assertEqual(strip_ids(read_axml(fresh)[2]), strip_ids(read_axml(golden)[2]))
+        golden = without_sdk_stamps(read_axml((DATA / "manifest.axml").read_bytes())[2])
+        # the installed SDK is whatever it is; a second run forces different stamps to prove they are ignored
+        for extra in ((), ("--compile-sdk-version-code", "37", "--compile-sdk-version-name", "17"),
+                      ("--no-compile-sdk-metadata",)):
+            fresh = without_sdk_stamps(read_axml(self.link("l.apk", *extra))[2])
+            self.assertEqual(strip_ids(fresh), strip_ids(golden), extra)
+            self.assertEqual(fresh, golden, extra)  # resource ids too
+
+    @unittest.skipUnless(ANDROID_JAR, "android.jar not found")
+    def test_aapt2_proto_link_matches_the_proto_golden(self):
+        golden = without_sdk_stamps(read_proto((DATA / "manifest.proto").read_bytes())[0])
+        for extra in ((), ("--compile-sdk-version-code", "37", "--compile-sdk-version-name", "17")):
+            fresh = without_sdk_stamps(read_proto(self.link("p.apk", *extra, proto=True))[0])
+            self.assertEqual(fresh, golden, extra)
 
     @unittest.skipUnless(ANDROID_JAR, "android.jar not found")
     def test_res_ids_match_android_jar(self):
         out = run([AAPT2, "dump", "resources", ANDROID_JAR])
         self.assertEqual(out.returncode, 0, out.stderr)
         real = {m.group(2): int(m.group(1), 16) for m in re.finditer(r"resource (0x[0-9a-f]{8}) attr/(\w+)", out.stdout)}
+        if not real:
+            self.skipTest("this aapt2 cannot list the attr table of android.jar")
         for name, resid in F.RES_IDS.items():
-            self.assertEqual(real.get(name), resid, name)
+            if name in real:  # an attribute missing from an older platform is not a failure; a different id is
+                self.assertEqual(real[name], resid, name)
 
 
 @unittest.skipUnless(DEXDUMP, "dexdump not found (Android SDK build-tools)")
@@ -994,9 +1021,9 @@ class TestWithDexdump(Base):
         path.write_bytes(F.make_dex(F.SNAGDESK_STRINGS, F.SNAGDESK_TYPES))
         out = run([DEXDUMP, "-f", str(path)])
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
-        self.assertIn("DEX version '035'", out.stdout)
-        self.assertIn("string_ids_size     : %d" % len(set(F.SNAGDESK_STRINGS) | set(F.SNAGDESK_TYPES)), out.stdout)
-        self.assertIn("type_ids_size       : %d" % len(F.SNAGDESK_TYPES), out.stdout)
+        self.assertIn("035", out.stdout)  # the format version; the layout of the other lines varies with the tool
+        self.assertRegex(out.stdout, r"string_ids_size\s*:\s*%d\b" % len(set(F.SNAGDESK_STRINGS) | set(F.SNAGDESK_TYPES)))
+        self.assertRegex(out.stdout, r"type_ids_size\s*:\s*%d\b" % len(F.SNAGDESK_TYPES))
 
     def test_dexdump_accepts_the_small_shapes(self):
         for n, (s, t) in enumerate([([], []), (["x"], []), ([], ["I"]), (["caf\u00e9", "\U0001f600"], ["[B"])]):
