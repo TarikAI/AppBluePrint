@@ -59,7 +59,8 @@ def make_plan(n, verify=None, tasks=False):
     return {
         "version": 2, "app": {"name": "Race", "summary": "", "platforms": [], "preset": ""}, "stack": [],
         "approach": {"layout": "", "notes": ""},
-        "modules": [{"id": "core", "path": "src", "purpose": "the files", "layer": "core"}],
+        "modules": [{"id": "core", "path": "src", "purpose": "the files", "layer": "core",
+                     "verify": shell_cmd(S.PY, "-c", "pass")}],
         "phases": [{"id": "P1", "name": "One", "goal": "g", "exit": ""}],
         "files": files, "patterns": [],
         "owners": [{"pattern": f"src/f{i}.txt", "owner": f"o{i}"} for i in range(n)],
@@ -307,7 +308,7 @@ class TheLock(IntegrityChecks, unittest.TestCase):
         self.addCleanup(self.p.close)
 
     def hold(self, seconds):
-        proc = subprocess.Popen([S.PY, "-c", HOLDER, str(S.SCRIPTS), str(self.p.root), str(seconds)],
+        proc = subprocess.Popen([S.PY, "-B", "-c", HOLDER, str(S.SCRIPTS), str(self.p.root), str(seconds)],
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=S.tool_env())
         self.addCleanup(lambda: proc.poll() is None and proc.kill())
         line = proc.stdout.readline().decode().strip()
@@ -481,7 +482,7 @@ class BrokenState(unittest.TestCase):
 
     def test_files_not_an_object(self):
         self.put('{"files": []}')
-        self.check_all('"files" must be an object')
+        self.check_all('is damaged: "files" must be an object (got list)')
 
     def test_a_folder(self):
         self.path.unlink()
@@ -614,8 +615,7 @@ class TempNamesAndGitignore(unittest.TestCase):
         def git(*a):
             return subprocess.run(["git", *a], cwd=str(self.p.root), capture_output=True, text=True, timeout=120)
         git("init", "-q")
-        git("-c", "user.name=t", "-c", "user.email=t@example.invalid", "add", "-A")
-        git("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", "base")
+        git("add", "-A")  # staged, so only new untracked files would show as ??
         (self.p.bp / "x.json.123-abcd.tmp").write_text("left", encoding="utf-8")
         self.assertEqual(self.p.run("claim", "src/f1.txt", "--by", "o1")[0], 0)
         self.assertTrue((self.p.bp / "state.lock").exists())

@@ -13,10 +13,10 @@ from pathlib import Path
 
 from bp.version import TOOL_VERSION
 from bp import registry
-from bp.core import TOOL_HOME, BlueprintError, bp_dir, find_asset, write_text_if_changed
-from bp.plan import GLYPH, LABEL, STATES, save_state
+from bp.core import TOOL_HOME, BlueprintError, bp_dir, find_asset, state_lock, write_state, write_text_if_changed
+from bp.plan import GLYPH, LABEL, STATES
 from bp.data import data_view
-from bp.status import compute
+from bp.status import compute, load_state
 from bp.views.context import build_context, merged
 from bp.views.structure import render_structure
 from bp.views.roster import render_roster
@@ -172,13 +172,30 @@ def render_all(root, plan, state, quiet=False, check=False, fail_on_conflict=Fal
     adopted (overwritten and recorded) when it carries that header too; any other is a conflict: the view is not
     written, the conflict line goes to stderr, the other views are written, render --check lists the name, and only
     with fail_on_conflict (cmd_render) is view-conflict raised (exit 1), so sync, verify --run and hook post keep
-    their own exit code (contract 8). A plan with no hook views writes no key."""
+    their own exit code (contract 8). A plan with no hook views writes no key.
+
+    Every text is computed first; writing then happens under the state lock (core.state_lock), on state.json as it is
+    then: render owns only generatedViews, and two renders never interleave a view file."""
     ctx = build_context(root, plan, state)
     comp = ctx["comp"]
     outputs = {"STRUCTURE.md": render_structure(plan, state, comp, ctx), "ROSTER.md": render_roster(plan, state, comp, ctx)}
+    hook = _hook_views(ctx)
+    m = render_map(plan, state, comp, ctx)
+    if check:
+        return _put_views(root, state, outputs, hook, m, quiet, True, fail_on_conflict)
+    with state_lock(root):
+        fresh = load_state(root)
+        try:
+            return _put_views(root, fresh, outputs, hook, m, quiet, False, fail_on_conflict)
+        finally:
+            if "generatedViews" in fresh:
+                state["generatedViews"] = fresh["generatedViews"]
+
+
+def _put_views(root, state, outputs, hook, m, quiet, check, fail_on_conflict):
+    """render_all after the texts are computed (with check=False, called holding the state lock)."""
     current = state.get("generatedViews") if "generatedViews" in state else []
     recorded = [n for n in current if isinstance(n, str) and _VIEW_NAME.match(n) and n not in RESERVED_VIEWS]         if isinstance(current, list) else []
-    hook = _hook_views(ctx)
     conflicts = {n: mod for n, (mod, _) in hook.items()
                  if n not in recorded and (bp_dir(root) / n).exists() and not _adoptable(bp_dir(root) / n)}
     views = {n: text for n, (_, text) in hook.items() if n not in conflicts}
@@ -187,8 +204,7 @@ def render_all(root, plan, state, quiet=False, check=False, fail_on_conflict=Fal
         union = sorted(set(recorded) | set(views))
         if union != current:
             state["generatedViews"] = union
-            save_state(root, state)
-    m = render_map(plan, state, comp, ctx)
+            write_state(root, state)
     if m is not None:
         outputs["map.html"] = m
     stale, blocked = [], {}
@@ -217,7 +233,7 @@ def render_all(root, plan, state, quiet=False, check=False, fail_on_conflict=Fal
                 print(f"removed .blueprint/{name} (nothing to show)")
     if not check and sorted(views) != state.get("generatedViews", []):
         state["generatedViews"] = sorted(views)
-        save_state(root, state)
+        write_state(root, state)
     for name, mod in sorted(conflicts.items()):
         print(f"render: .blueprint/{name} exists and was not written by blueprint.py, but the view module {mod} writes "
               "that name; move or rename it, then run render again.", file=sys.stderr)

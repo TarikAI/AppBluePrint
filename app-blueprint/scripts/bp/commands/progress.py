@@ -20,7 +20,7 @@ from bp.core import (BlueprintError, append_log, bp_dir, die, emit, find_root, g
                      project_path)
 from bp.globs import pattern_instance_rx
 from bp.learn import record_incident
-from bp.plan import GLYPH, LABEL, STATES, load_plan, load_state, owner_of, planned_file, save_state
+from bp.plan import GLYPH, LABEL, STATES, load_plan, owner_of, planned_file
 from bp.registry import command_built
 from bp.validate import validate_plan
 from bp.views.render import render_all
@@ -143,8 +143,11 @@ def _write_refusal(args, root, plan, path, by):
 
 
 def cmd_sync(args):
+    """sync scans first, without the lock, then sets only the keys it owns (patterns, unplanned, ignoredTracked,
+    missingModify, syncedAt, head, and data apart from db-check's data.live) on the state as it is under the lock;
+    file records written by claim, mark and verify meanwhile are kept."""
     from bp.data import scan_data
-    from bp.status import compute, repo_files
+    from bp.status import change_state, compute, load_state, repo_files
     root = find_root(args.root)
     plan = load_plan(root)
     state = load_state(root)
@@ -168,17 +171,20 @@ def cmd_sync(args):
         if not hit:
             unplanned.append(p)
     missing_modify = [f["path"] for f in plan["files"] if f.get("action") == "modify" and f["path"] not in disk_set]
-    state["patterns"] = patterns
-    state["unplanned"] = unplanned
-    state["ignoredTracked"] = {"count": len(ignored_tracked), "paths": ignored_tracked[:20]}
-    state["missingModify"] = missing_modify
-    state["syncedAt"] = now_iso()
-    state["head"] = git_head(root)
-    data_issues = []
+    owned = {"patterns": patterns, "unplanned": unplanned,
+             "ignoredTracked": {"count": len(ignored_tracked), "paths": ignored_tracked[:20]},
+             "missingModify": missing_modify, "syncedAt": now_iso(), "head": git_head(root)}
+    state.update(owned)
+    data_issues, data = [], None
     if plan["stores"] or plan["resources"]:
-        state["data"] = scan_data(root, plan, state, disk)
-        data_issues = state["data"]["issues"]
-    save_state(root, state)
+        data = state["data"] = scan_data(root, plan, state, disk)
+        data_issues = data["issues"]
+
+    def change(fresh):
+        fresh.update(owned)
+        if data is not None:
+            fresh["data"] = dict(data, live=(fresh.get("data") or {}).get("live"))  # db-check's live, as it is now
+    state = change_state(root, change)
     comp = compute(root, plan, state)
     c = comp["counts"]
     append_log(root, {"event": "sync", "head": state["head"], "counts": c, "unplanned": len(unplanned), "dataIssues": len(data_issues)})
@@ -219,7 +225,7 @@ def cmd_sync(args):
 
 
 def cmd_status(args):
-    from bp.status import next_ready, summarize
+    from bp.status import load_state, next_ready, summarize
     from bp.views.context import blocked_by, build_context, status_json
     root = find_root(args.root)
     plan = load_plan(root)
@@ -347,6 +353,7 @@ def cmd_mark(args):
 def _verify_feature(args, root, plan):
     """verify --feature F (7.2) through the verify_feature hook of records. Fail closed: exit 0 only when the hook says
     0 and every record it returns has result pass."""
+    from bp.status import load_state
     from bp.views.context import build_context
     fn = registry.hook("verify_feature")
     if fn is None:
@@ -360,6 +367,9 @@ def _verify_feature(args, root, plan):
 
 
 def cmd_verify(args):
+    """verify --run runs each check without the lock, then records that group's proofs (its own files' "verified")
+    and its log line on the state as it is under the lock; the lock is never held while a check runs."""
+    from bp.status import change_state, load_state
     from bp.verify import record_file_proofs, run_check, verify_groups
     feature = getattr(args, "feature", None)
     with_feature = {"--criterion": getattr(args, "criterion", None), "--repeat": getattr(args, "repeat", None),
@@ -389,7 +399,7 @@ def cmd_verify(args):
         for cmd, paths in groups.items():
             print(f"  {cmd}    # {len(paths)} file(s)")
         return
-    state = load_state(root)
+    state = load_state(root)  # a state that cannot be used is reported before any check runs
     failed = 0
     for cmd, paths in groups.items():
         print(f"$ {cmd}")
@@ -401,9 +411,16 @@ def cmd_verify(args):
         failed += 0 if ok else 1
         if not ok:
             registry.signal(root, "verify", f"verify-{result['result']}")  # 9.4
-        record_file_proofs(root, plan, state, cmd, paths, result)
-        append_log(root, {"event": "verify", "cmd": cmd, "ok": ok, "files": len(paths)})
-    save_state(root, state)
+        proofs = {"files": {}}
+        record_file_proofs(root, plan, proofs, cmd, paths, result)  # hashed before the lock is taken
+
+        def change(fresh, paths=paths, proofs=proofs["files"], cmd=cmd, ok=ok):
+            for p in paths:
+                rec = fresh["files"].setdefault(p, {})
+                if "verified" in proofs.get(p, {}):
+                    rec["verified"] = proofs[p]["verified"]
+            return [{"event": "verify", "cmd": cmd, "ok": ok, "files": len(paths)}]
+        state = change_state(root, change)
     render_all(root, plan, state, quiet=True)
     sys.exit(1 if failed else 0)
 

@@ -3,8 +3,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from bp.core import append_log, die, find_root, now_iso
-from bp.plan import load_plan, load_state, save_state
+from bp.core import die, find_root, now_iso
+from bp.plan import load_plan
 from bp.validate import validate_plan
 from bp.views.render import render_all
 
@@ -12,7 +12,7 @@ from bp.views.render import render_all
 def cmd_db_check(args):
     """Compare a live schema with the migrations. Read-only; never stores credentials."""
     from bp.data import parse_sql_tables, resource_names, scan_data
-    from bp.status import repo_files
+    from bp.status import change_state, load_state, repo_files
     root = find_root(args.root)
     plan = load_plan(root)
     state = load_state(root)
@@ -34,19 +34,26 @@ def cmd_db_check(args):
         live = {k: v["kind"] for k, v in parse_sql_tables(src.read_text(encoding="utf-8", errors="replace"), src.name).items()}
         label = "dump:" + src.name
     data = state.get("data") or {}
+    scanned = None
     if not data.get("tables") and plan["stores"]:
-        data = scan_data(root, plan, state, repo_files(root, plan))
+        data = scanned = scan_data(root, plan, state, repo_files(root, plan))
     migrated = {t["name"] for t in data.get("tables", [])}
     declared = {n.lower() for r in plan["resources"] if r.get("kind") in ("table", "view") for n in resource_names(r)}
     ignore = {x.lower() for x in args.ignore or []}
     live_only = sorted(t for t in live if t not in migrated and t not in ignore)
     not_applied = sorted(t for t in migrated if t not in live)
     declared_missing = sorted(t for t in declared if t not in live and t in migrated)
-    data["live"] = {"source": label, "at": now_iso(), "tables": sorted(live), "liveOnly": live_only,
-                    "notApplied": not_applied, "declaredMissing": declared_missing}
-    state["data"] = data
-    save_state(root, state)
-    append_log(root, {"event": "db-check", "source": label, "liveOnly": len(live_only), "notApplied": len(not_applied)})
+    live_rec = {"source": label, "at": now_iso(), "tables": sorted(live), "liveOnly": live_only,
+                "notApplied": not_applied, "declaredMissing": declared_missing}
+
+    def change(fresh):  # db-check owns data.live (and the scan, when state had no tables); sync owns the rest of data
+        cur = fresh.get("data") or {}
+        if not cur.get("tables") and scanned is not None:
+            cur = scanned
+        cur["live"] = live_rec
+        fresh["data"] = cur
+        return [{"event": "db-check", "source": label, "liveOnly": len(live_only), "notApplied": len(not_applied)}]
+    state = change_state(root, change)
     print(f"Live schema from {label}: {len(live)} tables and views; migrations create {len(migrated)}.")
     for title, items in (("In the live database but in no migration", live_only), ("In migrations but not in the live database", not_applied)):
         if items:

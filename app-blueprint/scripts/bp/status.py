@@ -9,10 +9,21 @@ import re
 import subprocess
 
 from bp import core
-from bp.core import append_log, die, norm, now_iso
+from bp.core import die, norm, now_iso
 from bp.globs import glob_match, pattern_instance_rx
-from bp.plan import (DEFAULT_IGNORE, STATES, features_of, item_verify, load_state, owner_of, phase_index, planned_file,
-                     save_state)
+from bp.migrate import upgrade_state
+from bp.plan import DEFAULT_IGNORE, STATES, features_of, item_verify, owner_of, phase_index, planned_file
+
+
+def load_state(root):
+    """state.json for reading, upgraded in memory (as plan.load_state); a state that cannot be used is bad-state
+    (core.read_state). Readers take no lock: writes are atomic, so a reader sees the old or the new file."""
+    return core.read_state(root, upgrade_state)
+
+
+def change_state(root, change):
+    """The one way commands change state.json: core.update_state with the in-memory upgrade (contract 3.2)."""
+    return core.update_state(root, change, upgrade_state)
 
 
 class Hasher:
@@ -253,15 +264,17 @@ def require_owner(plan, path, by, force):
 
 
 def set_file_state(root, path, new_state, by, note=None):
-    state = load_state(root)
-    rec = state["files"].setdefault(path, {})
-    rec.update({"state": new_state, "by": by, "at": now_iso()})
-    if note is not None:
-        rec["note"] = note
-    if new_state == "planned":
-        rec.pop("verified", None)
-    save_state(root, state)
-    append_log(root, {"event": new_state, "path": path, "by": by, "note": note})
+    """claim and mark: one file's record (state, by, at, note; planned drops its proof), changed under the state lock
+    on the state as it is then, with its log line."""
+    def change(state):
+        rec = state["files"].setdefault(path, {})
+        rec.update({"state": new_state, "by": by, "at": now_iso()})
+        if note is not None:
+            rec["note"] = note
+        if new_state == "planned":
+            rec.pop("verified", None)
+        return [{"event": new_state, "path": path, "by": by, "note": note}]
+    change_state(root, change)
 
 
 def guard_decision(root, plan, path, by):
