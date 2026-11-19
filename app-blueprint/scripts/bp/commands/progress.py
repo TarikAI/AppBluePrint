@@ -219,7 +219,7 @@ def cmd_sync(args):
             if len(data_issues) > 12:
                 print(f"    ... and {len(data_issues) - 12} more (see map.html, Data)")
     if not args.no_render:
-        errors, _ = validate_plan(plan)
+        errors, _ = validate_plan(plan, root=root)
         if errors:
             if not args.quiet:
                 print(f"  Views not refreshed: the blueprint has {len(errors)} validation error(s). Run validate.")

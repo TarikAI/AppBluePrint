@@ -19,10 +19,6 @@ COMMAND_TABLE = {   # every subcommand of 2.0 -> its module under bp
     "doctor": "commands.learn", "migrate": "commands.migrate", "task": "commands.roadmap", "accept": "commands.records",
     "evidence": "commands.evidence", "study": "commands.study"}
 
-# Views that exist only while their section has entries (contract 8): render deletes them, and render --check reports
-# them, when no VIEWS module returns them.
-OPTIONAL_VIEWS = ("ROADMAP.md", "FEATURES.md")
-
 # Where a 2.0 subcommand or flag arrives, for the not-built message (contract 11).
 ARRIVES = {"migrate": "W0-B", "task": "W1-R", "accept": "W3-V", "evidence": "W2-E", "study": "W2-E",
            "unknowns": "W1-U", "records": "W3-V", "features": "W1-F", "roadmap": "W1-R", "signals": "W3-L"}

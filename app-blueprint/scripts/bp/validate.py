@@ -29,6 +29,25 @@ def classify_error(msg):
     return "other"
 
 
+def validation_context(plan, team=None, evidence_ids=None, root=None):
+    """vctx for the validate hooks: {"team", "evidenceIds", "root"} plus what every DOMAIN module's
+    validate_context(root, plan) -> dict returns (the evidence module supplies evidenceIds). A key given by two modules,
+    or a hook setting team or root, is a bug (RuntimeError); an explicit evidence_ids argument wins over a hook's."""
+    vctx = {"team": team, "evidenceIds": evidence_ids, "root": root}
+    owner = {}
+    for name, part in registry.collect("validate_context", root, plan):
+        if not isinstance(part, dict):
+            raise RuntimeError(f"{name}.validate_context returned {type(part).__name__}, not a dict")
+        for k, v in part.items():
+            if k in ("team", "root") or k in owner:
+                raise RuntimeError(f"{name}.validate_context sets {k!r}, which {owner.get(k, 'validate')} already sets")
+            owner[k] = name
+            if k == "evidenceIds" and evidence_ids is not None:
+                continue
+            vctx[k] = v
+    return vctx
+
+
 def validate_findings(plan, team=None, evidence_ids=None, root=None):
     """Every finding for the plan, in order. A dict that did not come through load_plan is accepted too: a version 1
     dict is upgraded as a copy first (and warned about, like a loaded version 1 plan); any version other than the int
@@ -50,7 +69,7 @@ def validate_findings(plan, team=None, evidence_ids=None, root=None):
         W("blueprint.json is schema version 1; it still works."
           + (" To use milestones, features, tasks and unknowns, run: blueprint.py migrate" if migrate_built else ""),
           code="schema-v1", entry="blueprint.json", next="blueprint.py migrate" if migrate_built else None)
-    vctx = {"team": team, "evidenceIds": evidence_ids, "root": root}
+    vctx = validation_context(plan, team, evidence_ids, root)
     registry.collect("validate", plan, E, W, vctx)
     rules.validate_team(plan, team, E)
     return findings

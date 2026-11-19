@@ -10,7 +10,7 @@ import re
 from bp.version import TOOL_VERSION
 from bp import registry
 from bp.core import TOOL_HOME, bp_dir, find_asset, write_text_if_changed
-from bp.plan import GLYPH, LABEL, STATES
+from bp.plan import GLYPH, LABEL, STATES, save_state
 from bp.data import data_view
 from bp.status import compute
 from bp.views.context import build_context, merged
@@ -78,12 +78,19 @@ def _hook_views(ctx):
 
 
 def render_all(root, plan, state, quiet=False, check=False):
-    """Write (or with check=True, compare) every view that should exist for this plan; returns the stale names. A view
-    of OPTIONAL_VIEWS that no module returns should not exist: render deletes it, render --check reports it."""
+    """Write (or with check=True, compare) every view that should exist for this plan; returns the stale names.
+
+    The views hooks' files are recorded in state.json as "generatedViews". A recorded name that no module returns any
+    more should not exist: render deletes it (and records the new list), render --check reports it. Base views are
+    never deleted, and a file render never wrote is not touched. A version 1 plan with no hook views writes no key."""
     ctx = build_context(root, plan, state)
     comp = ctx["comp"]
     outputs = {"STRUCTURE.md": render_structure(plan, state, comp, ctx), "ROSTER.md": render_roster(plan, state, comp, ctx)}
-    outputs.update(_hook_views(ctx))
+    hook_views = _hook_views(ctx)
+    outputs.update(hook_views)
+    recorded = state.get("generatedViews")
+    recorded = [n for n in recorded if isinstance(n, str) and _VIEW_NAME.match(n) and n not in BASE_VIEWS] \
+        if isinstance(recorded, list) else []
     m = render_map(plan, state, comp, ctx)
     if m is not None:
         outputs["map.html"] = m
@@ -95,7 +102,7 @@ def render_all(root, plan, state, quiet=False, check=False):
                 stale.append(name)
         elif write_text_if_changed(path, text) and not quiet:
             print(f"wrote .blueprint/{name}")
-    for name in registry.OPTIONAL_VIEWS:
+    for name in recorded:
         path = bp_dir(root) / name
         if name in outputs or not path.exists():
             continue
@@ -105,6 +112,10 @@ def render_all(root, plan, state, quiet=False, check=False):
             path.unlink()
             if not quiet:
                 print(f"removed .blueprint/{name} (nothing to show)")
+    now = sorted(hook_views)
+    if not check and now != (state.get("generatedViews") if "generatedViews" in state else []):
+        state["generatedViews"] = now
+        save_state(root, state)
     if m is None and not quiet:
         print("map.template.html not found next to the script; map.html skipped. Run init --refresh-tool.")
     return stale

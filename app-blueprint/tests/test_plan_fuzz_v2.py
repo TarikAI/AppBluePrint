@@ -118,7 +118,7 @@ def stubs():
     for name in registry.DOMAIN:
         if not registry.exists(name):
             files[name.replace(".", "/") + ".py"] = STUB + SINGLE.get(name, "")
-    for name, view in zip(registry.VIEWS, registry.OPTIONAL_VIEWS):
+    for name, view in (("views.roadmap_md", "ROADMAP.md"), ("views.features_md", "FEATURES.md")):
         if not registry.exists(name):
             files[name.replace(".", "/") + ".py"] = VIEW % view
     return files

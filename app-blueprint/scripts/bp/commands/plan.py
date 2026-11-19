@@ -85,7 +85,7 @@ def cmd_validate(args):
 def cmd_render(args):
     root = find_root(args.root)
     plan = load_plan(root)
-    errors, _ = validate_plan(plan)
+    errors, _ = validate_plan(plan, root=root)
     if errors and not args.force:
         die(f"The blueprint has {len(errors)} error(s); run validate first (or render --force for a draft view).")
     state = load_state(root)
