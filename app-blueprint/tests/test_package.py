@@ -421,7 +421,7 @@ class CopiedToolTest(CopyTestBase):
         self.age_package_copy()
         r = self.refresh()
         self.assertIn(f"Refreshed .blueprint/bin to tool {bp.TOOL_VERSION}.", r.stdout)
-        self.assertNotIn("migrate", r.stdout + r.stderr)
+        self.assertEqual("migrate" in r.stdout + r.stderr, (S.PACKAGE / "commands" / "migrate.py").is_file())  # the hint, once built (1.5 row d)
         self.assertEqual((self.bin / "VERSION").read_text(encoding="utf-8"), bp.TOOL_VERSION + "\n")
         self.assert_guards_work()
 
@@ -431,7 +431,7 @@ class CopiedToolTest(CopyTestBase):
         r = self.refresh()
         self.assertIn(f"Upgraded .blueprint/bin from the single-file tool 1.3.0 to the package tool {bp.TOOL_VERSION}.",
                       r.stdout)
-        self.assertNotIn("migrate", r.stdout + r.stderr)
+        self.assertEqual("migrate" in r.stdout + r.stderr, (S.PACKAGE / "commands" / "migrate.py").is_file())  # the hint, once built (1.5 row d)
         self.assertTrue((self.bin / "bp" / "version.py").is_file())
         self.assertEqual(self.copy.read_bytes(), S.LAUNCHER.read_bytes())
         self.assert_guards_work()
@@ -882,7 +882,7 @@ class DoctorTest(CopyTestBase):
         self.assertIn(str(Path("scripts") / "bp" / "version.py"), r.stdout)
         self.assertIn("this project's tool copy: 1.3.0 (single-file)", r.stdout)
         self.assertIn("blueprint.json schema: 1", r.stdout)
-        self.assertNotIn("migrate", r.stdout)
+        self.assertEqual("migrate" in r.stdout, (S.PACKAGE / "commands" / "migrate.py").is_file())  # the hint, once built (1.5 row d)
         self.assertIn("Out of date", r.stdout)
         r = S.run_script(S.LAUNCHER, ["doctor", "--strict", "--root", self.root], self.elsewhere, env=env)
         self.assertEqual(r.returncode, 1)
