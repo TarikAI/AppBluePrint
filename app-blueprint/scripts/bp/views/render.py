@@ -125,22 +125,39 @@ def _adoptable(path):
     return _has_header(head.decode("utf-8", errors="replace"))
 
 
+class ViewBlocked(Exception):
+    """A view's file entry cannot be replaced: render_all reports it like a view conflict (contract 8)."""
+
+
 def _write_view(path, text):
     """Write a view, never through a link (review P7-1): an existing file that is a symlink, a reparse point or a
     hard link to another name gets a new directory entry (temp file in the same folder, then os.replace) instead of
-    being written in place. Returns True when the file changed, as write_text_if_changed."""
+    being written in place. Whatever sits at the temp name is removed first, and the temp file is created
+    exclusively; an entry that cannot be removed or replaced (a folder, read-only, locked, open elsewhere) raises
+    ViewBlocked naming it, and render's own temp file is removed (review P10-4). Returns True when the file changed."""
     if not os.path.lexists(path) or _is_plain_file(path):
         return write_text_if_changed(path, text)
     tmp = path.with_name(path.name + ".tmp")
     if os.path.isdir(tmp) and not os.path.islink(tmp):
-        raise BlueprintError("view-conflict", f".blueprint/{tmp.name} is a folder, so render cannot write "
-                             f".blueprint/{path.name} safely; remove the folder, then run render again",
-                             next=f"remove .blueprint/{tmp.name}, then run render")
-    if os.path.lexists(tmp):  # a leftover file or a link: drop the entry, never write through or into it
-        os.unlink(tmp)
-    with open(tmp, "x", encoding="utf-8") as f:  # create only: a name that appeared meanwhile is not written through
-        f.write(text)
-    os.replace(tmp, path)
+        raise ViewBlocked(f"render: .blueprint/{path.name} cannot be written: .blueprint/{tmp.name} is a folder; "
+                          "remove it, then run render again.")
+    created = False
+    try:
+        if os.path.lexists(tmp):  # a leftover file or a link: drop the entry, never write through or into it
+            os.unlink(tmp)
+        with open(tmp, "x", encoding="utf-8") as f:  # create only: a name that appeared meanwhile is not written
+            created = True
+            f.write(text)
+        os.replace(tmp, path)
+    except OSError as e:
+        if created:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+        raise ViewBlocked(f"render: .blueprint/{path.name} cannot be written ({e.strerror or e}); make "
+                          f".blueprint/{path.name} and .blueprint/{tmp.name} writable or remove them, then run render "
+                          "again.") from e
     return True
 
 
@@ -174,14 +191,20 @@ def render_all(root, plan, state, quiet=False, check=False, fail_on_conflict=Fal
     m = render_map(plan, state, comp, ctx)
     if m is not None:
         outputs["map.html"] = m
-    stale = []
+    stale, blocked = [], {}
     for name, text in outputs.items():
         path = bp_dir(root) / name
         if check:
             if not path.exists() or path.read_text(encoding="utf-8") != text:
                 stale.append(name)
-        elif _write_view(path, text) and not quiet:
-            print(f"wrote .blueprint/{name}")
+        else:
+            try:
+                changed = _write_view(path, text)
+            except ViewBlocked as e:  # reported like a view conflict below
+                blocked[name] = str(e)
+                continue
+            if changed and not quiet:
+                print(f"wrote .blueprint/{name}")
     for name in recorded:
         path = bp_dir(root) / name
         if name in outputs or not path.exists():
@@ -201,7 +224,11 @@ def render_all(root, plan, state, quiet=False, check=False, fail_on_conflict=Fal
         stale.append(name)
     if m is None and not quiet:
         print("map.template.html not found next to the script; map.html skipped. Run init --refresh-tool.")
-    if conflicts and not check and fail_on_conflict:
-        raise BlueprintError("view-conflict", f"{len(conflicts)} view(s) not written: " + ", ".join(sorted(conflicts)),
+    for name, line in sorted(blocked.items()):
+        print(line, file=sys.stderr)
+        stale.append(name)
+    not_written = sorted(set(conflicts) | set(blocked))
+    if not_written and not check and fail_on_conflict:
+        raise BlueprintError("view-conflict", f"{len(not_written)} view(s) not written: " + ", ".join(not_written),
                              next="move or rename the file(s) named above, then run render")
     return stale

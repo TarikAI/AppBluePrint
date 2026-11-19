@@ -1062,7 +1062,9 @@ class DeepNestingTest(unittest.TestCase):
         self.assertIn("blueprint.json schema: unreadable", r.stdout)
 
     def test_a_deep_version_2_state_is_copied_without_recursion(self):  # review P10-5
-        deep = json.loads(deep_json(3000))
+        deep = 1
+        for _ in range(3000):  # built directly: the 3.11 JSON reader stops near 1000 levels
+            deep = [deep]
         st = migrate.upgrade_state({"stateVersion": 2, "files": {}, "x": deep})
         self.assertIsNot(st["x"], deep)
         self.assertEqual(st["tasks"], {})

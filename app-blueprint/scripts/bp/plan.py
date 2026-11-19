@@ -8,7 +8,7 @@ import json
 import sys
 
 from bp.version import SCHEMA_VERSION
-from bp.core import BlueprintError, bp_dir, die, norm, read_json, write_json
+from bp.core import BlueprintError, bp_dir, die, json_depth, norm, read_json, write_json
 from bp.globs import glob_match
 from bp.migrate import upgrade_plan, upgrade_state
 
@@ -299,8 +299,19 @@ def load_plan(root):
     raw = load_raw_plan(root)
     try:
         return _load_checked(raw)
-    except RecursionError:  # the one place the load path maps a nesting too deep for one of its steps (bad-json)
+    except RecursionError:
+        # The one place the load path maps a nesting too deep for one of its steps (bad-json), and only when the plan
+        # really is deep: a RecursionError on a shallow plan is a bug and stays an incident (review P10-3).
+        if json_depth(raw) < NESTING_ERROR_DEPTH:
+            raise
         _load_error("bad-json", "blueprint.json is nested too deeply to read", FIX_NEXT)
+
+
+# Below this nesting depth a RecursionError while loading cannot come from the plan's nesting: Python's default
+# recursion limit is 1000 frames, a recursive pass over nested values takes at least one frame per level (two for
+# copy.deepcopy, which failed at about 450), and the load path itself runs some 50 to 100 frames deep, so nesting
+# alone cannot exhaust the limit before roughly 300 levels. 200 leaves a margin below that.
+NESTING_ERROR_DEPTH = 200
 
 
 def _load_checked(raw):
