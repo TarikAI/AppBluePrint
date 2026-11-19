@@ -66,11 +66,17 @@ def proof_inputs(root, plan, paths):
         todo.extend(norm(d) for d in deps.get(p, ()))
     out = {}
     for p in sorted(seen):
+        # every path is taken literally: the proven file and planned files whatever their characters ([id], (group),
+        # a*b); a dependsOn entry that is a pattern id or a glob is simply not a file on disk, so it drops out here
         rel = _safe_rel(p)
-        if rel is None or any(c in rel for c in "*?["):
+        if rel is None:
             continue
         fp = root / rel
-        if fp.is_file():
+        try:
+            present = fp.is_file()
+        except (OSError, ValueError):  # a name the file system cannot hold (e.g. * on Windows)
+            present = False
+        if present:
             out[rel] = HASHER.digest(fp)
     return out
 
