@@ -208,8 +208,13 @@ ul.plain { margin: 0; padding-left: 18px; display: grid; gap: 3px; font-size: 13
   </section>
 </main>
 <script id="bp" type="application/json">__BLUEPRINT_DATA__</script>
+<script>
+/* plug-in points (contract 8.4). Tabs: each tab-*.js asset calls BP_TABS.push({id, label: function (D), render:
+   function (host, D, H)}). Mind map branch modes: mindmap.js may call BP_BRANCHES.push({value, label, build:
+   function (D, H) -> [branch nodes]}). H exposes the helpers of this template. */
+var BP_TABS = [], BP_BRANCHES = [];
+</script>
 <script>/*__MINDMAP_JS__*/</script>
-<script>var BP_TABS = []; /* plug-in tabs: each tab-*.js asset calls BP_TABS.push({id, label: function (D), render: function (host, D, H)}) */</script>
 <script>/*__TABS_JS__*/</script>
 <script>
 (function () {
@@ -243,7 +248,8 @@ ul.plain { margin: 0; padding-left: 18px; display: grid; gap: 3px; font-size: 13
   var TABS = [['overview', 'Overview'], ['mindmap', 'Mind map'], ['tree', 'Tree'], ['roster', 'Roster'], ['phases', 'Phases'], ['modules', 'Modules'],
     ['data', 'Data' + (DATA.issues.length ? ' (' + DATA.issues.length + ')' : '')], ['drift', 'Drift' + (D.unplanned.length ? ' (' + D.unplanned.length + ')' : '')]];
   // plug-in tabs (tab-*.js assets, contract 8.4): after Data, before Drift; H exposes the helpers of this template
-  var H = { el: el, $: $, glyph: glyph, stack: stack, count: count, states: S, glyphs: G, labels: L, colors: COLOR };
+  var H = { el: el, $: $, glyph: glyph, stack: stack, count: count, states: S, glyphs: G, labels: L, colors: COLOR,
+    rows: rows, byPath: byPath, fileLeaf: fileLeaf, patLeaf: patLeaf, byModule: byModule };
   var PLUG = [];
   (window.BP_TABS || []).forEach(function (t) {
     if (!t || typeof t.id !== 'string' || !/^[a-z][a-z0-9-]*$/.test(t.id) || $('v-' + t.id)) return;
@@ -372,9 +378,17 @@ ul.plain { margin: 0; padding-left: 18px; display: grid; gap: 3px; font-size: 13
       return { label: m.id + (m.layer ? ' · ' + m.layer : ''), title: m.purpose || m.id, children: kids, mod: m };
     }).filter(function (n) { return n.children.length; });
   }
+  var BRANCHES = (window.BP_BRANCHES || []).filter(function (b) {
+    return b && typeof b.value === 'string' && typeof b.build === 'function' && ['module', 'owner', 'phase'].indexOf(b.value) < 0;
+  });
+  BRANCHES.forEach(function (b) { $('mm-by').appendChild(el('option', { value: b.value, text: String(b.label || b.value) })); });
   function buildMindMap(by) {
     var root = { label: D.app.name || 'App', title: D.app.summary || '' , children: [] };
-    if (by === 'owner') {
+    var plug = BRANCHES.filter(function (b) { return b.value === by; })[0];
+    if (plug) {
+      try { root.children = plug.build(D, H) || []; }
+      catch (e) { root.children = [{ label: 'This view could not be drawn (' + e.message + ')', dot: 'var(--warn)' }]; }
+    } else if (by === 'owner') {
       root.children = D.roster.map(function (o) {
         var mine = rows.filter(function (r) { return r.owner === o.id; });
         var pats = D.patterns.filter(function (p) { return p.owner === o.id; });
