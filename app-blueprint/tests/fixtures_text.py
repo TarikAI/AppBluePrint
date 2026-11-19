@@ -219,7 +219,7 @@ def default_har_entries():
                   req_mime="application/x-www-form-urlencoded", resp_mime="application/json",
                   resp_body={"access_token": SECRETS["jwt"], "token_type": "Bearer"}),
         har_entry("GET", "https://analytics.vendor.test/collect?cid=abc123-fixture&v=1", 200, t=11, resp_mime="text/plain"),
-        har_entry("GET", "https://svc:%s@api.example.test/v1/status" % URL_PASSWORD, 200, t=12, resp_mime="application/json",
+        har_entry("GET", "https://svc:%s@api.example.test/v1/status" % URL_PASSWORD, 200, t=12, resp_mime="application/json",  # scan-private: allow
                   resp_body={"ok": True, "version": "1.0.0-fixture-value"}),
         har_entry("GET", _ORIGIN + "/settings", 200, t=13, req_headers=cookie_hdr, resp_body=_html("Settings"),
                   resp_mime="text/html"),
@@ -627,7 +627,7 @@ def default_openapi_doc():
     return {
         "openapi": "3.0.3",
         "info": {"title": "Snag fixture API", "version": "1.0.0", "description": "Synthetic. Key " + SECRETS["aws-key"]},
-        "servers": [{"url": "https://svc:%s@api.example.test/v1" % URL_PASSWORD}],
+        "servers": [{"url": "https://svc:%s@api.example.test/v1" % URL_PASSWORD}],  # scan-private: allow
         "paths": {
             "/items": {"parameters": [{"name": "X-Trace", "in": "header", "schema": {"type": "string"}}],
                        "get": _op("listItems", ["items"]), "post": _op("createItem", ["items"])},
@@ -696,7 +696,7 @@ def _yaml_text():
         "  title: Snag fixture API",
         "  version: 1.0.0",
         "servers:",
-        "  - url: https://svc:%s@api.example.test/v1" % URL_PASSWORD,
+        "  - url: https://svc:%s@api.example.test/v1" % URL_PASSWORD,  # scan-private: allow
         "paths:",
         "  /items:",
         "    parameters:",
