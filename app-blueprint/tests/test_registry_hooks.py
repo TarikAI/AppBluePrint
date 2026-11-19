@@ -564,6 +564,95 @@ class ViewFileTest(CliTestBase):
             self.assertIn("MINE.md", out)
         self.assertEqual((self.root / ".blueprint" / "MINE.md").read_text(encoding="utf-8"), "hand made")
 
+    def outside_file(self, name="victim.md"):
+        outside = Path(tempfile.mkdtemp(prefix="bp-outside-"))
+        self.addCleanup(shutil.rmtree, outside, True)
+        victim = outside / name
+        victim.write_bytes((HEADER + "\nnot the project's\n").encode("utf-8"))
+        return victim
+
+    def link_or_skip(self, kind, target, at):
+        try:
+            (os.link if kind == "hard" else os.symlink)(target, at)
+        except (OSError, NotImplementedError, AttributeError) as e:
+            self.skipTest(f"cannot create a {kind} link here: {e}")
+
+    def test_a_linked_file_is_never_adopted(self):
+        """Review P7-1: a file at a view's name that is a hard link or a symlink is a conflict, never adopted, and
+        the file it shares bytes with is not written."""
+        for kind in ("hard", "sym"):
+            with self.subTest(kind=kind):
+                victim = self.outside_file()
+                before = victim.read_bytes()
+                at = self.root / ".blueprint" / f"LINKED-{kind}.md"
+                self.link_or_skip(kind, victim, at)
+                src = f"def views(ctx):\n    return {{'LINKED-{kind}.md': {HEADER!r} + '\\nfresh\\n'}}\n"
+                with extension({"views/features_md.py": src}):
+                    code, _, err = self.run_("render")
+                self.assertEqual(code, 1, err)
+                self.assertIn(f"LINKED-{kind}.md exists and was not written by blueprint.py", err)
+                self.assertEqual(victim.read_bytes(), before)
+
+    def test_a_view_is_never_written_through_a_link(self):
+        """Review P7-1: a recorded view whose file became a link is replaced (a new directory entry), so the file it
+        was linked to keeps its bytes."""
+        self.run_("sync")
+        for kind in ("hard", "sym"):
+            with self.subTest(kind=kind):
+                name = f"TRACKED-{kind}.md"
+                want = [HEADER + "\nversion one\n"]
+                src = f"WANT = {want!r}\ndef views(ctx):\n    return {{{name!r}: WANT[0]}}\n"
+                with extension({"views/features_md.py": src}):
+                    mod = importlib.import_module("bp.views.features_md")
+                    self.assertEqual(self.run_("render")[0], 0)
+                    view = self.root / ".blueprint" / name
+                    victim = self.outside_file()
+                    before = victim.read_bytes()
+                    view.unlink()
+                    self.link_or_skip(kind, victim, view)
+                    mod.WANT[0] = HEADER + "\nversion two\n"
+                    code, _, err = self.run_("render")
+                    self.assertEqual(code, 0, err)
+                self.assertEqual(victim.read_bytes(), before, "the outside file is unchanged")
+                self.assertFalse(view.is_symlink())
+                self.assertEqual(os.stat(view).st_nlink, 1)
+                self.assertEqual(view.read_text(encoding="utf-8"), HEADER + "\nversion two\n")
+
+    def test_the_header_check_reads_a_bounded_amount(self):
+        """Review P7-2: at most five lines of at most 4096 bytes each; a huge file with no newline is a conflict."""
+        big = self.root / ".blueprint" / "BIG.md"
+        big.write_bytes(b"x" * (4 * 1024 * 1024))
+        reads = []
+        real_open = Path.open
+
+        def spy(path, *a, **kw):
+            f = real_open(path, *a, **kw)
+            if Path(path).name == "BIG.md":
+                real_readline = f.readline
+                f.readline = lambda size=-1: (lambda line: (reads.append((size, len(line))), line)[1])(real_readline(size))
+                real_read = f.read
+                f.read = lambda size=-1: (lambda data: (reads.append((size, len(data))), data)[1])(real_read(size))
+            return f
+
+        src = "def views(ctx):\n    return {'BIG.md': " + repr(HEADER + "\n") + "}\n"
+        with extension({"views/features_md.py": src}), mock.patch.object(Path, "open", spy):
+            from bp.views.render import render_all
+            plan = quiet(bplan.load_plan, self.root)[0]
+            stale = render_all(self.root, plan, bplan.load_state(self.root), quiet=True, check=True)
+        self.assertIn("BIG.md", stale)
+        self.assertTrue(reads, "the header check reads through Path.open")
+        self.assertTrue(all(0 < size <= 4096 for size, _ in reads), reads[:3])
+        self.assertLessEqual(sum(n for _, n in reads), 5 * 4096)
+        self.assertEqual(big.stat().st_size, 4 * 1024 * 1024)
+
+    def test_a_binary_file_has_no_header(self):
+        (self.root / ".blueprint" / "BIN.md").write_bytes(b"\xff\xfe\x00\x00" * 100)
+        src = "def views(ctx):\n    return {'BIN.md': " + repr(HEADER + "\n") + "}\n"
+        with extension({"views/features_md.py": src}):
+            code, _, err = self.run_("render")
+        self.assertEqual(code, 1, err)
+        self.assertIn("BIN.md exists and was not written by blueprint.py", err)
+
     def test_a_v1_render_adds_nothing_to_state(self):
         self.write_plan(v1_plan())
         state_path = self.root / ".blueprint" / "state.json"
