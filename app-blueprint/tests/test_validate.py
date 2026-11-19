@@ -787,5 +787,134 @@ class VerifyProofTest(TempRoot):
         self.assertNotIn("↻", self.cli("status").stdout, "status output of a version 1 plan stays 1.3.0's (W0 rule)")
 
 
+# ---------------------------------------------------------------------------------------------------- findings and codes
+
+class FindingsTest(TempRoot):
+    def setUp(self):
+        super().setUp()
+        from bp import validate
+        self.v = validate
+
+    def load(self, plan):
+        self.write_plan(plan)
+        return quiet(bplan.load_plan, self.root)[0]
+
+    def test_finding_shape_and_1x_messages(self):
+        plan = v2_plan()
+        plan["app"]["name"] = ""
+        plan["files"][0]["module"] = "nope"
+        found = self.v.validate_findings(self.load(plan))
+        for f in found:
+            self.assertEqual(set(f), {"level", "code", "entry", "message", "next"})
+        self.assertEqual([(f["level"], f["code"], f["message"]) for f in found],
+                         [("error", "app-name", "app.name is empty"),
+                          ("error", "unknown-module", "file Cargo.toml: unknown module 'nope'")])
+        errors, warnings = self.v.validate_plan(self.load(plan))
+        self.assertEqual((errors, warnings), ([f["message"] for f in found], []))
+
+    def test_schema_v1_warning(self):
+        for name, plan in (("loaded", self.load(v1_plan())), ("raw dict", v1_plan())):
+            with self.subTest(plan=name):
+                found = self.v.validate_findings(plan)
+                first = found[0]
+                self.assertEqual((first["level"], first["code"], first["entry"]), ("warning", "schema-v1", "blueprint.json"))
+                self.assertTrue(first["message"].startswith("blueprint.json is schema version 1; it still works"))
+                self.assertNotIn("migrate", first["message"])  # until bp/commands/migrate.py exists (1.5 row d)
+                self.assertEqual([f for f in found if f["level"] == "error"], [])
+        self.assertEqual(self.v.validate_findings(v2_plan()), [])
+        self.assertEqual(self.v.validate_findings(self.load(v2_plan())), [])
+
+    def test_raw_dict_versions(self):
+        raw = v1_plan()
+        before = copy.deepcopy(raw)
+        self.v.validate_plan(raw)
+        self.assertEqual(raw, before, "a raw version 1 dict is upgraded as a copy")
+        for bad in ("1", 3, None, True):
+            with self.subTest(version=bad):
+                raw = v1_plan()
+                raw["version"] = bad
+                errs = [f for f in self.v.validate_findings(raw) if f["level"] == "error"]
+                self.assertEqual((errs[0]["message"], errs[0]["code"]), ("version must be 1 or 2", "version"))
+
+    def test_codes_lists(self):
+        from bp import data, rules
+        self.assertEqual(data.CODES + rules.CODES, frozen.VALIDATION_CODES)
+        self.assertEqual(self.v.VALIDATION_CODES[0], (r"^blueprint\.json is schema version 1\b", "schema-v1"))
+        self.assertEqual(self.v.VALIDATION_CODES[-len(frozen.VALIDATION_CODES):], frozen.VALIDATION_CODES)
+        self.assertEqual(self.v.classify_error("blueprint.json is schema version 1; it still works."), "schema-v1")
+        self.assertEqual(self.v.classify_error("resource r: owner 'y' is not in the roster"), "resource-invalid")
+
+    def test_codes_classify(self):
+        """Every finding the fixtures produce carries the code its message classifies as (contract 7.4)."""
+        import test_plan_fuzz as tf
+        plans = [v1_plan(), v2_plan()]
+        for base in (v1_plan(), v2_plan()):
+            for path in tf.mutation_paths(base):
+                for value in ("", None, "nope", []):
+                    plan = copy.deepcopy(base)
+                    tf.apply(plan, path, value)
+                    plans.append(plan)
+        seen = set()
+        for plan in plans:
+            self.write_plan(plan)
+            try:
+                loaded = quiet(bplan.load_plan, self.root)[0]
+            except SystemExit:
+                continue
+            for f in self.v.validate_findings(loaded):
+                seen.add(f["code"])
+                self.assertEqual(self.v.classify_error(f["message"]), f["code"], f["message"])
+                if f["level"] == "error":
+                    self.assertNotEqual(f["code"], "other", f["message"])
+        self.assertGreater(len(seen), 10)
+
+    def test_record_friction_takes_findings_or_messages(self):
+        recs = []
+        with mock.patch.object(self.v, "store_append", lambda name, rec: recs.append((name, rec))):
+            self.v.record_friction(self.root, [{"level": "error", "code": "x-code", "message": "m"}, "app.name is empty"])
+        self.assertEqual(recs[0][0], "friction.jsonl")
+        self.assertEqual(recs[0][1]["codes"], {"x-code": 1, "app-name": 1})
+
+    def test_validate_json_and_counts(self):
+        self.write_plan(v2_plan())
+        r = self.cli("validate")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("OK: 5 files, 0 patterns, 3 modules, 2 phases, 5 owners, 2 features, 1 milestones, 1 tasks, "
+                      "1 unknowns. 0 warning(s).", r.stdout)
+        r = self.cli("validate", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = json.loads(r.stdout)
+        self.assertEqual((out["ok"], out["command"], out["data"]["errors"], out["data"]["warnings"]),
+                         (True, "validate", [], []))
+        self.assertEqual(out["data"]["counts"], {"files": 5, "patterns": 0, "modules": 3, "phases": 2, "owners": 5,
+                                                 "resources": 0, "features": 2, "milestones": 1, "tasks": 1,
+                                                 "unknowns": 1})
+        plan = v1_plan()
+        plan["app"]["name"] = ""
+        self.write_plan(plan)
+        r = self.cli("validate", "--json")
+        self.assertEqual(r.returncode, 1)
+        data = json.loads(r.stdout)["data"]
+        self.assertEqual([f["code"] for f in data["errors"]], ["app-name"])
+        self.assertEqual([f["code"] for f in data["warnings"]], ["schema-v1"])
+        r = self.cli("validate")
+        self.assertIn("warning: blueprint.json is schema version 1", r.stdout)
+        self.write_plan(v1_plan())
+        r = self.cli("validate")
+        self.assertIn("OK: 12 files, 1 patterns, 4 modules, 2 phases, 4 owners, 2 data resources. 2 warning(s).", r.stdout)
+
+    def test_status_and_export_json_gain_the_new_keys(self):
+        for plan in (v1_plan(), v2_plan()):
+            self.write_plan(plan)
+            for args in (["status", "--json"], ["export", "json"]):
+                with self.subTest(version=plan["version"], cmd=args):
+                    r = self.cli(*args)
+                    self.assertEqual(r.returncode, 0, r.stderr)
+                    out = json.loads(r.stdout)
+                    for k in NEW:
+                        self.assertEqual(out[k], [])
+                    self.assertIn("rows", out)
+
+
 if __name__ == "__main__":
     unittest.main()
