@@ -67,7 +67,11 @@ def _copy(src, dst):
     """Copy the bytes only: a read-only skill file must not become a read-only file in .blueprint/bin."""
     if os.path.lexists(dst):
         _writable(dst)
-        os.remove(dst)
+        try:
+            os.remove(dst)
+        except OSError:
+            die(f"Could not replace {dst}: it is in use. Close what holds it open, "
+                "then run: python <skill>/scripts/blueprint.py init --refresh-tool")
     shutil.copyfile(src, dst)
 
 
@@ -79,6 +83,7 @@ def _rmtree(path):
     """
     if not os.path.lexists(path):
         return
+    _writable(path)  # a read-only folder attribute would otherwise leave an undeletable leftover
     for folder, dirs, files in os.walk(path):
         for name in dirs + files:
             _writable(os.path.join(folder, name))
