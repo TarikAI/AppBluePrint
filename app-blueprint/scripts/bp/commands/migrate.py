@@ -35,8 +35,9 @@ def register(name, p):
 
 
 def _run(root, args):
-    """A command line the user can run as printed: the project's own copy when it exists, else this tool."""
-    if (bp_dir(root) / "bin" / "blueprint.py").is_file():
+    """A command line the user can run as printed: the project's own copy when it has the command, else this tool."""
+    copy = bp_dir(root) / "bin"
+    if (copy / "blueprint.py").is_file() and (not args.startswith("migrate") or (copy / "bp" / "commands" / "migrate.py").is_file()):
         return f"python .blueprint/bin/blueprint.py {args}"
     return f'python "{TOOL_HOME / "blueprint.py"}" {args} --root "{root}"'
 
@@ -46,16 +47,17 @@ def _fix_next(root):
 
 
 class _WriteError(Exception):
-    """A file could not be written: `shown` is the project path that failed, `reason` the system's words."""
+    """A file could not be written: `shown` is the project path that failed, `reason` the system's words, `kind` where:
+    "tmp" (the temporary file could not be created), "blocked" (something that is not a file is in its place) or
+    "replace" (the target could not be replaced: locked by another program, or read-only)."""
 
-    def __init__(self, shown, reason):
-        super().__init__(shown, reason)
-        self.shown, self.reason = shown, reason
+    def __init__(self, shown, reason, kind="tmp"):
+        super().__init__(shown, reason, kind)
+        self.shown, self.reason, self.kind = shown, reason, kind
 
 
-def _shown(root, exc, fallback):
-    """The path an OSError is about, relative to the project when it is inside it, else the fallback."""
-    name = getattr(exc, "filename", None)
+def _shown(root, name, fallback):
+    """A path from an OSError, relative to the project when it is inside it, else as given."""
     if not name:
         return fallback
     try:
@@ -64,11 +66,17 @@ def _shown(root, exc, fallback):
         return str(name)
 
 
-def _write_failed(root, shown, reason):
+def _write_failed(root, shown, reason, kind="tmp"):
+    again = f", then run: {_run(root, 'migrate')}"
+    if kind == "replace":
+        return BlueprintError("write-failed", f"cannot write {shown}: {reason}", entry=shown,
+                              next=f"close any program that has {shown} open, or make it writable" + again)
+    if kind == "blocked":
+        return BlueprintError("write-failed", f"cannot write {shown}: it is in the way and is not a file", entry=shown,
+                              next=f"remove or rename {shown}" + again)
     exists = (root / shown).exists()
     return BlueprintError("write-failed", f"cannot write {shown}: {reason}", entry=shown if exists else ".blueprint",
-                          next=(f"make {shown} writable" if exists else "make the folder .blueprint writable")
-                          + f", then run: {_run(root, 'migrate')}")
+                          next=(f"make {shown} writable" if exists else "make the folder .blueprint writable") + again)
 
 
 def _write_atomic(root, path, rel, data):
@@ -76,16 +84,22 @@ def _write_atomic(root, path, rel, data):
     file stays whole on any failure, and the temporary file is removed whatever interrupts the write."""
     target = Path(os.path.realpath(path))
     tmp = target.with_name(target.name + ".tmp")
+    tmp_rel = _shown(root, tmp, rel + ".tmp")
     try:
-        tmp.write_bytes(data)
-        os.replace(tmp, target)
-    except OSError as exc:
-        with contextlib.suppress(OSError):
-            tmp.unlink()
-        raise _WriteError(_shown(root, exc, rel), getattr(exc, "strerror", None) or str(exc))
+        try:
+            tmp.write_bytes(data)
+        except OSError as exc:
+            kind = "blocked" if tmp.exists() and not tmp.is_file() else "tmp"
+            raise _WriteError(_shown(root, getattr(exc, "filename", None), tmp_rel) if kind == "tmp" else tmp_rel,
+                              getattr(exc, "strerror", None) or str(exc), kind)
+        try:
+            os.replace(tmp, target)
+        except OSError as exc:
+            raise _WriteError(rel, getattr(exc, "strerror", None) or str(exc), "replace")
     except BaseException:
         with contextlib.suppress(OSError):
-            tmp.unlink()
+            if tmp.is_file():
+                tmp.unlink()
         raise
 
 
@@ -101,9 +115,12 @@ def _encode(data):
 
 
 def _leading(version):
-    """(major, minor, patch) from the leading numbers of a version text (2.0.0-rc1 is 2.0.0), or None."""
+    """(major, minor, patch) from the leading numbers of a version text (2.0.0-rc1 is 2.0.0), or None when there are none
+    or one has more than nine digits."""
     m = re.match(r"\s*v?(\d+)(?:\.(\d+))?(?:\.(\d+))?", str(version))
-    return tuple(int(x or 0) for x in m.groups()) if m else None
+    if m is None or any(len(g) > 9 for g in m.groups() if g):
+        return None
+    return tuple(int(x or 0) for x in m.groups())
 
 
 def _old_copy(root):
@@ -123,19 +140,36 @@ def _old_copy(root):
     return None
 
 
-class _Duplicates:
-    """object_pairs_hook that builds the usual dict (the last value of a repeated key wins) and remembers the keys."""
+class _Repeats(dict):
+    """A parsed object in which a key was repeated: the usual dict (the last value wins) plus the repeated keys."""
+    repeated = ()
 
-    def __init__(self):
-        self.keys = []
 
-    def __call__(self, pairs):
-        out = {}
-        for k, v in pairs:
-            if k in out and k not in self.keys:
-                self.keys.append(k)
-            out[k] = v
+def _object(pairs):
+    """object_pairs_hook: the usual dict; one that has a repeated key is a _Repeats that remembers the keys."""
+    out, again = {}, []
+    for k, v in pairs:
+        if k in out and k not in again:
+            again.append(k)
+        out[k] = v
+    if not again:
         return out
+    marked = _Repeats(out)
+    marked.repeated = tuple(again)
+    return marked
+
+
+def _repeated_paths(value):
+    """The paths (modules[2].id) of every repeated key in a parsed document, in document order."""
+    found, stack = [], [("", value)]
+    while stack:
+        where, v = stack.pop()
+        if isinstance(v, dict):
+            found.extend(f"{where}.{k}" if where else str(k) for k in getattr(v, "repeated", ()))
+            stack.extend((f"{where}.{k}" if where else str(k), x) for k, x in reversed(list(v.items())))
+        elif isinstance(v, list):
+            stack.extend((f"{where}[{i}]", x) for i, x in reversed(list(enumerate(v))))
+    return found
 
 
 def _non_finite(value):
@@ -153,13 +187,12 @@ def _non_finite(value):
 
 
 def _read_plan(root):
-    """(original bytes, parsed plan, repeated keys): blueprint.json is read once and both the backup and the upgrade
+    """(original bytes, parsed plan): blueprint.json is read once and both the backup and the upgrade
     come from those bytes. A file that does not parse is reported by load_raw_plan with the 1.x text."""
     path = bp_dir(root) / "blueprint.json"
-    dups = _Duplicates()
     try:
         original = path.read_bytes()
-        return original, json.loads(original.decode("utf-8"), object_pairs_hook=dups), dups.keys
+        return original, json.loads(original.decode("utf-8"), object_pairs_hook=_object)
     except (OSError, ValueError, RecursionError):  # not readable, not UTF-8, not JSON, or too deep (a ValueError)
         load_raw_plan(root)  # raises no-blueprint / bad-json with the 1.x message; it cannot succeed here
         raise
@@ -194,7 +227,7 @@ def _backup(root, original):
             try:
                 _write_atomic(root, path, ".blueprint/" + name, original)
             except _WriteError as e:
-                raise _write_failed(root, e.shown, e.reason)
+                raise _write_failed(root, e.shown, e.reason, e.kind)
             return ".blueprint/" + name, True
         try:
             if path.read_bytes() == original:
@@ -216,6 +249,13 @@ def _check_writable(root, targets):
                              next=f"make the folder .blueprint writable, then run: {_run(root, 'migrate')}")
 
 
+def _warn_hard_link(path, rel):
+    """An atomic replace cannot keep a hard link: the other name keeps the old bytes. Say so."""
+    with contextlib.suppress(OSError):
+        if os.stat(os.path.realpath(path)).st_nlink > 1:
+            print(f"warning: {rel} had another name (a hard link); that name still holds the version 1 file", file=sys.stderr)
+
+
 def _state_warning(root, why):
     return (f"warning: .blueprint/state.json {why}; it was left as it is. Fix or delete it, then run: "
             + _run(root, "sync"))
@@ -224,7 +264,7 @@ def _state_warning(root, why):
 def cmd_migrate(args):
     root = find_root(args.root)
     dry = bool(getattr(args, "dry_run", False))
-    original, raw, repeated = _read_plan(root)
+    original, raw = _read_plan(root)
     if isinstance(raw, dict) and plan_version(raw) == 2:  # 3.4 step 1: nothing to do, nothing written
         emit(args, "migrate", {"from": 2, "to": 2, "written": [], "dryRun": dry},
              ["blueprint.json is already schema version 2. Nothing to do."])
@@ -234,6 +274,7 @@ def cmd_migrate(args):
         raise BlueprintError("bad-json", f"blueprint.json has a number that is not finite ({where}); JSON cannot hold it",
                              entry="blueprint.json", next=_fix_next(root))
     load_plan(root)  # the load checks of 3.3 (shape, types, version): a plan that does not load is not migrated
+    repeated = _repeated_paths(raw)
     new_plan = upgrade_plan(raw)
     old = None if getattr(args, "force", False) else _old_copy(root)  # step 2
     if old is not None:
@@ -271,11 +312,13 @@ def cmd_migrate(args):
         print(f'warning: blueprint.json repeats the key "{key}"; the last value was kept and the original is in {backup}',
               file=sys.stderr)
     written = [PLAN]
+    _warn_hard_link(bp_dir(root) / "blueprint.json", PLAN)
     try:  # step 5
         _write_atomic(root, bp_dir(root) / "blueprint.json", PLAN, plan_bytes)
     except _WriteError as e:
-        raise _write_failed(root, e.shown, e.reason)
+        raise _write_failed(root, e.shown, e.reason, e.kind)
     if state_bytes is not None:
+        _warn_hard_link(bp_dir(root) / "state.json", STATE)
         try:
             _write_atomic(root, bp_dir(root) / "state.json", STATE, state_bytes)
             written.append(STATE)
@@ -293,7 +336,7 @@ def cmd_migrate(args):
     _render_quietly(root)
     emit(args, "migrate", {"from": 1, "to": 2, "written": written, "dryRun": False},
          [f"Migrated blueprint.json to schema version 2. Backup: {backup}. Next: add milestones and features "
-          "(see references/schema.md in the skill), then run validate."])
+          f"(see references/schema.md in the skill), then run: {_run(root, 'validate')}"])
 
 
 def _render_quietly(root):

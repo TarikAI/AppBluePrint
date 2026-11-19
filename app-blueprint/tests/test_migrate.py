@@ -30,8 +30,16 @@ from test_validate import TempRoot, v1_fixtures, v1_plan, v2_plan
 
 EXAMPLE_V2 = S.SKILL / "references" / "example-blueprint-v2.json"
 DRY_LINE = "version 1 -> 2; adds milestones, features, tasks, unknowns (empty); state.json gains stateVersion 2"
-DONE_LINE = ("Migrated blueprint.json to schema version 2. Backup: .blueprint/blueprint.v1.json. "
-             "Next: add milestones and features (see references/schema.md in the skill), then run validate.")
+
+
+def done_line(root, copy=False):
+    """The success line: it ends with the validate command that runs as printed (the project's copy, else this tool)."""
+    run = ("python .blueprint/bin/blueprint.py validate" if copy
+           else f'python "{S.LAUNCHER.resolve()}" validate --root "{Path(root).resolve()}"')
+    return ("Migrated blueprint.json to schema version 2. Backup: .blueprint/blueprint.v1.json. "
+            "Next: add milestones and features (see references/schema.md in the skill), then run: " + run)
+
+
 NEW = ("milestones", "features", "tasks", "unknowns")
 OLD = 946684800 * 10 ** 9  # 2000-01-01, so "unchanged modification time" cannot be a same-tick coincidence
 
@@ -90,7 +98,7 @@ class WriteTest(MigrateCase):
     def test_migrates_and_prints_the_contract_line(self):
         original = self.plan_path.read_bytes()
         r = self.migrate()
-        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, DONE_LINE + "\n", ""))
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, done_line(self.root) + "\n", ""))
         new = self.plan()
         self.assertEqual(new["version"], 2)
         self.assertEqual((self.bp / "blueprint.v1.json").read_bytes(), original)  # step 4: the original bytes
@@ -242,7 +250,7 @@ class BackupTest(MigrateCase):
         (self.bp / "blueprint.v1.json").write_bytes(self.plan_path.read_bytes())
         os.utime(self.bp / "blueprint.v1.json", ns=(OLD, OLD))
         r = self.migrate()
-        self.assertEqual((r.returncode, r.stdout), (0, DONE_LINE + "\n"))
+        self.assertEqual((r.returncode, r.stdout), (0, done_line(self.root) + "\n"))
         self.assertEqual((self.bp / "blueprint.v1.json").stat().st_mtime_ns, OLD)
         self.set_plan(v1_plan())  # again, with the identical backup in place: it is reused and not listed as written
         self.assertEqual(self.envelope(self.migrate("--json"))["data"]["written"], [".blueprint/blueprint.json",
@@ -360,7 +368,7 @@ class OldToolCopyTest(MigrateCase):
     def test_force_skips_the_check(self):
         self.fake_copy("1.8.0")
         r = self.migrate("--force")
-        self.assertEqual((r.returncode, r.stdout), (0, DONE_LINE + "\n"), r.stderr)
+        self.assertEqual((r.returncode, r.stdout), (0, done_line(self.root, copy=True) + "\n"), r.stderr)
         self.assertEqual(self.plan()["version"], 2)
 
     def test_no_copy_at_all_is_not_refused(self):
@@ -379,7 +387,7 @@ class OldToolCopyTest(MigrateCase):
         (base / ".blueprint" / "bin" / "VERSION").write_text("1.0.0\n", encoding="utf-8")  # what a stale VERSION says
         copy_ = base / ".blueprint" / "bin" / "blueprint.py"
         r = S.run_script(copy_, ["migrate", "--root", base], base)
-        self.assertEqual((r.returncode, r.stdout), (0, DONE_LINE + "\n"), r.stderr)  # the copy itself runs it
+        self.assertEqual((r.returncode, r.stdout), (0, done_line(base, copy=True) + "\n"), r.stderr)  # the copy itself runs it
         self.assertEqual(json.loads((base / ".blueprint" / "blueprint.json").read_text(encoding="utf-8"))["version"], 2)
 
 
@@ -580,7 +588,7 @@ class FailureTest(MigrateCase):
         self.assertEqual(self.plan()["version"], 2)
         self.assertIn("warning: the views were not regenerated; run: python", err)
         self.assertNotIn("RuntimeError", err)
-        self.assertEqual(out, DONE_LINE + "\n")
+        self.assertEqual(out, done_line(self.root) + "\n")
 
     def test_render_noise_never_reaches_json_stdout(self):
         def noisy(*a, **k):
@@ -840,8 +848,8 @@ class UnwritableContentTest(MigrateCase):
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         err = self.envelope(r)["error"]
         self.assertEqual((err["code"], err["entry"]), ("write-failed", ".blueprint/blueprint.json.tmp"))
-        self.assertIn("cannot write .blueprint/blueprint.json.tmp", err["message"])
-        self.assertTrue(err["next"].startswith("make .blueprint/blueprint.json.tmp writable, then run: python"), err["next"])
+        self.assertEqual(err["message"], "cannot write .blueprint/blueprint.json.tmp: it is in the way and is not a file")
+        self.assertTrue(err["next"].startswith("remove or rename .blueprint/blueprint.json.tmp, then run: python"), err["next"])
         self.assertEqual(self.plan_path.read_bytes(), original)
         self.assertEqual((self.bp / "blueprint.v1.json").read_bytes(), original)
 
@@ -881,7 +889,7 @@ class UnwritableContentTest(MigrateCase):
                 os.replace(elsewhere / name, self.bp / name)
                 self.skipTest("this platform or account cannot create symbolic links")
         r = self.migrate()
-        self.assertEqual((r.returncode, r.stdout), (0, DONE_LINE + "\n"), r.stderr)
+        self.assertEqual((r.returncode, r.stdout), (0, done_line(self.root) + "\n"), r.stderr)
         for name in ("blueprint.json", "state.json"):
             self.assertTrue((self.bp / name).is_symlink(), name)
         self.assertEqual(json.loads((elsewhere / "blueprint.json").read_text(encoding="utf-8"))["version"], 2)
@@ -933,6 +941,156 @@ class WithoutTheCommandTest(unittest.TestCase):
         # the project's own copy was made by that skill, so it has no command either
         r = S.run_script(proj / ".blueprint" / "bin" / "blueprint.py", ["status"], proj)
         self.assertNotIn("migrate", r.stdout)
+
+
+class Round2Test(MigrateCase):
+    """Review round 2: a huge version number, a locked target, a hard link, key paths, an interrupt, and the commands
+    that `next:` names."""
+
+    def replace_denied(self, name):
+        real = os.replace
+
+        def denied(src, dst, *a, **k):
+            if Path(dst).name == name:
+                raise PermissionError(13, "Access is denied", str(src), None, str(dst))
+            return real(src, dst, *a, **k)
+
+        return mock.patch.object(cmd.os, "replace", denied)
+
+    def run_in_process(self, **kw):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                cmd.cmd_migrate(Namespace(root=str(self.root), dry_run=False, force=kw.get("force", False), json=True))
+                return 0, out.getvalue(), err.getvalue(), None
+            except SystemExit as e:
+                return e.code, out.getvalue(), err.getvalue(), e
+
+    def test_a_huge_version_number_in_the_copy_is_no_readable_version(self):
+        (self.bp / "bin").mkdir()
+        (self.bp / "bin" / "blueprint.py").write_text("# copy\n", encoding="utf-8")
+        for text in ("9" * 5000, "1." + "9" * 20 + ".0", "1.9." + "9" * 10):
+            with self.subTest(version=text[:12]):
+                (self.bp / "bin" / "VERSION").write_text(text + "\n", encoding="utf-8")
+                for flags in (["--dry-run"], []):
+                    r = self.migrate(*flags)
+                    self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                    self.assertNotIn("Traceback", r.stderr)
+                    self.assertIn("error: this project's tool copy has no readable version", r.stderr)
+
+    def test_a_locked_plan_is_reported_as_the_plan_not_the_temporary_file(self):
+        original = self.plan_path.read_bytes()
+        with self.replace_denied("blueprint.json"):
+            code, out, err, exc = self.run_in_process()
+        self.assertEqual((code, exc.error, exc.entry), (1, "write-failed", ".blueprint/blueprint.json"))
+        self.assertEqual(exc.message, "cannot write .blueprint/blueprint.json: Access is denied")
+        self.assertTrue(exc.next.startswith("close any program that has .blueprint/blueprint.json open, or make it "
+                                            "writable, then run: python"), exc.next)
+        self.assertEqual(self.plan_path.read_bytes(), original)
+        self.assertEqual([p.name for p in self.bp.iterdir() if p.name.endswith(".tmp")], [])
+
+    def test_a_locked_state_is_a_warning_naming_the_state(self):
+        with self.replace_denied("state.json"):
+            code, out, err, exc = self.run_in_process()
+        self.assertEqual((code, exc), (0, None))
+        self.assertIn("warning: .blueprint/state.json could not be written (Access is denied). blueprint.json is "
+                      "migrated; state.json was left as it is and is upgraded in memory whenever it is read", err)
+        self.assertNotIn("state.json.tmp", err)
+
+    @unittest.skipUnless(sys.platform == "win32", "an open handle blocks a replace on Windows only")
+    def test_a_plan_held_open_by_another_program(self):
+        original = self.plan_path.read_bytes()
+        with open(self.plan_path, "rb"):
+            r = self.migrate("--json")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        err = self.envelope(r)["error"]
+        self.assertEqual((err["code"], err["entry"]), ("write-failed", ".blueprint/blueprint.json"))
+        self.assertTrue(err["message"].startswith("cannot write .blueprint/blueprint.json: "), err["message"])
+        self.assertIn("close any program that has .blueprint/blueprint.json open", err["next"])
+        self.assertEqual(self.plan_path.read_bytes(), original)
+        self.assertEqual(self.migrate().returncode, 0)  # released: the retry works
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root can write a read-only file")
+    def test_a_temporary_file_that_cannot_be_written_keeps_its_own_name(self):
+        tmp = self.bp / "blueprint.json.tmp"
+        tmp.write_text("x", encoding="utf-8")
+        os.chmod(tmp, stat.S_IREAD)
+        self.addCleanup(os.chmod, tmp, stat.S_IWRITE | stat.S_IREAD)
+        code, out, err, exc = self.run_in_process()
+        self.assertEqual((code, exc.error, exc.entry), (1, "write-failed", ".blueprint/blueprint.json.tmp"))
+        self.assertTrue(exc.message.startswith("cannot write .blueprint/blueprint.json.tmp: "), exc.message)
+        self.assertTrue(exc.next.startswith("make .blueprint/blueprint.json.tmp writable, then run: python"), exc.next)
+
+    def test_a_hard_linked_plan_gets_one_warning(self):
+        other = self.root / "other-name.json"
+        try:
+            os.link(self.plan_path, other)
+        except (OSError, NotImplementedError, AttributeError):
+            self.skipTest("this platform or folder cannot create hard links")
+        original = self.plan_path.read_bytes()
+        r = self.migrate()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stderr.count("(a hard link)"), 1, r.stderr)
+        self.assertIn("warning: .blueprint/blueprint.json had another name (a hard link); that name still holds the "
+                      "version 1 file", r.stderr)
+        self.assertEqual(other.read_bytes(), original)  # said exactly that: the other name keeps the version 1 bytes
+        self.assertEqual(self.plan()["version"], 2)
+        self.assertEqual(self.migrate("--dry-run").stderr, "")  # nothing to say when nothing is written
+
+    def test_repeated_keys_are_named_by_their_path(self):
+        plan = v1_plan()
+        module = json.dumps(plan["modules"][1])
+        text = json.dumps(plan).replace(module, module[:-1] + ', "id": "again"}', 1)
+        text = text[:-1] + ', "notes": 1, "notes": 2}'
+        self.plan_path.write_bytes(text.encode("utf-8"))
+        for flags in (["--dry-run"], []):
+            r = self.migrate(*flags)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn('warning: blueprint.json repeats the key "modules[1].id"; ', r.stderr)
+            self.assertIn('warning: blueprint.json repeats the key "notes"; ', r.stderr)
+            self.assertEqual(r.stderr.count("repeats the key"), 2)
+        self.assertEqual(self.plan()["modules"][1]["id"], "again")
+
+    def test_an_interrupt_leaves_no_temporary_file(self):
+        def partial(path, data):
+            with open(path, "wb") as f:
+                f.write(data[:3])
+            raise KeyboardInterrupt
+
+        for target in ("blueprint.v1.json", "blueprint.json"):
+            with self.subTest(target=target):
+                self.set_plan(v1_plan())
+                (self.bp / "blueprint.v1.json").unlink(missing_ok=True)
+                real = Path.write_bytes
+
+                def maybe(self_, data):
+                    if self_.name == target + ".tmp":
+                        return partial(self_, data)
+                    return real(self_, data)
+
+                with mock.patch.object(Path, "write_bytes", maybe):
+                    with self.assertRaises(KeyboardInterrupt):
+                        self.run_in_process()
+                self.assertEqual([p.name for p in self.bp.iterdir() if p.name.endswith(".tmp")], [])
+                self.assertEqual(self.plan()["version"], 1)
+
+    def test_next_names_the_project_copy_only_when_it_has_the_command(self):
+        (self.bp / "blueprint.json.tmp").mkdir()
+        launcher = str(S.LAUNCHER.resolve())
+
+        def next_():
+            r = self.migrate("--json", "--force")
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            return self.envelope(r)["error"]["next"]
+
+        n = next_()  # no copy: this tool, with --root
+        self.assertTrue(n.endswith(f'then run: python "{launcher}" migrate --root "{Path(self.root).resolve()}"'), n)
+        (self.bp / "bin").mkdir()
+        (self.bp / "bin" / "blueprint.py").write_text("# copy\n", encoding="utf-8")
+        self.assertIn(f'python "{launcher}" migrate --root ', next_())  # a copy without the command is not named
+        (self.bp / "bin" / "bp" / "commands").mkdir(parents=True)
+        (self.bp / "bin" / "bp" / "commands" / ("mig" + "rate.py")).write_text("# command\n", encoding="utf-8")
+        self.assertTrue(next_().endswith("then run: python .blueprint/bin/blueprint.py migrate"))
 
 
 if __name__ == "__main__":
