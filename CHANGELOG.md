@@ -4,6 +4,19 @@ All notable changes to the app-blueprint skill. The format follows [Keep a Chang
 
 ## [Unreleased]
 
+Work toward 2.0 on the `v2` branch. The tool reports version 1.9.N until 2.0.0 is released.
+
+### Changed
+
+- The tool is now a package: `scripts/blueprint.py` is a small launcher and the code lives in `scripts/bp/`. `python .blueprint/bin/blueprint.py <command>` works as before, and `init` copies the folder into `.blueprint/bin/`. Behaviour is unchanged from 1.3.0: a test compares the package against a frozen copy of 1.3.0 across 2,695 plans.
+- `init --refresh-tool` upgrades an old single-file copy to the package. The copy is safe to interrupt: an incomplete or mismatched copy makes `guard` and the pre-write hook refuse (exit 2) and other commands exit 1 with the command that repairs it. It also copes with read-only files and with folders another program holds open.
+- `doctor` shows whether a project's copy is the single-file or the package layout, and the plan's schema version.
+- Incident records name the module file and function (`rules.py:120:validate`).
+
+### Added
+
+- `maintainers/design/v2-contract.md`: the contract for 2.0 (package layout, schema 2, evidence, the study engine, commands and workstreams).
+
 ## [1.3.0] - 2026-11-18
 
 ### Changed
