@@ -73,6 +73,56 @@ def norm(p):
     return p
 
 
+def copy_json(obj):
+    """A deep copy of parsed JSON (dicts, lists, scalars) made without recursion, so it works at any depth the JSON
+    reader accepts (copy.deepcopy recurses and fails at about 450 levels). Dict key order is kept; scalars and other
+    objects are shared (scalars are immutable); a container reached twice is copied each time. A cycle (a container
+    inside itself, impossible in parsed JSON) raises ValueError("cyclic value") at once (review P10-2)."""
+    if not isinstance(obj, (dict, list)):
+        return obj
+    root = {} if isinstance(obj, dict) else []
+    stack = [(iter(obj.items()) if isinstance(obj, dict) else iter(obj), root, id(obj))]
+    active = {id(obj)}  # the containers on the current path: meeting one again is a cycle
+    while stack:
+        items, dst, src_id = stack[-1]
+        item = next(items, _END)
+        if item is _END:
+            stack.pop()
+            active.discard(src_id)
+            continue
+        key, v = item if isinstance(dst, dict) else (None, item)
+        if isinstance(v, (dict, list)):
+            if id(v) in active:
+                raise ValueError("cyclic value")
+            child = {} if isinstance(v, dict) else []
+            stack.append((iter(v.items()) if isinstance(v, dict) else iter(v), child, id(v)))
+            active.add(id(v))
+        else:
+            child = v
+        if isinstance(dst, dict):
+            dst[key] = child
+        else:
+            dst.append(child)
+    return root
+
+
+_END = object()
+
+
+def json_depth(obj):
+    """How deeply parsed JSON nests containers (0 for a scalar, 1 for [] or {}), measured without recursion."""
+    deepest, stack = 0, [(obj, 1)]
+    while stack:
+        v, d = stack.pop()
+        if isinstance(v, dict):
+            deepest = max(deepest, d)
+            stack.extend((x, d + 1) for x in v.values())
+        elif isinstance(v, list):
+            deepest = max(deepest, d)
+            stack.extend((x, d + 1) for x in v)
+    return deepest
+
+
 def path_key(rel):
     """The form to compare two repo-relative paths with: os.path.normcase (lower case on Windows) and forward
     slashes. refuse hooks compare paths with it, as guard and hook pre do (contract 1.4)."""
