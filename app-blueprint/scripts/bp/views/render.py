@@ -132,7 +132,14 @@ def _write_view(path, text):
     if not os.path.lexists(path) or _is_plain_file(path):
         return write_text_if_changed(path, text)
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
+    if os.path.isdir(tmp) and not os.path.islink(tmp):
+        raise BlueprintError("view-conflict", f".blueprint/{tmp.name} is a folder, so render cannot write "
+                             f".blueprint/{path.name} safely; remove the folder, then run render again",
+                             next=f"remove .blueprint/{tmp.name}, then run render")
+    if os.path.lexists(tmp):  # a leftover file or a link: drop the entry, never write through or into it
+        os.unlink(tmp)
+    with open(tmp, "x", encoding="utf-8") as f:  # create only: a name that appeared meanwhile is not written through
+        f.write(text)
     os.replace(tmp, path)
     return True
 

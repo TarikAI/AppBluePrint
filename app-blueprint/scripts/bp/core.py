@@ -73,6 +73,30 @@ def norm(p):
     return p
 
 
+def copy_json(obj):
+    """A deep copy of parsed JSON (dicts, lists, scalars) made without recursion, so it works at any depth the JSON
+    reader accepts (copy.deepcopy recurses and fails at about 500 levels). Dict key order is kept; scalars are shared
+    (they are immutable); other objects are copied by reference."""
+    if not isinstance(obj, (dict, list)):
+        return obj
+    root = {} if isinstance(obj, dict) else []
+    stack = [(obj, root)]
+    while stack:
+        src, dst = stack.pop()
+        items = src.items() if isinstance(src, dict) else enumerate(src)
+        for k, v in items:
+            if isinstance(v, (dict, list)):
+                child = {} if isinstance(v, dict) else []
+                stack.append((v, child))
+            else:
+                child = v
+            if isinstance(dst, dict):
+                dst[k] = child
+            else:
+                dst.append(child)
+    return root
+
+
 def path_key(rel):
     """The form to compare two repo-relative paths with: os.path.normcase (lower case on Windows) and forward
     slashes. refuse hooks compare paths with it, as guard and hook pre do (contract 1.4)."""

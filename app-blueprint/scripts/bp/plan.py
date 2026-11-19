@@ -297,6 +297,14 @@ def load_plan(root):
     """The plan at schema version 2, whatever supported version the file has (contract 3.3). Shape problems exit 1
     with every message at once; a version other than 1 or 2 raises schema-too-new. Never writes blueprint.json."""
     raw = load_raw_plan(root)
+    try:
+        return _load_checked(raw)
+    except RecursionError:  # the one place the load path maps a nesting too deep for one of its steps (bad-json)
+        _load_error("bad-json", "blueprint.json is nested too deeply to read", FIX_NEXT)
+
+
+def _load_checked(raw):
+    """load_plan after reading: the checks, the in-memory upgrade and normalisation."""
     if not isinstance(raw, dict):
         _load_error("bad-shape", f"blueprint.json must be an object (got {json_kind(raw)})" + SHAPE_FOOTER, FIX_NEXT)
     bad = _shape_problems_1x(raw) + _shape_problems_2x(raw)
