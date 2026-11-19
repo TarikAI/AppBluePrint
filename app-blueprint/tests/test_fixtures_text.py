@@ -534,6 +534,7 @@ class TestFactsShape(Base):
             with self.subTest(name):
                 json.dumps(facts)
                 self.assertIn("variant", facts)
+                self.assertNotIn("ambiguous", facts)        # the contract leaves nothing open now
                 if "secret_patterns" in facts:
                     for pat in facts["secret_patterns"]:
                         self.assertIn(pat, SEC)
@@ -1697,6 +1698,7 @@ class TestVariants(Base):
                     path, facts = self.build(kind, name)
                     self.assertTrue(Path(path).is_file())
                     self.assertEqual(facts["variant"], name)
+                    self.assertNotIn("ambiguous", facts)
                     self.assertIsInstance(facts["kinds"], dict)
                     json.dumps(facts)
                     self.assertTrue("skip" in facts.get("expect", {}) or "error" in facts.get("expect", {}) or name in ("tolerant",))

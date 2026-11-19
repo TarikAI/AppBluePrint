@@ -23,7 +23,7 @@ Conventions (read these before using a builder)
     stored record, excerpt, claim or data.
   - ``"secret_patterns"``: the ``SECRET_PATTERNS`` names that occur in the file (``[]`` for SQLite and binary plists,
     which are not scanned: 6.2 rule 5).
-  - ``"ambiguous"``: points the contract still leaves open. They are kept out of ``"kinds"``; see the PR report.
+  - ``"ambiguous"``: reserved for points the contract leaves open; no fixture has one at present.
   - ``"expect"`` (empty and malformed variants): the outcome of the 6.2 reading rules. ``{"skip": [reasons]}``
     (``None`` in the list: nothing emitted and no skip is also right), or ``{"error": "target-unsupported" |
     "bad-capture"}`` for importers. A readable but damaged text has ``"coverage": "partial"`` and
@@ -1513,7 +1513,7 @@ def _make_repo_malformed(root):
         partial_files=["src/bad_utf8.js"], partial_limitation=UTF8_NOTE,
         graph={"imports": {"src/self.js": ["src/self.js"]}},
         expect={"skip": ["malformed", "binary"]},
-        ambiguous={"pyproject.toml cut mid-line: read by line regexes, so skip or not": ["pyproject.toml"]},
+        no_skip_files=["go.mod", "pyproject.toml"],     # read by line regexes: a broken file is never skipped (6.2 rule 2)
         variant="malformed")
 
 
