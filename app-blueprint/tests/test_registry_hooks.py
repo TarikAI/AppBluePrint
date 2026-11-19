@@ -150,7 +150,7 @@ class RegistryTest(Hermetic, unittest.TestCase):
             from bp import data, rules
             self.assertEqual(got, [(r"^unknown \S+: needs question", "unknown-incomplete"),
                                    (r"^task \S+: needs title", "task-incomplete")] + data.CODES + rules.CODES)
-            self.assertEqual(validate.codes()[1:], got)
+            self.assertEqual(validate.codes()[len(validate.CODES):], got)
 
 
 class ValidationRuleExtensionTest(TempRoot):

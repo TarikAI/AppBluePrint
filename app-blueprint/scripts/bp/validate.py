@@ -10,13 +10,30 @@ from bp.learn import project_ident, store_append
 from bp.migrate import upgrade_plan
 from bp import data as _data, registry, rules
 
-# Codes of the findings this module adds itself; they come before every hook's (registry.codes()).
-CODES = [(r"^blueprint\.json is schema version 1\b", "schema-v1")]
+# Codes the core owns; they come before every hook's (registry.codes()): schema-v1 (this module's own finding) and
+# bad-id, the id-form error of every section (contract 2.2, 7.4), which many modules emit with code="bad-id" and
+# none may register.
+CODES = [(r"^blueprint\.json is schema version 1\b", "schema-v1"),
+         (r"^[a-z ]+ id '.*' has the wrong form", "bad-id")]
+CODE_EXAMPLES = {"schema-v1": "blueprint.json is schema version 1; it still works.",
+                 "bad-id": "feature id 'Inbox' has the wrong form; use F- then lowercase letters, digits and hyphens"}
 
 
 def codes():
-    """[(regex, code)] in classification order: this module's, then the hooks' (new modules, data, rules)."""
-    return CODES + registry.codes()
+    """[(regex, code)] in classification order: this module's, then the hooks' (new modules, data, rules). A module
+    that registers a code the core owns is a RuntimeError naming it; so is a core example another regex claims."""
+    hooked = registry.codes()
+    owners = {code: m.__name__ for m in registry.modules("DOMAIN") for _, code in getattr(m, "CODES", None) or []}
+    for _, code in CODES:
+        if code in owners:
+            raise RuntimeError(f"validation code {code!r} is given by validate (the core) and {owners[code][3:]}; "
+                               "the core owns it: emit it with code=, do not register it")
+    full = CODES + hooked
+    for code, example in CODE_EXAMPLES.items():
+        got = next((c for rx, c in full if re.search(rx, example)), "other")
+        if got != code:
+            raise RuntimeError(f"validation code overlap: the core example {example!r} ({code}) classifies as {got}")
+    return full
 
 
 try:  # as loaded at start; classify_error reads codes() each time, so modules added later count
