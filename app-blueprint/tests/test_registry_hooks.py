@@ -26,7 +26,7 @@ import bp.commands
 import bp.views
 from bp import plan as bplan, registry, validate
 
-from test_validate import (CORE_MODULES, V2_EXAMPLE as V2_EXAMPLE_TEXT, Hermetic, TempRoot, extension,
+from test_validate import (CORE_MODULES, V2_EXAMPLE as V2_EXAMPLE_TEXT, Hermetic, HermeticRoot, TempRoot, extension,
                            hermetic_launcher, hermetic_skill, later_modules, quiet, v1_plan, v2_plan)
 
 
@@ -160,7 +160,7 @@ class RegistryTest(Hermetic, unittest.TestCase):
             self.assertEqual(validate.codes()[len(validate.CODES):], got)
 
 
-class ValidationRuleExtensionTest(TempRoot):
+class ValidationRuleExtensionTest(HermeticRoot):
     """A later workstream adds a validation rule with a new code (contract 1.4, 7.4) by adding its module."""
 
     UNKNOWNS = '''
@@ -256,7 +256,7 @@ def run_cli(*argv, stdin=None, **env):
     return code, out.getvalue(), err.getvalue()
 
 
-class CliTestBase(TempRoot):
+class CliTestBase(HermeticRoot):
     def setUp(self):
         super().setUp()
         self.plan = v2_plan()

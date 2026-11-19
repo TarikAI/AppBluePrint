@@ -210,7 +210,13 @@ def quiet(fn, *args, **kw):
         return fn(*args, **kw), err.getvalue()
 
 
-class TempRoot(Hermetic, unittest.TestCase):
+class TempRoot(unittest.TestCase):
+    """A temp project for CLI tests against the real tree (other workstreams' tests build on it). The W0-A2 tests use
+    HermeticRoot below."""
+
+    def launcher(self):
+        return S.LAUNCHER
+
     def setUp(self):
         super().setUp()
         self.root = Path(tempfile.mkdtemp(prefix="bp v2 "))
@@ -234,7 +240,7 @@ class TempRoot(Hermetic, unittest.TestCase):
     def cli(self, *args, stdin=None, **env):
         """Run the launcher on this project; --root is added to every command but hook (which reads cwd)."""
         argv = list(args) if args[0] == "hook" else list(args) + ["--root", self.root]
-        return S.run_script(hermetic_launcher(), argv, self.root, stdin=stdin, env=S.tool_env(**env))
+        return S.run_script(self.launcher(), argv, self.root, stdin=stdin, env=S.tool_env(**env))
 
     def load_exit(self, plan):
         """load_plan on plan: (exit code or None, stderr)."""
@@ -249,6 +255,15 @@ class TempRoot(Hermetic, unittest.TestCase):
         return None, err.getvalue()
 
 
+
+
+class HermeticRoot(Hermetic, TempRoot):
+    """TempRoot in a hermetic package and CLI (see Hermetic): what these tests assert holds whichever later modules
+    exist."""
+
+    def launcher(self):
+        return hermetic_launcher()
+
 # ---------------------------------------------------------------------------------------------------- versions
 
 class VersionTest(unittest.TestCase):
@@ -257,7 +272,10 @@ class VersionTest(unittest.TestCase):
         self.assertEqual(version.SUPPORTED_SCHEMAS, (1, 2))
         self.assertEqual(version.STATE_VERSION, 2)
         self.assertEqual(version.MIN_SCHEMA2_TOOL, "1.9.1")
-        self.assertEqual(version.TOOL_VERSION, "1.9.1")
+        # not pinned (the orchestrator raises it): any release that reads schema 2, compared on its numbers
+        def nums(v):
+            return tuple(int(x) for x in v.split(".")[:3])
+        self.assertGreaterEqual(nums(version.TOOL_VERSION), nums(version.MIN_SCHEMA2_TOOL))
 
     def test_skeleton_is_version_2(self):
         sk = bplan.SKELETON
@@ -372,7 +390,7 @@ class UpgradeStateTest(unittest.TestCase):
 
 # ---------------------------------------------------------------------------------------------------- load_plan
 
-class LoadPlanTest(TempRoot):
+class LoadPlanTest(HermeticRoot):
     def test_v1_file_is_upgraded_in_memory_only(self):
         self.write_plan(v1_plan())
         before = (self.root / ".blueprint" / "blueprint.json").read_bytes()
@@ -550,7 +568,7 @@ class LoadPlanTest(TempRoot):
 
 # ---------------------------------------------------------------------------------------------------- state
 
-class StateVersionTest(TempRoot):
+class StateVersionTest(HermeticRoot):
     def test_load_state_upgrades_and_the_next_save_writes_it(self):
         self.write_plan(v1_plan())
         (self.root / ".blueprint" / "state.json").write_text(json.dumps(UpgradeStateTest.V1), encoding="utf-8")
@@ -762,7 +780,7 @@ class ProofDigestTest(unittest.TestCase):
         self.assertTrue(reads and all(0 < n <= CHUNK for n in reads), reads[:5])
 
 
-class ProofTest(TempRoot):
+class ProofTest(HermeticRoot):
     """status.Hasher, proof_inputs, proof_current (contract 4.5)."""
 
     def setUp(self):
@@ -850,7 +868,7 @@ OK_CMD = f'"{S.PY}" -c "pass"'
 FAIL_CMD = f'"{S.PY}" -c "import sys; sys.exit(3)"'
 
 
-class VerifyProofTest(TempRoot):
+class VerifyProofTest(HermeticRoot):
     """verify --run writes 2.0 proofs; an edited dependency makes its dependents stale; verify --stale (4.5, 4.7)."""
 
     def plan(self, cmd=OK_CMD):
@@ -960,7 +978,7 @@ class VerifyProofTest(TempRoot):
 
 # ---------------------------------------------------------------------------------------------------- findings and codes
 
-class FindingsTest(TempRoot):
+class FindingsTest(HermeticRoot):
     def setUp(self):
         super().setUp()
         from bp import validate
