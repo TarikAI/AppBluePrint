@@ -79,7 +79,7 @@ class CheckOwnedTests(unittest.TestCase):
 
     # helpers
     def git(self, *args):
-        r = subprocess.run([GIT, "-C", str(self.root), "-c", "user.name=test", "-c", "user.email=test@example.invalid",
+        r = subprocess.run([GIT, "-C", str(self.root), "-c", "user.name=test", "-c", "user.email=nobody",
                             "-c", "commit.gpgsign=false", "-c", "core.autocrlf=false", "-c", "core.quotepath=false"]
                            + list(args), capture_output=True, text=True, encoding="utf-8")
         self.assertEqual(r.returncode, 0, "git %s failed: %s" % (" ".join(args), r.stderr))
