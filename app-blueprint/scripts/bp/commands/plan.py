@@ -11,7 +11,7 @@ from pathlib import Path
 
 from bp.version import TOOL_VERSION
 from bp.core import append_log, bp_dir, die, find_root, norm, read_json, write_json
-from bp.learn import _copy_version, copy_layout
+from bp.learn import _copy_version, _file_tool_version
 from bp.plan import SKELETON, load_plan, load_state, owner_of, save_state
 from bp.validate import record_friction, validate_plan
 from bp.views.render import render_all
@@ -194,10 +194,15 @@ def cmd_init(args):
         if not plan_path.exists():
             die("No blueprint here to refresh.")
         bin_dir = d / "bin"
-        layout, old = copy_layout(bin_dir), _copy_version(bin_dir) or "unknown"
+        # Single-file is decided by the launcher's content, not copy_layout(): an upgrade stopped after step 2
+        # leaves the 1.x file beside a new bp/, and that is still an upgrade from the single-file tool.
+        launcher = bin_dir / "blueprint.py"
+        text = launcher.read_text(encoding="utf-8", errors="replace") if launcher.is_file() else ""
+        single = bool(text) and "from bp.api import" not in text
+        old = (_file_tool_version(launcher) if single else None) or _copy_version(bin_dir) or "unknown"
         if not copy_tool(root):
             return  # run from the project's own copy: copy_tool said what to run instead
-        if layout == "single-file":
+        if single:
             print(f"Upgraded .blueprint/bin from the single-file tool {old} to the package tool {TOOL_VERSION}.")
         else:
             print(f"Refreshed .blueprint/bin to tool {TOOL_VERSION}.")
