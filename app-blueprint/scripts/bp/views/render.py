@@ -5,8 +5,11 @@ return (ROADMAP.md, FEATURES.md, contract 8) and map.html. The map gets the map_
 and every tab-*.js asset inlined at the template's /*__TABS_JS__*/ placeholder, in sorted order (8.4).
 """
 import json
+import os
 import re
+import stat
 import sys
+from pathlib import Path
 
 from bp.version import TOOL_VERSION
 from bp import registry
@@ -92,14 +95,46 @@ def _has_header(text):
     return any(line.startswith(GENERATED_HEADER) for line in text.splitlines()[:5])
 
 
-def _adoptable(path):
-    """An existing file render may take over: it carries the generated header within its first five lines."""
+def _is_plain_file(path):
+    """True for a regular file that is not a link: not a symlink or other reparse point, one hard link only, and
+    directly in its folder (review P7-1). Anything else at a view's name is never adopted or written through."""
     try:
-        with path.open(encoding="utf-8", errors="replace") as f:
-            head = "".join(f.readline() for _ in range(5))
+        st = os.lstat(path)
     except OSError:
         return False
-    return _has_header(head)
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+        return False
+    if getattr(st, "st_file_attributes", 0) & 0x400:  # FILE_ATTRIBUTE_REPARSE_POINT (Windows)
+        return False
+    try:
+        return Path(path).resolve().parent == Path(path).parent.resolve()
+    except OSError:
+        return False
+
+
+def _adoptable(path):
+    """An existing file render may take over: a plain file (_is_plain_file) whose first five lines, read at most 4096
+    bytes each (review P7-2), carry the generated header. A file that is not text simply has no header."""
+    if not _is_plain_file(path):
+        return False
+    try:
+        with path.open("rb") as f:
+            head = b"".join(f.readline(4096) for _ in range(5))
+    except OSError:
+        return False
+    return _has_header(head.decode("utf-8", errors="replace"))
+
+
+def _write_view(path, text):
+    """Write a view, never through a link (review P7-1): an existing file that is a symlink, a reparse point or a
+    hard link to another name gets a new directory entry (temp file in the same folder, then os.replace) instead of
+    being written in place. Returns True when the file changed, as write_text_if_changed."""
+    if not os.path.lexists(path) or _is_plain_file(path):
+        return write_text_if_changed(path, text)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+    return True
 
 
 def render_all(root, plan, state, quiet=False, check=False, fail_on_conflict=False):
@@ -138,7 +173,7 @@ def render_all(root, plan, state, quiet=False, check=False, fail_on_conflict=Fal
         if check:
             if not path.exists() or path.read_text(encoding="utf-8") != text:
                 stale.append(name)
-        elif write_text_if_changed(path, text) and not quiet:
+        elif _write_view(path, text) and not quiet:
             print(f"wrote .blueprint/{name}")
     for name in recorded:
         path = bp_dir(root) / name
