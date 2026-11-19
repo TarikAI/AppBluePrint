@@ -354,6 +354,16 @@ class CopyTestBase(unittest.TestCase):
         self.assertIn("is incomplete", r.stderr)
         self.assertIn("init --refresh-tool", r.stderr)
 
+    def assert_fails_to_load(self, rel, error):
+        """W0-A2 review N6: a module that exists but fails to import fails closed with its name, as an incident."""
+        for r in (self.copy_run("guard", "Cargo.toml"), self.hook_pre("Cargo.toml")):
+            self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+            self.assertIn(f"failed to load {rel} ({error}", r.stderr)
+            self.assertNotIn("is incomplete", r.stderr)
+        r = self.copy_run("validate")
+        self.assertEqual(r.returncode, 70, r.stdout + r.stderr)
+        self.assertIn(f"failed to load {rel}", r.stderr)
+
     def assert_no_pycache(self):
         self.assertEqual([str(p) for p in self.bin.rglob("__pycache__")], [])
 
@@ -436,7 +446,7 @@ class CopiedToolTest(CopyTestBase):
         self.assert_fails_closed()
         self.refresh()
         (self.bin / "bp" / "views" / "roster.py").write_text("def render_roster(:\n", encoding="utf-8")  # SyntaxError
-        self.assert_fails_closed()
+        self.assert_fails_to_load("bp/views/roster.py", "SyntaxError")  # W0-A2 review N6: broken, not missing
         shutil.rmtree(self.bin / "bp")  # no package at all
         self.assert_fails_closed()
         self.refresh()
@@ -555,7 +565,29 @@ class ManifestTest(CopyTestBase):
     def test_a_listed_module_that_does_not_import_fails_closed(self):
         self.init_package_copy()
         (self.bin / "bp" / "verify.py").write_text("def broken(:\n", encoding="utf-8")
-        self.assert_fails_closed()
+        self.assert_fails_to_load("bp/verify.py", "SyntaxError")
+
+    def test_a_broken_later_module_names_itself_and_is_an_incident(self):
+        """Review N6: an import error that is not "module missing" says which module failed and why, records an
+        incident, fails closed, and is not called an incomplete copy (here a later module in a temp skill)."""
+        skill = self.base / "skill broken"
+        shutil.copytree(S.SCRIPTS, skill / "scripts", ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copytree(S.SKILL / "assets", skill / "assets")
+        (skill / "scripts" / "bp" / "features.py").write_text("raise ValueError('bad feature table')\n", encoding="utf-8")
+        store = self.base / "store"
+        env = dict(self.env, APP_BLUEPRINT_NO_CAPTURE="", APP_BLUEPRINT_HOME=str(store))
+        launcher = skill / "scripts" / "blueprint.py"
+        self.init_package_copy()
+        r = S.run_script(launcher, ["guard", "x.py", "--root", self.root], self.elsewhere, env=env)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("failed to load bp/features.py (ValueError: bad feature table)", r.stderr)
+        self.assertNotIn("is incomplete", r.stderr)
+        r = S.run_script(launcher, ["status", "--root", self.root], self.elsewhere, env=env)
+        self.assertEqual(r.returncode, 70, r.stderr)
+        self.assertIn("failed to load bp/features.py", r.stderr)
+        incidents = (store / "incidents.jsonl").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(incidents), 2)
+        self.assertEqual(json.loads(incidents[0])["error"], "ValueError")
 
     def test_a_hand_damaged_copy_missing_a_later_module_fails_closed(self):
         """A later workstream's module (here a throwaway W3-V guard module in a temp skill) is covered by the manifest

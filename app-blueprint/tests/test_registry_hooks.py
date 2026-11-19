@@ -119,6 +119,25 @@ class RegistryTest(unittest.TestCase):
             registry.signal("R", "guard", "guard-protected")  # capture never breaks a command
         self.assertEqual(calls, [])
 
+    def test_codes_have_one_owner_and_do_not_overlap(self):
+        """Review N7: a code given by two modules, or a module's example message that another module's regex claims
+        first, is refused at load with both modules named."""
+        with extension({"unknowns.py": "CODES = [(r'^unknown \\S+: x', 'dup-code')]\n",
+                        "roadmap.py": "CODES = [(r'^task \\S+: y', 'dup-code')]\n"}):
+            with self.assertRaisesRegex(RuntimeError, "dup-code.*unknowns.*roadmap"):
+                registry.codes()
+        with extension({"features.py": "CODES = [(r'^milestone ', 'feature-x')]\nCODE_EXAMPLES = {'feature-x': 'milestone of F'}\n",
+                        "roadmap.py": "CODES = [(r'^milestone \\S+: needs', 'milestone-incomplete')]\n"
+                                      "CODE_EXAMPLES = {'milestone-incomplete': 'milestone M1: needs name and goal'}\n"}):
+            with self.assertRaisesRegex(RuntimeError, "milestone M1: needs name and goal.*features.*roadmap"):
+                registry.codes()
+        with extension({"unknowns.py": "CODES = [(r'^x', 'duplicate-id')]\n"}):
+            with self.assertRaisesRegex(RuntimeError, "duplicate-id.*unknowns.*rules"):
+                registry.codes()
+        with extension({"roadmap.py": "CODES = [(r'^task \\S+: needs title', 'task-incomplete')]\n"
+                                      "CODE_EXAMPLES = {'task-incomplete': 'task T-x: needs title and owner'}\n"}):
+            self.assertEqual(registry.codes()[0], (r"^task \S+: needs title", "task-incomplete"))
+
     def test_codes_order(self):
         with extension({"roadmap.py": "CODES = [(r'^task \\S+: needs title', 'task-incomplete')]\n",
                         "unknowns.py": "CODES = [(r'^unknown \\S+: needs question', 'unknown-incomplete')]\n"}):
@@ -240,6 +259,13 @@ class SubcommandTest(CliTestBase):
                 code, out, _ = run_cli(name, "--help")
                 self.assertEqual(code, 0)
                 self.assertIn("--root", out)
+
+    def test_help_keeps_the_1_3_0_order(self):  # review N8
+        code, out, _ = run_cli("--help")
+        listed = out.split("{", 1)[1].split("}", 1)[0].split(",")
+        self.assertEqual(listed, ["init", "validate", "render", "sync", "status", "owner", "claim", "mark", "verify",
+                                  "guard", "hook", "contracts", "export", "db-check", "feedback", "report", "doctor",
+                                  "migrate", "task", "accept", "evidence", "study"])
 
     def test_unbuilt_commands_answer_not_built(self):
         for argv, arrives in ((["migrate", "--dry-run"], "W0-B"), (["task", "T-domain", "done", "--by", "owner"], "W1-R"),
@@ -542,8 +568,16 @@ class GuardRefusalTest(CliTestBase):
             self.assertEqual(code, 3, err)
             self.assertIn("blocked by unknown U-offline", err)
             self.assertEqual(self.run_("claim", "apps/web/src/Inbox.tsx", "--by", "frontend-engineer")[0], 0)
+            self.assertIn("next: blueprint.py status --unknowns", err)  # review N5: a refusal names the next step
             self.assertEqual(self.run_("claim", "apps/web/src/offline.ts", "--by", "frontend-engineer", "--force")[0], 0)
         self.assertEqual(self.run_("claim", "apps/web/src/offline.ts", "--by", "frontend-engineer")[0], 0)
+        tuple_src = ("def refuse(action, root, plan, path, by):\n"
+                     "    return ('no: ' + path, 'owner-busy', 'ask the lead') if action == 'claim' else None\n")
+        with extension({"roadmap.py": tuple_src}):
+            code, _, err = self.run_("claim", "apps/web/src/Inbox.tsx", "--by", "frontend-engineer")
+        self.assertEqual(code, 3)
+        self.assertIn("error: no: apps/web/src/Inbox.tsx", err)
+        self.assertIn("next: ask the lead", err)
 
 
 LOAD_ERRORS = {  # kind -> blueprint.json text that cannot load

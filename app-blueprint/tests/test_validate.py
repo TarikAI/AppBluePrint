@@ -248,6 +248,12 @@ class UpgradeStateTest(unittest.TestCase):
         self.assertEqual({k: v for k, v in up.items() if k not in ("stateVersion", "tasks")}, self.V1)
         self.assertEqual(migrate.upgrade_state(up), up)
 
+    def test_any_state_version_but_2_is_version_1(self):  # review N2
+        for v in (1, 0, "2", None, 3):
+            with self.subTest(stateVersion=v):
+                up = migrate.upgrade_state(dict(copy.deepcopy(self.V1), stateVersion=v))
+                self.assertEqual((up["stateVersion"], up["tasks"]), (2, {}))
+
     def test_v2_state_is_kept(self):
         raw = dict(copy.deepcopy(self.V1), stateVersion=2, tasks={"T-x": {"status": "done"}})
         self.assertEqual(migrate.upgrade_state(raw), raw)
@@ -266,6 +272,17 @@ class LoadPlanTest(TempRoot):
             self.assertEqual(plan[k], [])
         self.assertEqual((self.root / ".blueprint" / "blueprint.json").read_bytes(), before)
         self.assertEqual(bplan.load_raw_plan(self.root), v1_plan())
+
+    def test_from_in_a_file_is_ignored(self):  # review N1: "_from" is an in-memory marker only
+        self.write_plan(dict(v2_plan(), _from=1))
+        plan, _ = quiet(bplan.load_plan, self.root)
+        self.assertNotIn("_from", plan)
+        from bp import validate
+        self.assertEqual(validate.validate_findings(plan), [])
+        r = self.cli("status")
+        self.assertNotIn("Schema version 1", r.stdout)
+        self.write_plan(dict(v1_plan(), _from=7))
+        self.assertEqual(quiet(bplan.load_plan, self.root)[0]["_from"], 1)
 
     def test_v2_file_loads_without_from(self):
         self.write_plan(v2_plan())
@@ -700,7 +717,8 @@ class ProofTest(TempRoot):
         good = st.proof_inputs(self.root, self.plan, ["a.py"])
         for proof in (None, "x", [], {"ok": False, "inputs": good}, {"ok": 1, "inputs": good}, {"ok": "true", "inputs": good},
                       {"ok": True, "inputs": "x"}, {"ok": True, "inputs": {"a.py": 5}}, {"ok": True, "inputs": {}},
-                      {"ok": True}, {"ok": True, "sha": None}, {"ok": True, "sha": 5}):
+                      {"ok": True}, {"ok": True, "sha": None}, {"ok": True, "sha": 5},
+                      {"inputs": good}, {"cmd": "c", "inputs": good}):  # review N4: a file proof needs "ok": true
             with self.subTest(proof=proof):
                 self.assertFalse(st.proof_current(self.root, self.plan, proof, paths=["a.py"]))
         self.assertTrue(st.proof_current(self.root, self.plan, {"files": good}), "a feature proof (4.5)")
@@ -929,9 +947,9 @@ class FindingsTest(TempRoot):
         out = json.loads(r.stdout)
         self.assertEqual((out["ok"], out["command"], out["data"]["valid"], out["data"]["errors"], out["data"]["warnings"]),
                          (True, "validate", True, [], []))
-        self.assertEqual(out["data"]["counts"], {"files": 5, "patterns": 0, "modules": 3, "phases": 2, "owners": 5,
-                                                 "resources": 0, "features": 2, "milestones": 1, "tasks": 1,
-                                                 "unknowns": 1})
+        self.assertEqual(out["data"]["counts"], {"files": 5, "patterns": 0, "modules": 3, "phases": 2, "owners": 3,
+                                                 "roster": 5, "resources": 0, "features": 2, "milestones": 1,
+                                                 "tasks": 1, "unknowns": 1})  # review N9: owners = owner rules
         plan = v1_plan()
         plan["app"]["name"] = ""
         self.write_plan(plan)
