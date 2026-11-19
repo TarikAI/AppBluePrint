@@ -446,7 +446,7 @@ class CopiedToolTest(CopyTestBase):
         self.assert_fails_closed()
         self.refresh()
         (self.bin / "bp" / "views" / "roster.py").write_text("def render_roster(:\n", encoding="utf-8")  # SyntaxError
-        self.assert_fails_to_load("bp/views/roster.py", "SyntaxError")  # W0-A2 review N6: broken, not missing
+        self.assert_fails_closed()  # roster.py is imported by bp/api.py, so the launcher reports it (W0-A1's message)
         shutil.rmtree(self.bin / "bp")  # no package at all
         self.assert_fails_closed()
         self.refresh()

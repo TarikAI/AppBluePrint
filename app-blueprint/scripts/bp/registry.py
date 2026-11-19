@@ -8,15 +8,17 @@ status_json, status_card, verify_feature, refuse, register.
 """
 import importlib
 import importlib.util
+import re
 
 DOMAIN = ("rules", "data", "unknowns", "records", "features", "roadmap", "evidence")
 VIEWS = ("views.roadmap_md", "views.features_md")
-COMMAND_TABLE = {   # every subcommand of 2.0 -> its module under bp
-    "init": "commands.plan", "validate": "commands.plan", "render": "commands.plan", "contracts": "commands.plan",
-    "export": "commands.plan", "sync": "commands.progress", "status": "commands.progress", "owner": "commands.progress",
-    "claim": "commands.progress", "mark": "commands.progress", "verify": "commands.progress", "guard": "commands.progress",
-    "hook": "commands.progress", "db-check": "commands.data", "feedback": "commands.learn", "report": "commands.learn",
-    "doctor": "commands.learn", "migrate": "commands.migrate", "task": "commands.roadmap", "accept": "commands.records",
+COMMAND_TABLE = {   # every subcommand of 2.0 -> its module under bp; 1.3.0's --help order, then the 2.0 commands
+    "init": "commands.plan", "validate": "commands.plan", "render": "commands.plan", "sync": "commands.progress",
+    "status": "commands.progress", "owner": "commands.progress", "claim": "commands.progress",
+    "mark": "commands.progress", "verify": "commands.progress", "guard": "commands.progress",
+    "hook": "commands.progress", "contracts": "commands.plan", "export": "commands.plan", "db-check": "commands.data",
+    "feedback": "commands.learn", "report": "commands.learn", "doctor": "commands.learn",
+    "migrate": "commands.migrate", "task": "commands.roadmap", "accept": "commands.records",
     "evidence": "commands.evidence", "study": "commands.study"}
 
 # Where a 2.0 subcommand or flag arrives, for the not-built message (contract 11).
@@ -78,7 +80,27 @@ def codes():
     list, whose broad regexes must come last, contract 7.4)."""
     mods = {_short(m): m for m in modules("DOMAIN")}
     order = [n for n in DOMAIN if n not in ("rules", "data")] + ["data", "rules"]
-    return [entry for n in order if n in mods for entry in getattr(mods[n], "CODES", None) or []]
+    owned = [(n, rx, code) for n in order if n in mods for rx, code in getattr(mods[n], "CODES", None) or []]
+    _check_codes(owned, mods)
+    return [(rx, code) for _, rx, code in owned]
+
+
+def _check_codes(owned, mods):
+    """A code belongs to one module (the 1.x codes to data and rules), and every example message a module gives in
+    CODE_EXAMPLES ({code: message}) must classify as its own code with the full list: else RuntimeError naming both
+    modules (review N7: a broad regex earlier in DOMAIN order would silently steal another module's messages)."""
+    owner = {}
+    for n, _, code in owned:
+        if code in owner and owner[code] != n:
+            raise RuntimeError(f"validation code {code!r} is given by {owner[code]} and {n}; a code has one owner")
+        owner.setdefault(code, n)
+    for n in [x for x in DOMAIN if x in mods]:
+        for code, example in (getattr(mods[n], "CODE_EXAMPLES", None) or {}).items():
+            hit = next(((m, c) for m, rx, c in owned if re.search(rx, example)), (None, "other"))
+            if hit[1] != code:
+                raise RuntimeError(f"validation code overlap: the example {example!r} is claimed by "
+                                   f"{hit[0] or 'no regex'} ({hit[1]}) before {n} ({code}), which gives it; "
+                                   "narrow one regex")
 
 
 def refusal(action, root, plan, path, by):

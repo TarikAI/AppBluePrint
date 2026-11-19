@@ -22,7 +22,6 @@ from bp.learn import record_incident
 from bp.plan import GLYPH, LABEL, STATES, load_plan, load_state, owner_of, planned_file, save_state
 from bp.registry import command_built
 from bp.validate import validate_plan
-from bp.views.context import blocked_by, build_context, status_json
 from bp.views.render import render_all
 
 # status flags of 2.0 -> the module that implements them (through its status_lines or status_card hook)
@@ -146,6 +145,8 @@ def _write_refusal(args, root, plan, path, by):
     guard fails closed, and the crash is recorded as an incident."""
     try:
         msg = registry.refusal("write", root, plan, path, by)
+        if isinstance(msg, (tuple, list)):  # (message, error, next): the guard prints the message
+            msg = str(msg[0]) if msg else None
     except Exception as exc:  # noqa: BLE001 - fail closed, never let a broken hook allow a write
         record_incident(args, exc)
         return f"{path}: the guard could not check this write (incident recorded), so it refuses it. Run doctor."
@@ -232,6 +233,7 @@ def cmd_sync(args):
 
 def cmd_status(args):
     from bp.status import next_ready, summarize
+    from bp.views.context import blocked_by, build_context, status_json
     root = find_root(args.root)
     plan = load_plan(root)
     state = load_state(root)
@@ -328,9 +330,12 @@ def cmd_claim(args):
         die(f"{path} is not in the blueprint. Propose a blueprint change first.", 3)
     require_owner(plan, path, args.by, args.force)
     if not getattr(args, "force", False):  # 2.0: refuse("claim") hooks, e.g. a phase blocked by an unknown (2.6)
-        msg = registry.refusal("claim", root, plan, path, args.by)
-        if msg:
-            raise BlueprintError("blocked-by-unknown", msg, entry=f"file {path}", code=3)
+        got = registry.refusal("claim", root, plan, path, args.by)
+        if got:  # a message, or (message, error, next) from the hook (review N5)
+            msg, error, nxt = (tuple(got) + (None, None))[:3] if isinstance(got, (tuple, list)) else (got, None, None)
+            raise BlueprintError(error or "blocked-by-unknown", str(msg), entry=f"file {path}", code=3,
+                                 next=nxt or "blueprint.py status --unknowns (or claim again with --force if the "
+                                             "lead says so)")
     set_file_state(root, path, "claimed", args.by, args.note)
     print(f"{args.by} claimed {path}")
 
@@ -355,6 +360,7 @@ def cmd_mark(args):
 def _verify_feature(args, root, plan):
     """verify --feature F (7.2) through the verify_feature hook of records. Fail closed: exit 0 only when the hook says
     0 and every record it returns has result pass."""
+    from bp.views.context import build_context
     fn = registry.hook("verify_feature")
     if fn is None:
         raise not_built("verify --feature", "records")

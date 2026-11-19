@@ -6,6 +6,7 @@ reader sees either the old or the new package. check_package() is the start-up c
 """
 import importlib
 import os
+from pathlib import Path
 import shutil
 import stat
 import sys
@@ -167,23 +168,56 @@ def required_modules(home=TOOL_HOME):
     return []
 
 
+def _failed_file(home, name, exc):
+    """The bp/... file an import error comes from: a SyntaxError's file, else the innermost frame inside the package,
+    else the module being imported."""
+    pkg = (home / "bp").resolve()
+    candidates = [getattr(exc, "filename", None)] if isinstance(exc, SyntaxError) else []
+    tb = exc.__traceback__
+    frames = []
+    while tb is not None:
+        frames.append(tb.tb_frame.f_code.co_filename)
+        tb = tb.tb_next
+    candidates += list(reversed(frames))
+    for f in candidates:
+        try:
+            return "bp/" + Path(f).resolve().relative_to(pkg).as_posix()
+        except (TypeError, ValueError, OSError):
+            continue
+    return name.replace(".", "/") + ".py"
+
+
 def check_package(home=TOOL_HOME):
-    """The start-up completeness check (cli): every module the MANIFEST requires exists, and every module present
-    imports. Raises ImportError (or the import's own error) for an incomplete or damaged copy; the launcher turns that
-    into the incomplete-copy exit (2 for guard and hook pre, 1 otherwise). Returns the module names checked."""
+    """The start-up completeness check (cli). Returns (module names present, failure), failure being None or
+    (bp/... file, exception) for the first module that exists but fails to import.
+
+    Missing is "incomplete": a module the MANIFEST requires, a folder's __init__.py, or a bp module that an import
+    asks for and that is not there raise ImportError, which the launcher reports as an incomplete copy (exit 2 for
+    guard and hook pre, 1 otherwise). Broken is a bug: any other import error is returned, and cli names the file,
+    records an incident and fails closed (review N6)."""
     present = package_modules(home)
     packages = {m.rsplit(".", 1)[0] for m in present if "." in m}  # every folder holding modules needs __init__.py
     missing = [m for m in sorted(set(required_modules(home)) | packages) if m not in present]
     if missing:
         names = [m.replace(".", "/") + ("/__init__.py" if m in packages else ".py") for m in missing]
         raise ImportError(f"{', '.join(names)} missing")
+    failure = None
     for name in present:
         if name in ("bp.api", "bp.cli"):  # the launcher imports these itself (bp.api imports bp.cli)
             continue
-        mod = importlib.import_module(name)
+        try:
+            mod = importlib.import_module(name)
+        except ModuleNotFoundError as e:
+            if (e.name == "bp" or (e.name or "").startswith("bp.")) and e.name not in present:
+                raise ImportError(f"{e.name.replace('.', '/')}.py missing (needed by {name})") from e
+            failure = failure or (_failed_file(home, name, e), e)
+            continue
+        except Exception as e:  # noqa: BLE001 - reported by cli as a named failure and an incident
+            failure = failure or (_failed_file(home, name, e), e)
+            continue
         if not getattr(mod, "__file__", None):  # a folder without __init__.py imports as a namespace package
             raise ImportError(f"{name.replace('.', '/')}/__init__.py is missing")
-    return present
+    return present, failure
 
 
 _REQUIRED = {}

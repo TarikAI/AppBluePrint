@@ -12,7 +12,7 @@ import sys
 
 from bp.version import TOOL_VERSION
 from bp import registry
-from bp.core import BlueprintError
+from bp.core import TOOL_HOME, BlueprintError
 from bp.install import check_package
 from bp.learn import record_incident
 
@@ -20,7 +20,8 @@ from bp.learn import record_incident
 # exist, and every module present must import; otherwise the launcher fails closed (exit 2 for guard and hook pre, 1
 # otherwise) instead of a command failing later. Nothing is listed by hand: a later module is covered by its file
 # alone. PACKAGE_MODULES is what was checked (every module on disk), kept for tests and doctor-style inspection.
-PACKAGE_MODULES = tuple(check_package())
+PACKAGE_MODULES, LOAD_FAILURE = check_package()
+PACKAGE_MODULES = tuple(PACKAGE_MODULES)
 
 # Help for every subcommand of 2.0 (contract 1.4: a static dict in cli, so an unbuilt command still has its line).
 HELP = {
@@ -81,7 +82,8 @@ def _broken(exc):
 
 def _guarding(args):
     """guard and hook pre fail closed: any 2.0 error there exits 2, which Claude Code treats as a refusal."""
-    return getattr(args, "cmd", None) == "guard" or (args.cmd == "hook" and getattr(args, "when", None) == "pre")
+    when = getattr(args, "when", None) or next(iter(getattr(args, "_extra", None) or []), None)  # a broken parser
+    return getattr(args, "cmd", None) == "guard" or (args.cmd == "hook" and when == "pre")
 
 
 def report_error(args, e):
@@ -123,6 +125,7 @@ def build_parser():
 def main(argv=None):
     ap = build_parser()
     args, extra = ap.parse_known_args(argv)
+    args._extra = extra
     if extra and not getattr(args, "_accepts_any", False):
         ap.error("unrecognized arguments: " + " ".join(extra))  # exit 2, as parse_args
     if hasattr(sys.stdout, "reconfigure"):
@@ -131,6 +134,11 @@ def main(argv=None):
             sys.stderr.reconfigure(encoding="utf-8")
         except (ValueError, OSError):
             pass
+    if LOAD_FAILURE is not None:  # a module that exists but does not import: a bug, named, an incident (review N6)
+        rel, exc = LOAD_FAILURE
+        print(f"error: the tool at {TOOL_HOME} failed to load {rel} ({type(exc).__name__}: {exc})", file=sys.stderr)
+        record_incident(args, exc)
+        sys.exit(2 if _guarding(args) else 70)  # fail closed: Claude Code blocks on exit 2
     try:
         if os.environ.get("APP_BLUEPRINT_SELFTEST_CRASH") == "1":  # test hook for the incident path
             raise RuntimeError("selftest crash")

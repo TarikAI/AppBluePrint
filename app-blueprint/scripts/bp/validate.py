@@ -8,7 +8,7 @@ import re
 
 from bp.learn import project_ident, store_append
 from bp.migrate import upgrade_plan
-from bp import registry, rules
+from bp import data as _data, registry, rules
 
 # Codes of the findings this module adds itself; they come before every hook's (registry.codes()).
 CODES = [(r"^blueprint\.json is schema version 1\b", "schema-v1")]
@@ -19,7 +19,10 @@ def codes():
     return CODES + registry.codes()
 
 
-VALIDATION_CODES = codes()  # as loaded at start; classify_error reads codes() each time, so modules added later count
+try:  # as loaded at start; classify_error reads codes() each time, so modules added later count
+    VALIDATION_CODES = codes()
+except Exception:  # noqa: BLE001 - a broken module is reported by cli's start-up check (named, an incident)
+    VALIDATION_CODES = CODES + _data.CODES + rules.CODES
 
 
 def classify_error(msg):

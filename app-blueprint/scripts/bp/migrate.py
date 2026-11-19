@@ -42,14 +42,15 @@ def upgrade_plan(raw):
 
 
 def upgrade_state(raw):
-    """state.json at stateVersion 2: a state without stateVersion is version 1 and gains "stateVersion": 2 (first) and
-    "tasks": {} (last); every other key and value is kept, including 1.x file proofs (still honoured, 4.5). A state
-    that already has a stateVersion is returned as a copy."""
+    """state.json at stateVersion 2: a state whose stateVersion is not the int 2 (missing, 1, or anything else) is
+    version 1 and gains "stateVersion": 2 (first) and "tasks": {} (last, unless a tasks object is there); every other
+    key and value is kept, including 1.x file proofs (still honoured, 4.5). A version 2 state is returned as a copy."""
     if not isinstance(raw, dict):
         return raw
-    if "stateVersion" in raw:
+    if raw.get("stateVersion") == 2 and type(raw.get("stateVersion")) is int:
         return copy.deepcopy(raw)
-    out = {"stateVersion": 2}
-    out.update(copy.deepcopy(raw))
-    out.setdefault("tasks", {})
+    out = {"stateVersion": 2}  # no stateVersion, or any value but the int 2: version 1 (review N2)
+    out.update({k: copy.deepcopy(v) for k, v in raw.items() if k != "stateVersion"})
+    if not isinstance(out.get("tasks"), dict):
+        out["tasks"] = {}
     return out

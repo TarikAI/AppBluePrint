@@ -84,15 +84,17 @@ def proof_inputs(root, plan, paths):
 def proof_current(root, plan, proof, paths=None):
     """True only for a proof that still holds (contract 4.5); anything malformed, failed or unknown is False.
 
-    A file proof needs "ok" exactly true. With "inputs" (2.0; "files" in a feature proof), the inputs computed now
+    A file proof ({"ok", "cmd", "sha", "inputs"}) needs "ok" exactly true; a feature proof is {"files": {...}} only.
+    With "inputs" (2.0; "files" in a feature proof), the inputs computed now
     must equal the stored ones, set and digests: for `paths` (the proven file, or a feature's items) when given, else
     for the stored paths themselves (which catches edits, deletions and added dependencies, not removed ones). A 1.x
     proof without inputs is current when its sha equals the sha1 of the normalised file; that needs paths=[file]."""
     if not isinstance(proof, dict):
         return False
-    if "ok" in proof and proof.get("ok") is not True:
+    is_feature_proof = "files" in proof and "inputs" not in proof and "ok" not in proof and "sha" not in proof
+    if not is_feature_proof and proof.get("ok") is not True:  # a file proof counts only with "ok": true (review N4)
         return False
-    inputs = proof["inputs"] if "inputs" in proof else proof.get("files")
+    inputs = proof.get("files") if is_feature_proof else proof.get("inputs")
     if inputs is None:
         if proof.get("ok") is not True or not isinstance(proof.get("sha"), str) or not paths or len(paths) != 1:
             return False

@@ -62,7 +62,8 @@ def cmd_validate(args):
         record_friction(root, errors)
     if getattr(args, "json", False):  # contract 7.2: the findings and the counts
         counts = {"files": len(plan["files"]), "patterns": len(plan["patterns"]), "modules": len(plan["modules"]),
-                  "phases": len(plan["phases"]), "owners": len(plan["roster"]), "resources": len(plan["resources"])}
+                  "phases": len(plan["phases"]), "owners": len(plan["owners"]), "roster": len(plan["roster"]),
+                  "resources": len(plan["resources"])}  # owners: owner rules; roster: roster entries (review N9)
         counts.update({k: len(plan.get(k) or []) for k in SECTIONS_V2})
         # 7.1: "ok" is true because the command ran (a failure envelope carries a 7.3 error); "valid" says whether the
         # plan has no errors, and the exit status is 1 when it has
