@@ -1,0 +1,52 @@
+{
+  "version": 2,
+  "app": {"name": "Snag Desk", "summary": "Log snags through an API and review them in an inbox.", "platforms": ["web"], "preset": "rust-agent-engine"},
+  "stack": [{"part": "HTTP API", "choice": "Axum", "version": "0.8", "docs": "https://docs.rs/axum/latest/axum/", "verified": "2026-11-18"}],
+  "approach": {"layout": "Cargo workspace plus apps/web", "notes": ""},
+  "modules": [
+    {"id": "api", "path": "crates/snag-api", "layer": "interface", "purpose": "HTTP API for snags", "dependsOn": [], "verify": "cargo test -p snag-api"},
+    {"id": "web", "path": "apps/web", "layer": "ui", "purpose": "Inbox for reviewing snags", "dependsOn": ["api"], "verify": "pnpm --dir apps/web test"},
+    {"id": "repo", "path": "", "layer": "build", "purpose": "Workspace configuration", "dependsOn": [], "verify": "cargo metadata --format-version 1"}
+  ],
+  "phases": [
+    {"id": "P1", "name": "Walking skeleton", "goal": "One snag goes in and shows in the inbox.", "exit": "Both test suites pass", "rollback": "Revert the P1 merge commit"},
+    {"id": "P2", "name": "Offline inbox", "goal": "The inbox works without signal.", "exit": "Offline tests pass"}
+  ],
+  "milestones": [{"id": "M1", "name": "Private beta", "goal": "One site team logs and reviews snags", "due": "2027-01-15", "exit": "F-log-snag and F-inbox accepted"}],
+  "features": [
+    {"id": "F-log-snag", "title": "Log a snag", "statement": "A client records a snag through the API and gets its id back.", "kind": "add",
+     "owner": "backend-lead", "milestone": "M1", "level": "integration",
+     "criteria": [
+       {"id": "C1", "scenario": "The API runs on an empty database", "action": "POST /snags with a title", "expected": "201 with the new id; GET /snags lists it",
+        "mustNot": "Create a second row when the request is retried with the same Idempotency-Key", "verify": "cargo test -p snag-api --test snags", "test": "crates/snag-api/tests/snags.rs"},
+       {"id": "C2", "scenario": "The API runs", "action": "POST /snags without a title", "expected": "422 naming the title field", "level": "unit", "verify": "cargo test -p snag-api validation"}]},
+    {"id": "F-inbox", "title": "Review snags in the inbox", "statement": "A site lead sees open snags, newest first.", "kind": "add",
+     "owner": "frontend-engineer", "milestone": "M1", "level": "e2e", "dependsOn": ["F-log-snag"],
+     "criteria": [{"id": "C1", "scenario": "Two snags exist", "action": "Open the inbox", "expected": "Both are listed, newest first", "level": "manual"}]}
+  ],
+  "tasks": [{"id": "T-domain", "title": "Register snagdesk.example and point it at the host", "owner": "owner", "milestone": "M1", "ownerAction": true, "doneWhen": "The domain serves the inbox"}],
+  "unknowns": [{"id": "U-offline", "question": "Must the inbox work offline on site?", "severity": "high", "status": "investigating", "blocks": ["P2"],
+                "evidenceFor": [], "evidenceAgainst": [],
+                "experiment": {"plan": "Ask three site leads; measure signal at two sites", "timebox": "3d", "exit": "Two of three need offline, or every site has signal", "owner": "owner"}}],
+  "files": [
+    {"path": "Cargo.toml", "action": "create", "module": "repo", "phase": "P1", "purpose": "Workspace manifest", "infrastructure": true},
+    {"path": "crates/snag-api/src/main.rs", "action": "create", "module": "api", "phase": "P1", "purpose": "POST /snags and GET /snags", "produces": ["POST /snags", "GET /snags"], "features": ["F-log-snag"]},
+    {"path": "crates/snag-api/tests/snags.rs", "action": "create", "module": "api", "phase": "P1", "purpose": "API tests for creating and listing snags", "dependsOn": ["crates/snag-api/src/main.rs"], "features": ["F-log-snag"]},
+    {"path": "apps/web/src/Inbox.tsx", "action": "create", "module": "web", "phase": "P1", "purpose": "Inbox list of open snags", "consumes": ["GET /snags"], "features": ["F-inbox"]},
+    {"path": "apps/web/src/offline.ts", "action": "create", "module": "web", "phase": "P2", "purpose": "Offline cache for the inbox", "features": ["F-inbox"]}
+  ],
+  "patterns": [],
+  "owners": [
+    {"pattern": "*", "owner": "cto-architect"},
+    {"pattern": "crates/", "owner": "backend-lead"},
+    {"pattern": "apps/web/", "owner": "frontend-engineer"}
+  ],
+  "roster": [
+    {"id": "cto-architect", "kind": "agent", "harness": "claude-code", "role": "Plan and workspace"},
+    {"id": "backend-lead", "kind": "agent", "harness": "claude-code", "role": "API"},
+    {"id": "frontend-engineer", "kind": "agent", "harness": "codex", "role": "Inbox"},
+    {"id": "evaluator", "kind": "agent", "harness": "claude-code", "role": "Accepts features; owns no files"},
+    {"id": "owner", "kind": "human", "role": "Product owner"}
+  ],
+  "decisions": [], "ignore": [], "stores": [], "resources": []
+}
