@@ -26,7 +26,7 @@ import bp.commands
 import bp.views
 from bp import plan as bplan, registry, validate
 
-from test_validate import TempRoot, quiet, v1_plan, v2_plan
+from test_validate import V2_EXAMPLE as V2_EXAMPLE_TEXT, TempRoot, quiet, v1_plan, v2_plan
 
 
 @contextlib.contextmanager
@@ -455,6 +455,47 @@ class ViewFileTest(CliTestBase):
         self.assertTrue(hand.exists())
         self.assertFalse(hasattr(registry, "OPTIONAL_VIEWS"))
 
+    def test_record_is_written_before_the_views(self):
+        """Review R2-M4: with state.json unwritable, either nothing is written or the orphan is cleaned up later."""
+        import stat
+        notes = self.root / ".blueprint" / "NOTES-3.md"
+        state_path = self.root / ".blueprint" / "state.json"
+        self.run_("render")
+        src = "WANT = [True]\ndef views(ctx):\n    return {'NOTES-3.md': 'n\\n'} if WANT[0] else {}\n"
+        with extension({"views/features_md.py": src}):
+            mod = importlib.import_module("bp.views.features_md")
+            os.chmod(state_path, stat.S_IREAD)
+            try:
+                self.run_("render")
+            finally:
+                os.chmod(state_path, stat.S_IREAD | stat.S_IWRITE)
+            mod.WANT[0] = False
+            if notes.exists():
+                self.assertEqual(self.run_("render", "--check")[0], 1, "an orphan must not look current")
+                self.run_("render")
+            self.assertFalse(notes.exists())
+            self.assertEqual(self.run_("render", "--check")[0], 0)
+
+    def test_reserved_and_hand_made_names(self):
+        from bp.views.render import render_all
+        with extension({"views/features_md.py": "def views(ctx):\n    return {'README.md': 'x'}\n"}):  # R2-N1
+            plan = quiet(bplan.load_plan, self.root)[0]
+            with self.assertRaisesRegex(RuntimeError, "features_md.*README.md"):
+                render_all(self.root, plan, bplan.load_state(self.root), quiet=True)
+        mine = self.root / ".blueprint" / "MINE.md"  # R2-N2: never overwrite a file render did not write
+        mine.write_text("hand made", encoding="utf-8")
+        src = "def views(ctx):\n    return {'MINE.md': 'generated', 'OTHER.md': 'other'}\n"
+        with extension({"views/features_md.py": src}):
+            code, out, err = self.run_("render")
+        self.assertNotEqual(code, 0)
+        self.assertIn("MINE.md", err)
+        self.assertIn("features_md", err)
+        self.assertIn("move or rename", err)
+        self.assertEqual(mine.read_text(encoding="utf-8"), "hand made")
+        self.assertTrue((self.root / ".blueprint" / "OTHER.md").exists(), "the other views still render")
+        state = json.loads((self.root / ".blueprint" / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["generatedViews"], ["OTHER.md"])
+
     def test_a_v1_render_adds_nothing_to_state(self):
         self.write_plan(v1_plan())
         state_path = self.root / ".blueprint" / "state.json"
@@ -625,6 +666,63 @@ class GuardLoadFailureTest(CliTestBase):
         self.assertEqual(self.hook_pre("random/new.txt")[0], 0)
 
 
+class UnreadablePlanTest(CliTestBase):
+    """Review R2-M1: a blueprint.json that cannot even be read (bad encoding, too deep, a folder) also makes guard and
+    hook pre refuse (exit 2) and validate --json answer bad-json; a crash while loading refuses too (incident)."""
+
+    def hook_pre(self, rel):
+        payload = json.dumps({"cwd": str(self.root), "tool_input": {"file_path": str(self.root / rel)}})
+        return run_cli("hook", "pre", stdin=payload)
+
+    def make(self, kind):
+        path = self.root / ".blueprint" / "blueprint.json"
+        if path.is_dir():
+            path.rmdir()
+        elif path.exists():
+            path.unlink()
+        if kind == "non-utf8":
+            path.write_bytes(b'{"version": 1, "app": {"name": "Caf\xe9"}}')
+        elif kind == "deep":
+            path.write_text("[" * 100000 + "]" * 100000, encoding="utf-8")
+        else:
+            path.mkdir()
+
+    def test_unreadable_plans(self):
+        for kind in ("non-utf8", "deep", "folder"):
+            with self.subTest(kind=kind):
+                self.make(kind)
+                for call in (lambda p: self.run_("guard", p), self.hook_pre):
+                    code, _, err = call("random/new.txt")
+                    self.assertEqual(code, 2, err)
+                    self.assertIn(REPAIR, err)
+                    self.assertNotIn("Traceback", err)
+                    self.assertEqual(call(".blueprint/state.json")[0], 2)
+                code, out, err = self.run_("validate", "--json")
+                self.assertEqual(code, 1, err)
+                self.assertEqual(json.loads(out)["error"]["code"], "bad-json")
+
+    def test_a_crash_while_loading_refuses_and_is_an_incident(self):
+        from bp.commands import progress
+        with mock.patch.object(progress, "load_plan", side_effect=KeyError("boom")):
+            code, _, err = self.run_("guard", "random/new.txt")
+            self.assertEqual(code, 2, err)
+            self.assertIn("unexpected error", err)
+            self.assertIn(REPAIR, err)
+            self.assertEqual(self.run_("guard", ".blueprint/blueprint.json")[0], 0, "the repair write stays allowed")
+
+
+class GuardModeTest(CliTestBase):
+    """Review R2-N4: an unknown BLUEPRINT_GUARD value means block, with one line naming it and the accepted values."""
+
+    def test_unknown_mode_blocks(self):
+        payload = json.dumps({"cwd": str(self.root), "tool_input": {"file_path": str(self.root / "random" / "x.txt")}})
+        for text in (V2_EXAMPLE_TEXT, "{"):
+            (self.root / ".blueprint" / "blueprint.json").write_text(text, encoding="utf-8")
+            code, _, err = run_cli("hook", "pre", stdin=payload, BLUEPRINT_GUARD="bogus")
+            self.assertEqual(code, 2, err)
+            self.assertIn("BLUEPRINT_GUARD='bogus' is not one of block, ask, off", err)
+
+
 class JsonLoadFailureTest(CliTestBase):
     """Review M2: with --json, a plan that cannot load (or no blueprint) prints one failure envelope on stdout, with
     the same exit code as without --json; the human message stays on stderr."""
@@ -696,6 +794,73 @@ class GuardPathTest(CliTestBase):
             self.assertEqual(self.run_("guard", "./Cargo.toml", "--by", "backend-lead")[0], 2, "owner check on the normal form")
         self.assertEqual(self.run_("guard", "../outside.txt")[0], 2, "outside the project: unplanned, as in 1.x")
         self.assertEqual(self.hook_pre(str(self.root.parent / "outside.txt"))[0], 0, "hook pre ignores outside paths, as in 1.x")
+
+
+@unittest.skipUnless(os.name == "nt", "Windows path spellings")
+class WindowsPathSpellingTest(CliTestBase):
+    """Review R2-M3: \\\\?\\ and UNC spellings of a path inside the project normalise to the same rel; a name that does
+    not exist yet loses the trailing dots and spaces Windows drops; refuse hooks compare with core.path_key."""
+
+    RECORDS = '''
+        from bp.core import path_key
+        def refuse(action, root, plan, path, by):
+            if action == "write" and path_key(path) in (path_key(".blueprint/state.json"), path_key(".blueprint/ROADMAP.md")):
+                return f"{path} is written only by blueprint.py"
+    '''
+
+    def spellings(self, rel):
+        full = str((self.root / rel).resolve())
+        out = ["\\\\?\\" + full]
+        unc = "\\\\localhost\\" + full[0] + "$" + full[2:]
+        try:
+            if os.path.exists("\\\\localhost\\" + full[0] + "$\\"):
+                out.append(unc)
+        except OSError:
+            pass
+        return out
+
+    def hook_pre(self, raw):
+        payload = json.dumps({"cwd": str(self.root), "tool_input": {"file_path": raw}})
+        return run_cli("hook", "pre", stdin=payload)
+
+    def test_protected_and_unplanned_paths(self):
+        (self.root / ".blueprint" / "state.json").write_text("{}", encoding="utf-8")
+        with extension({"records.py": self.RECORDS}):
+            for raw in self.spellings(".blueprint/state.json"):
+                with self.subTest(raw=raw):
+                    self.assertEqual(self.run_("guard", raw)[0], 2)
+                    self.assertEqual(self.hook_pre(raw)[0], 2)
+            for raw in self.spellings("random/new.txt"):
+                with self.subTest(raw=raw):
+                    self.assertEqual(self.run_("guard", raw)[0], 2)
+                    self.assertEqual(self.hook_pre(raw)[0], 2)
+            for raw in (".blueprint/roadmap.md.", ".blueprint/ROADMAP.md .", ".blueprint\\RoadMap.md"):
+                with self.subTest(raw=raw):
+                    code, _, err = self.run_("guard", raw)
+                    self.assertEqual(code, 2, err)
+                    self.assertIn("written only by blueprint.py", err)
+
+    def test_project_path_and_path_key(self):
+        from bp import core
+        self.assertEqual(core.project_path(self.root, ".blueprint/roadmap.md. "), ".blueprint/roadmap.md")
+        self.assertEqual(core.project_path(self.root, "\\\\?\\" + str(self.root.resolve()) + "\\a\\b.txt"), "a/b.txt")
+        self.assertIsNone(core.project_path(self.root, "\\\\?\\" + str(self.root.resolve().parent) + "\\x.txt"))
+        self.assertEqual(core.path_key("A\\B/C.md"), "a/b/c.md")
+        from bp.commands import progress
+        self.assertIs(progress.project_path, core.project_path)
+
+    def test_repair_exception_on_the_long_spelling(self):  # review R2-N3
+        (self.root / ".blueprint" / "blueprint.json").write_text("{", encoding="utf-8")
+        raw = "\\\\?\\" + str((self.root / ".blueprint" / "blueprint.json").resolve())
+        self.assertEqual(self.run_("guard", raw)[0], 0)
+        self.assertEqual(self.hook_pre(raw)[0], 0)
+        self.assertEqual(self.run_("guard", ".BLUEPRINT\\Blueprint.JSON")[0], 0)
+
+
+class PathKeyTest(unittest.TestCase):
+    def test_path_key(self):
+        from bp import core
+        self.assertEqual(core.path_key("a\\b/c.md"), os.path.normcase("a/b/c.md").replace("\\", "/"))
 
 
 class VerifyFeatureAndStatusCardTest(CliTestBase):

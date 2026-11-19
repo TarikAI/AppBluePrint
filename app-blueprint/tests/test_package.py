@@ -567,6 +567,35 @@ class ManifestTest(CopyTestBase):
         (self.bin / "bp" / "verify.py").write_text("def broken(:\n", encoding="utf-8")
         self.assert_fails_to_load("bp/verify.py", "SyntaxError")
 
+    def broken_skill(self, source):
+        skill = self.base / "skill r2"
+        shutil.copytree(S.SCRIPTS, skill / "scripts", ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copytree(S.SKILL / "assets", skill / "assets")
+        (skill / "scripts" / "bp" / "features.py").write_text(source, encoding="utf-8")
+        return skill / "scripts" / "blueprint.py"
+
+    def test_doctor_still_runs_with_a_broken_module(self):
+        """Review R2-N6: doctor reports the failing module, file, error and the repair, and exits non-zero."""
+        launcher = self.broken_skill("raise ValueError('bad feature table')\n")
+        self.init_package_copy()
+        r = S.run_script(launcher, ["doctor", "--root", self.root], self.elsewhere, env=self.env)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        out = r.stdout + r.stderr
+        for needle in ("bp.features", "bp/features.py", "ValueError: bad feature table", "install.py",
+                       "blueprint.py " + bp.TOOL_VERSION):
+            self.assertIn(needle, out)
+        self.assertNotIn("Traceback", out)
+        r = S.run_script(launcher, ["status", "--root", self.root], self.elsewhere, env=self.env)
+        self.assertEqual(r.returncode, 70, "fail-closed is unchanged for every other command")
+
+    def test_a_skill_missing_a_module_says_reinstall(self):
+        """Review R2-N7: from the skill folder, a missing bp module points at reinstalling the skill."""
+        launcher = self.broken_skill("import bp.does_not_exist  # noqa\n")
+        r = S.run_script(launcher, ["status", "--root", self.root], self.elsewhere, env=self.env)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("bp/does_not_exist.py missing (needed by bp.features)", r.stderr)
+        self.assertIn("python install.py", r.stderr)
+
     def test_a_broken_later_module_names_itself_and_is_an_incident(self):
         """Review N6: an import error that is not "module missing" says which module failed and why, records an
         incident, fails closed, and is not called an incomplete copy (here a later module in a temp skill)."""

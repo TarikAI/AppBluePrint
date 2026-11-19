@@ -254,6 +254,9 @@ class UpgradeStateTest(unittest.TestCase):
                 up = migrate.upgrade_state(dict(copy.deepcopy(self.V1), stateVersion=v))
                 self.assertEqual((up["stateVersion"], up["tasks"]), (2, {}))
 
+    def test_v2_state_gets_tasks(self):  # review R2-N5
+        self.assertEqual(migrate.upgrade_state({"stateVersion": 2, "files": {}}), {"stateVersion": 2, "files": {}, "tasks": {}})
+
     def test_v2_state_is_kept(self):
         raw = dict(copy.deepcopy(self.V1), stateVersion=2, tasks={"T-x": {"status": "done"}})
         self.assertEqual(migrate.upgrade_state(raw), raw)
