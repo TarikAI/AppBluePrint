@@ -310,7 +310,13 @@ class TheLock(IntegrityChecks, unittest.TestCase):
     def hold(self, seconds):
         proc = subprocess.Popen([S.PY, "-B", "-c", HOLDER, str(S.SCRIPTS), str(self.p.root), str(seconds)],
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=S.tool_env())
-        self.addCleanup(lambda: proc.poll() is None and proc.kill())
+        def stop():
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=60)
+            proc.stdout.close()
+            proc.stderr.close()
+        self.addCleanup(stop)
         line = proc.stdout.readline().decode().strip()
         self.assertEqual(line, "locked", proc.stderr.read().decode() if proc.poll() is not None else "")
         return proc
