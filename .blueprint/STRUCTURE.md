@@ -4,7 +4,7 @@
 
 The repository's own plan: who builds which file of app-blueprint 2.0, taken from section 11 of the contract.
 
-**140 planned files, 7 patterns.** Status: ○ planned 62, ◑ on disk 78. Last sync: 2026-11-19T15:51:13Z at `c02012b`.
+**140 planned files, 7 patterns.** Status: ○ planned 62, ◑ on disk 78. Last sync: 2026-11-19T16:20:07Z at `7cf77ef`.
 
 ## Build approach
 
@@ -18,7 +18,7 @@ The repository's own plan: who builds which file of app-blueprint 2.0, taken fro
 ```text
 .
 ├── .blueprint/  # This repository's own plan and views [dogfood]
-│   └── *  ⟨pattern dogfood-views: The plan, its state and the generated views of this repository; 6 on disk⟩ (W0-C, W0)
+│   └── *  ⟨pattern dogfood-views: The plan, its state and the generated views of this repository; 6 on disk⟩ (orchestrator, W0)
 ├── .github/  # GitHub workflows and templates [ci]
 │   ├── ISSUE_TEMPLATE/
 │   │   └── *  ⟨pattern issue-templates: GitHub issue forms; 5 on disk⟩ (maintainers, W0)
@@ -83,7 +83,7 @@ The repository's own plan: who builds which file of app-blueprint 2.0, taken fro
 │   │   │   │   ├── trace.py  ○ study trace: roles and depth (W2-S, W2)
 │   │   │   │   └── web.py  ○ Web lane: HAR, source maps and bundles (W2-W, W2)
 │   │   │   ├── views/
-│   │   │   │   ├── __init__.py  ◑ Package marker for the view modules (W0-A2, W0)
+│   │   │   │   ├── __init__.py  ◑ Package marker for the view modules (W0-A1, W0)
 │   │   │   │   ├── context.py  ◑ The context every view and status hook reads (W0-A2, W0)
 │   │   │   │   ├── features_md.py  ○ FEATURES.md (W1-F, W1)
 │   │   │   │   ├── render.py  ◑ Writes every view and the map (W0-A2, W0)
@@ -94,7 +94,7 @@ The repository's own plan: who builds which file of app-blueprint 2.0, taken fro
 │   │   │   ├── api.py  ◑ Frozen 1.x public names re-exported to the launcher (W0-A1, W0)
 │   │   │   ├── cli.py  ◑ Argument parser, start-up completeness check and command dispatch (W0-A2, W0)
 │   │   │   ├── core.py ★  ◑ Paths, JSON and git helpers, BlueprintError and the envelope, proofs (W0-A2, W0)
-│   │   │   ├── data.py  ◑ Stores and resources: SQL, Prisma and code scanning for the data checks (W0-A1, W0)
+│   │   │   ├── data.py  ◑ Stores and resources: SQL, Prisma and code scanning for the data checks (W0-A2, W0)
 │   │   │   ├── evidence.py  ○ Evidence store and records (W2-E, W2)
 │   │   │   ├── export.py  ◑ Export formats: codeowners, csv, json, AgenticTeam commands (W0-A1, W0)
 │   │   │   ├── features.py  ○ Features, criteria, file links and derived status (W1-F, W1)
@@ -117,9 +117,9 @@ The repository's own plan: who builds which file of app-blueprint 2.0, taken fro
 │   ├── tests/  # Tests of the tool, fixtures and golden data [tests]
 │   │   ├── data/
 │   │   │   ├── android/
-│   │   │   │   └── *  ⟨pattern android-goldens: Goldens built with aapt2; 3 on disk⟩ (W2-FX1, W2)
+│   │   │   │   └── **  ⟨pattern android-goldens: Goldens built with aapt2; 3 on disk⟩ (W2-FX1, W2)
 │   │   │   ├── v1/
-│   │   │   │   └── *  ⟨pattern v1-goldens: Frozen 1.3.0 inputs and golden views; 4 on disk⟩ (W0-A1, W0)
+│   │   │   │   └── **  ⟨pattern v1-goldens: Frozen 1.3.0 inputs and golden views; 4 on disk⟩ (W0-A1, W0)
 │   │   │   └── README.md [modify]  ◑ Where the golden files came from and how to rebuild them (W2-FX1, W2)
 │   │   ├── fixtures_archives.py [modify]  ◑ Builders for APK, AAB, XAPK, IPA, asar and hostile archives (W2-FX1, W2)
 │   │   ├── fixtures_text.py [modify]  ◑ Builders for HAR, source map, bundle, SQLite, OpenAPI, GraphQL, proto, repo, rea, JADX, apktool and capture fixtures (W2-FX2, W2)
@@ -249,11 +249,11 @@ These files are depended on by several owners. Change them only through their ow
 
 | Pattern | Glob | One instance contains | Owner | Phase | On disk |
 |---|---|---|---|---|---|
-| dogfood-views | `.blueprint/*` | One file init, sync or render writes in .blueprint/ (README.md, blueprint.json, state.json, log.jsonl, STRUCTURE.md, ROSTER.md, map.html, and later ROADMAP.md and FEATURES.md). The tool copy in .blueprint/bin is not committed. | W0-C | W0 | 6 |
+| dogfood-views | `.blueprint/*` | One file init, sync or render writes in .blueprint/ (README.md, blueprint.json, state.json, log.jsonl, STRUCTURE.md, ROSTER.md, map.html, and later ROADMAP.md and FEATURES.md). The tool copy in .blueprint/bin is not committed. | orchestrator | W0 | 6 |
 | example-project | `examples/**` | One file of the example, including its own .blueprint folder and tool copy; never edited by hand. | orchestrator | W0 | 50 |
 | example-plan | `examples/*/.blueprint/**` | One file under an example's .blueprint folder, written by the tool when make_example.py runs. | orchestrator | W0 | 0 |
-| v1-goldens | `app-blueprint/tests/data/v1/*` | One frozen input, golden or generator script of the version 1 behaviour tests. | W0-A1 | W0 | 4 |
-| android-goldens | `app-blueprint/tests/data/android/*` | One manifest source or aapt2 output (text, binary AXML or proto). | W2-FX1 | W2 | 3 |
+| v1-goldens | `app-blueprint/tests/data/v1/**` | One frozen input, golden or generator script of the version 1 behaviour tests. | W0-A1 | W0 | 4 |
+| android-goldens | `app-blueprint/tests/data/android/**` | One manifest source or aapt2 output (text, binary AXML or proto). | W2-FX1 | W2 | 3 |
 | issue-templates | `.github/ISSUE_TEMPLATE/*` | One issue form or the issue chooser config. | maintainers | W0 | 5 |
 | stack-presets | `app-blueprint/references/stacks/*.md` | One stack preset document with its parts, versions, docs URLs and folder layout. | maintainers | W0 | 4 |
 
@@ -261,10 +261,10 @@ These files are depended on by several owners. Change them only through their ow
 
 | File | Action | Module | Phase | Owner | Status | Purpose | Consumes | Produces | Verify |
 |---|---|---|---|---|---|---|---|---|---|
+| `app-blueprint/scripts/bp/views/__init__.py` | create | tool | W0 | W0-A1 | ◑ on disk | Package marker for the view modules |  |  | `python app-blueprint/scripts/blueprint.py --version` |
 | `app-blueprint/scripts/bp/__init__.py` | create | tool | W0 | W0-A1 | ◑ on disk | Package marker for bp |  |  | `python app-blueprint/scripts/blueprint.py --version` |
 | `app-blueprint/scripts/bp/globs.py` | create | tool | W0 | W0-A1 | ◑ on disk | Glob matching for owner rules, patterns and ignores |  |  | `python app-blueprint/scripts/blueprint.py --version` |
 | `app-blueprint/scripts/bp/learn.py` | create | tool | W0 | W0-A1 | ◑ on disk | Learning-loop store, redaction and incident records |  |  | `python app-blueprint/scripts/blueprint.py --version` |
-| `app-blueprint/scripts/bp/data.py` | create | tool | W0 | W0-A1 | ◑ on disk | Stores and resources: SQL, Prisma and code scanning for the data checks |  |  | `python app-blueprint/scripts/blueprint.py --version` |
 | `app-blueprint/scripts/bp/export.py` | create | tool | W0 | W0-A1 | ◑ on disk | Export formats: codeowners, csv, json, AgenticTeam commands |  |  | `python app-blueprint/scripts/blueprint.py --version` |
 | `app-blueprint/scripts/bp/install.py` | create | tool | W0 | W0-A1 | ◑ on disk | Copy of the tool into .blueprint/bin and the package start-up check |  |  | `python app-blueprint/scripts/blueprint.py --version` |
 | `app-blueprint/scripts/bp/api.py` | create | tool | W0 | W0-A1 | ◑ on disk | Frozen 1.x public names re-exported to the launcher |  |  | `python app-blueprint/scripts/blueprint.py --version` |
@@ -280,6 +280,7 @@ These files are depended on by several owners. Change them only through their ow
 | `app-blueprint/tests/test_owner_anchor.py` | create | tests | W0 | W0-A1 | ◑ on disk | Tests of owner rule anchoring |  |  | `python -m unittest discover -s app-blueprint/tests` |
 | `app-blueprint/tests/test_plan_shapes.py` | create | tests | W0 | W0-A1 | ◑ on disk | Tests of plan shape errors |  |  | `python -m unittest discover -s app-blueprint/tests` |
 | `app-blueprint/tests/test_plan_fuzz.py` | create | tests | W0 | W0-A1 | ◑ on disk | Fuzz tests of version 1 plans |  |  | `python -m unittest discover -s app-blueprint/tests` |
+| `app-blueprint/scripts/bp/data.py` | create | tool | W0 | W0-A2 | ◑ on disk | Stores and resources: SQL, Prisma and code scanning for the data checks |  |  | `python app-blueprint/scripts/blueprint.py --version` |
 | `app-blueprint/scripts/bp/core.py` | create | tool | W0 | W0-A2 | ◑ on disk | Paths, JSON and git helpers, BlueprintError and the envelope, proofs |  |  | `python app-blueprint/scripts/blueprint.py --version` |
 | `app-blueprint/scripts/bp/plan.py` | create | tool | W0 | W0-A2 | ◑ on disk | Plan loading, shape checks and the skeleton |  |  | `python app-blueprint/scripts/blueprint.py --version` |
 | `app-blueprint/scripts/bp/rules.py` | create | tool | W0 | W0-A2 | ◑ on disk | Owner rules, roster and team validation |  |  | `python app-blueprint/scripts/blueprint.py --version` |
@@ -287,7 +288,6 @@ These files are depended on by several owners. Change them only through their ow
 | `app-blueprint/scripts/bp/verify.py` | create | tool | W0 | W0-A2 | ◑ on disk | Verify commands and the hash of a verified file |  |  | `python app-blueprint/scripts/blueprint.py --version` |
 | `app-blueprint/scripts/bp/validate.py` | create | tool | W0 | W0-A2 | ◑ on disk | Validation findings, codes and the schema checks |  |  | `python app-blueprint/scripts/blueprint.py --version` |
 | `app-blueprint/scripts/bp/cli.py` | create | tool | W0 | W0-A2 | ◑ on disk | Argument parser, start-up completeness check and command dispatch |  |  | `python app-blueprint/scripts/blueprint.py --version` |
-| `app-blueprint/scripts/bp/views/__init__.py` | create | tool | W0 | W0-A2 | ◑ on disk | Package marker for the view modules |  |  | `python app-blueprint/scripts/blueprint.py --version` |
 | `app-blueprint/scripts/bp/views/structure.py` | create | tool | W0 | W0-A2 | ◑ on disk | STRUCTURE.md |  |  | `python app-blueprint/scripts/blueprint.py --version` |
 | `app-blueprint/scripts/bp/views/render.py` | create | tool | W0 | W0-A2 | ◑ on disk | Writes every view and the map |  |  | `python app-blueprint/scripts/blueprint.py --version` |
 | `app-blueprint/scripts/bp/views/roster.py` | create | tool | W0 | W0-A2 | ◑ on disk | ROSTER.md |  |  | `python app-blueprint/scripts/blueprint.py --version` |
@@ -404,7 +404,8 @@ These files are depended on by several owners. Change them only through their ow
 
 ## Decisions
 
-- **D1:** Files marked with a dagger in section 11 are recorded as W0-A2's; the TOOL_VERSION line files (bp/version.py, the launcher), CHANGELOG.md, examples/** and .gitignore as orchestrator. Why: Section 11 hands the dagger files from W0-A1 to W0-A2 and the version lines, changelog and examples to the orchestrator after W0-A1 merges. (maintainers/design/v2-contract.md section 11)
+- **D1:** Files marked with a dagger in section 11 are recorded as W0-A2's; bp/version.py and the launcher (whole files), CHANGELOG.md, examples/**, .gitignore and the contract as orchestrator. Why: Section 11 hands the dagger files from W0-A1 to W0-A2 and the version lines, changelog and examples to the orchestrator after W0-A1 merges. (maintainers/design/v2-contract.md section 11)
 - **D2:** Files no workstream of the table touches belong to the roster id maintainers. Why: Every tracked file needs exactly one owner; these are the pre-2.0 files that stay as they are. (maintainers/design/v2-contract.md section 11)
+- **D4:** The .blueprint/** files are recorded as orchestrator, the final owner once the W0-C pull request merges (a third handover). maintainers/check_owned.py and its test stay W0-C. Why: Only a person or the orchestrator changes the plan; the check reads it from the base, so a builder branch cannot widen its own area. (orchestrator ruling, review round 1)
 - **D3:** The tool copy in .blueprint/bin is not committed. Why: The repository is the tool; a copy would go stale at every version bump. (W0-C)
 

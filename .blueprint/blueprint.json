@@ -141,6 +141,13 @@
   ],
   "files": [
     {
+      "path": "app-blueprint/scripts/bp/views/__init__.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W0",
+      "purpose": "Package marker for the view modules"
+    },
+    {
       "path": "app-blueprint/scripts/bp/__init__.py",
       "action": "create",
       "module": "tool",
@@ -160,13 +167,6 @@
       "module": "tool",
       "phase": "W0",
       "purpose": "Learning-loop store, redaction and incident records"
-    },
-    {
-      "path": "app-blueprint/scripts/bp/data.py",
-      "action": "create",
-      "module": "tool",
-      "phase": "W0",
-      "purpose": "Stores and resources: SQL, Prisma and code scanning for the data checks"
     },
     {
       "path": "app-blueprint/scripts/bp/export.py",
@@ -274,6 +274,13 @@
       "purpose": "Fuzz tests of version 1 plans"
     },
     {
+      "path": "app-blueprint/scripts/bp/data.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W0",
+      "purpose": "Stores and resources: SQL, Prisma and code scanning for the data checks"
+    },
+    {
       "path": "app-blueprint/scripts/bp/core.py",
       "action": "create",
       "module": "tool",
@@ -322,13 +329,6 @@
       "module": "tool",
       "phase": "W0",
       "purpose": "Argument parser, start-up completeness check and command dispatch"
-    },
-    {
-      "path": "app-blueprint/scripts/bp/views/__init__.py",
-      "action": "create",
-      "module": "tool",
-      "phase": "W0",
-      "purpose": "Package marker for the view modules"
     },
     {
       "path": "app-blueprint/scripts/bp/views/structure.py",
@@ -1151,7 +1151,7 @@
     },
     {
       "id": "v1-goldens",
-      "glob": "app-blueprint/tests/data/v1/*",
+      "glob": "app-blueprint/tests/data/v1/**",
       "module": "tests",
       "phase": "W0",
       "purpose": "Frozen 1.3.0 inputs and golden views",
@@ -1159,7 +1159,7 @@
     },
     {
       "id": "android-goldens",
-      "glob": "app-blueprint/tests/data/android/*",
+      "glob": "app-blueprint/tests/data/android/**",
       "module": "tests",
       "phase": "W2",
       "purpose": "Goldens built with aapt2",
@@ -1185,7 +1185,7 @@
   "owners": [
     {
       "pattern": "/.blueprint/",
-      "owner": "W0-C"
+      "owner": "orchestrator"
     },
     {
       "pattern": "/.gitattributes",
@@ -1361,7 +1361,7 @@
     },
     {
       "pattern": "/app-blueprint/scripts/bp/data.py",
-      "owner": "W0-A1"
+      "owner": "W0-A2"
     },
     {
       "pattern": "/app-blueprint/scripts/bp/evidence.py",
@@ -1517,7 +1517,7 @@
     },
     {
       "pattern": "/app-blueprint/scripts/bp/views/__init__.py",
-      "owner": "W0-A2"
+      "owner": "W0-A1"
     },
     {
       "pattern": "/app-blueprint/scripts/bp/views/context.py",
@@ -1980,7 +1980,6 @@
     {
       "id": "maintainers",
       "kind": "human",
-      "harness": "claude-code",
       "role": "Files from before 2.0 that no workstream of the table touches",
       "lane": "maintainers"
     }
@@ -1988,7 +1987,7 @@
   "decisions": [
     {
       "id": "D1",
-      "decision": "Files marked with a dagger in section 11 are recorded as W0-A2's; the TOOL_VERSION line files (bp/version.py, the launcher), CHANGELOG.md, examples/** and .gitignore as orchestrator.",
+      "decision": "Files marked with a dagger in section 11 are recorded as W0-A2's; bp/version.py and the launcher (whole files), CHANGELOG.md, examples/**, .gitignore and the contract as orchestrator.",
       "why": "Section 11 hands the dagger files from W0-A1 to W0-A2 and the version lines, changelog and examples to the orchestrator after W0-A1 merges.",
       "source": "maintainers/design/v2-contract.md section 11"
     },
@@ -1997,6 +1996,12 @@
       "decision": "Files no workstream of the table touches belong to the roster id maintainers.",
       "why": "Every tracked file needs exactly one owner; these are the pre-2.0 files that stay as they are.",
       "source": "maintainers/design/v2-contract.md section 11"
+    },
+    {
+      "id": "D4",
+      "decision": "The .blueprint/** files are recorded as orchestrator, the final owner once the W0-C pull request merges (a third handover). maintainers/check_owned.py and its test stay W0-C.",
+      "why": "Only a person or the orchestrator changes the plan; the check reads it from the base, so a builder branch cannot widen its own area.",
+      "source": "orchestrator ruling, review round 1"
     },
     {
       "id": "D3",

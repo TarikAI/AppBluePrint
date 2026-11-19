@@ -19,6 +19,7 @@ app-blueprint/references/stacks/local/
 
 # The tool copy that init puts in .blueprint/bin: this repository is the tool, so the copy is never published
 /.blueprint/bin/
+/.blueprint/studies/
 
 # Triage reports are built from the local learning store: they can name local projects. Never published.
 maintainers/triage/

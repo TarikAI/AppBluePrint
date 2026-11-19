@@ -11,7 +11,7 @@ Ownership follows the rules below in order; **the last matching rule wins**, as 
 | W0-A1 | agent | claude-code | Mechanical split of the 1.3.0 tool into the bp package, launcher, copied layout | 19 | 0 | 1 |
 | W0-A2 | agent | claude-code | 2.0 foundations: registry and hooks, findings, envelope, proofs, validation of schema 2 | 21 | 0 | 0 |
 | W0-B | agent | claude-code | The migrate command and the version 2 example plan | 3 | 0 | 0 |
-| W0-C | agent | claude-code | This plan and the pull-request ownership check | 2 | 0 | 1 |
+| W0-C | agent | claude-code | This plan and the pull-request ownership check | 2 | 0 | 0 |
 | W1-R | agent | claude-code | Roadmap: milestones, tasks, ROADMAP.md, Roadmap tab | 5 | 0 | 0 |
 | W1-F | agent | claude-code | Features, criteria, file links, FEATURES.md, Features tab | 5 | 0 | 0 |
 | W1-U | agent | claude-code | Unknowns, blocking, claim refusal, Unknowns tab | 3 | 0 | 0 |
@@ -33,14 +33,14 @@ Ownership follows the rules below in order; **the last matching rule wins**, as 
 | W4-E2E | agent | claude-code | End-to-end and registry tests | 2 | 0 | 0 |
 | W4-M | agent | claude-code | Mutation testing | 3 | 0 | 0 |
 | W4-X | agent | claude-code | Changes to the example generator | 1 | 0 | 0 |
-| orchestrator | agent | claude-code | Merges, version lines, CHANGELOG, examples, the contract, this plan's rules after a table change | 5 | 0 | 2 |
-| maintainers | human | claude-code | Files from before 2.0 that no workstream of the table touches | 10 | 0 | 2 |
+| orchestrator | agent | claude-code | Merges, version lines, CHANGELOG, examples, the contract, this plan's rules after a table change | 5 | 0 | 3 |
+| maintainers | human |  | Files from before 2.0 that no workstream of the table touches | 10 | 0 | 2 |
 
 ## Owner rules (last match wins)
 
 | # | Pattern | Owner | Override | Wins |
 |---|---|---|---|---|
-| 1 | `/.blueprint/` | W0-C |  | 1 |
+| 1 | `/.blueprint/` | orchestrator |  | 1 |
 | 2 | `/.gitattributes` | maintainers |  | 1 |
 | 3 | `/.github/ISSUE_TEMPLATE/` | maintainers |  | 1 |
 | 4 | `/.github/pull_request_template.md` | maintainers |  | 1 |
@@ -84,7 +84,7 @@ Ownership follows the rules below in order; **the last matching rule wins**, as 
 | 42 | `/app-blueprint/scripts/bp/commands/roadmap.py` | W1-R |  | 1 |
 | 43 | `/app-blueprint/scripts/bp/commands/study.py` | W2-E |  | 1 |
 | 44 | `/app-blueprint/scripts/bp/core.py` | W0-A2 |  | 1 |
-| 45 | `/app-blueprint/scripts/bp/data.py` | W0-A1 |  | 1 |
+| 45 | `/app-blueprint/scripts/bp/data.py` | W0-A2 |  | 1 |
 | 46 | `/app-blueprint/scripts/bp/evidence.py` | W2-E |  | 1 |
 | 47 | `/app-blueprint/scripts/bp/export.py` | W0-A1 |  | 1 |
 | 48 | `/app-blueprint/scripts/bp/features.py` | W1-F |  | 1 |
@@ -123,7 +123,7 @@ Ownership follows the rules below in order; **the last matching rule wins**, as 
 | 81 | `/app-blueprint/scripts/bp/validate.py` | W0-A2 |  | 1 |
 | 82 | `/app-blueprint/scripts/bp/verify.py` | W0-A2 |  | 1 |
 | 83 | `/app-blueprint/scripts/bp/version.py` | orchestrator |  | 1 |
-| 84 | `/app-blueprint/scripts/bp/views/__init__.py` | W0-A2 |  | 1 |
+| 84 | `/app-blueprint/scripts/bp/views/__init__.py` | W0-A1 |  | 1 |
 | 85 | `/app-blueprint/scripts/bp/views/context.py` | W0-A2 |  | 1 |
 | 86 | `/app-blueprint/scripts/bp/views/features_md.py` | W1-F |  | 1 |
 | 87 | `/app-blueprint/scripts/bp/views/render.py` | W0-A2 |  | 1 |
@@ -193,10 +193,10 @@ Ownership follows the rules below in order; **the last matching rule wins**, as 
 
 **W0 Foundations**
 
+- ◑ `app-blueprint/scripts/bp/views/__init__.py`
 - ◑ `app-blueprint/scripts/bp/__init__.py`
 - ◑ `app-blueprint/scripts/bp/globs.py`
 - ◑ `app-blueprint/scripts/bp/learn.py`
-- ◑ `app-blueprint/scripts/bp/data.py`
 - ◑ `app-blueprint/scripts/bp/export.py`
 - ◑ `app-blueprint/scripts/bp/install.py`
 - ◑ `app-blueprint/scripts/bp/api.py`
@@ -212,12 +212,13 @@ Ownership follows the rules below in order; **the last matching rule wins**, as 
 - ◑ `app-blueprint/tests/test_owner_anchor.py`
 - ◑ `app-blueprint/tests/test_plan_shapes.py`
 - ◑ `app-blueprint/tests/test_plan_fuzz.py`
-- ⟨pattern⟩ `app-blueprint/tests/data/v1/*`: One frozen input, golden or generator script of the version 1 behaviour tests.
+- ⟨pattern⟩ `app-blueprint/tests/data/v1/**`: One frozen input, golden or generator script of the version 1 behaviour tests.
 
 ### W0-A2
 
 **W0 Foundations**
 
+- ◑ `app-blueprint/scripts/bp/data.py`
 - ◑ `app-blueprint/scripts/bp/core.py` ★
 - ◑ `app-blueprint/scripts/bp/plan.py`
 - ◑ `app-blueprint/scripts/bp/rules.py`
@@ -225,7 +226,6 @@ Ownership follows the rules below in order; **the last matching rule wins**, as 
 - ◑ `app-blueprint/scripts/bp/verify.py`
 - ◑ `app-blueprint/scripts/bp/validate.py`
 - ◑ `app-blueprint/scripts/bp/cli.py`
-- ◑ `app-blueprint/scripts/bp/views/__init__.py`
 - ◑ `app-blueprint/scripts/bp/views/structure.py`
 - ◑ `app-blueprint/scripts/bp/views/render.py`
 - ◑ `app-blueprint/scripts/bp/views/roster.py`
@@ -254,7 +254,6 @@ Ownership follows the rules below in order; **the last matching rule wins**, as 
 
 - ◑ `maintainers/check_owned.py`
 - ◑ `maintainers/tests/test_check_owned.py`
-- ⟨pattern⟩ `.blueprint/*`: One file init, sync or render writes in .blueprint/ (README.md, blueprint.json, state.json, log.jsonl, STRUCTURE.md, ROSTER.md, map.html, and later ROADMAP.md and FEATURES.md). The tool copy in .blueprint/bin is not committed.
 
 ### W1-R
 
@@ -291,7 +290,7 @@ Ownership follows the rules below in order; **the last matching rule wins**, as 
 - ◑ `app-blueprint/tests/fixtures_archives.py` (modify)
 - ◑ `app-blueprint/tests/test_fixtures_archives.py` (modify)
 - ◑ `app-blueprint/tests/data/README.md` (modify)
-- ⟨pattern⟩ `app-blueprint/tests/data/android/*`: One manifest source or aapt2 output (text, binary AXML or proto).
+- ⟨pattern⟩ `app-blueprint/tests/data/android/**`: One manifest source or aapt2 output (text, binary AXML or proto).
 
 ### W2-FX2
 
@@ -451,6 +450,7 @@ Ownership follows the rules below in order; **the last matching rule wins**, as 
 - ◑ `CHANGELOG.md` (modify)
 - ◑ `.gitignore` (modify)
 - ◑ `maintainers/design/v2-contract.md` ★ (modify)
+- ⟨pattern⟩ `.blueprint/*`: One file init, sync or render writes in .blueprint/ (README.md, blueprint.json, state.json, log.jsonl, STRUCTURE.md, ROSTER.md, map.html, and later ROADMAP.md and FEATURES.md). The tool copy in .blueprint/bin is not committed.
 - ⟨pattern⟩ `examples/**`: One file of the example, including its own .blueprint folder and tool copy; never edited by hand.
 - ⟨pattern⟩ `examples/*/.blueprint/**`: One file under an example's .blueprint folder, written by the tool when make_example.py runs.
 
