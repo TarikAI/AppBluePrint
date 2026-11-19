@@ -367,6 +367,18 @@ class ItemsTest(TempRoot):
         # the link is stored on the file only: features have no files field and the example's Cargo.toml serves none
         self.assertNotIn("Cargo.toml", [i["path"] for i in features.feature_items(self.root, plan, st, comp, "F-log-snag")])
 
+    def test_documents_that_verify_run_never_covers_pattern_instances(self):
+        """Today's behaviour (core gap): verify_groups walks planned files only, so a pattern instance is never proven
+        and a feature served only by pattern instances can reach built but not verified. When the core changes, this
+        test changes with it."""
+        from bp.verify import verify_groups
+        plan, st, comp = self.ctx()
+        listed = [p for paths in verify_groups(plan).values() for p in paths]
+        self.assertFalse([p for p in listed if p.startswith("apps/web/src/screens/")])
+        only = {"id": "F-x", "criteria": [crit("C1")]}
+        built = [{"path": "apps/web/src/screens/A.tsx", "status": "built", "from": "pattern:screen"}]
+        self.assertEqual(features.derive_status(only, built, CMD_PASS, False), "built")
+
     def test_blocked_and_verified_rows(self):
         self.touch("crates/snag-api/src/main.rs")
         plan, st, comp = self.ctx()
