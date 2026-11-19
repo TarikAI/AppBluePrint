@@ -104,7 +104,8 @@ def _check_codes(owned, mods):
 
 
 def refusal(action, root, plan, path, by):
-    """The first refusal message of a DOMAIN module's refuse hook (action "write" or "claim"), or None."""
+    """The first non-empty result of a DOMAIN module's refuse hook (action "write" or "claim"), in DOMAIN order: a
+    message string, or a tuple (message, error, next); None when no module refuses."""
     for m in _hooked("refuse"):
         msg = m.refuse(action, root, plan, path, by)
         if msg:

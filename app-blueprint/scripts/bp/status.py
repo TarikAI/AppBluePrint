@@ -51,8 +51,9 @@ def _safe_rel(p):
 
 def proof_inputs(root, plan, paths):
     """{path: proof digest} for paths plus the transitive closure of dependsOn over planned files (a visited set, so
-    dependsOn cycles end), keeping only files present on disk; sorted by path. Pattern ids and globs in dependsOn are
-    not followed (contract 4.5)."""
+    dependsOn cycles end), keeping only files present on disk; sorted by path (contract 4.5). Every path is taken
+    literally, whatever its characters ([id], (group), a*b): a dependsOn entry is an input when a file of that name
+    exists, so a pattern id or glob drops out unless such a file exists; only planned files' dependsOn are followed."""
     deps = {}
     for f in plan.get("files") or []:
         if isinstance(f, dict) and isinstance(f.get("path"), str):

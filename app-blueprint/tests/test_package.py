@@ -585,6 +585,7 @@ class ManifestTest(CopyTestBase):
                        "blueprint.py " + bp.TOOL_VERSION):
             self.assertIn(needle, out)
         self.assertNotIn("Traceback", out)
+        self.assertNotIn("unexpected error", out, "doctor ran and found a problem: no incident of its own")
         r = S.run_script(launcher, ["status", "--root", self.root], self.elsewhere, env=self.env)
         self.assertEqual(r.returncode, 70, "fail-closed is unchanged for every other command")
 

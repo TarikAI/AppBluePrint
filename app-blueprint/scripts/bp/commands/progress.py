@@ -451,7 +451,7 @@ def cmd_hook(args):
     # ask lets the person approve it; off disables the guard.
     mode = os.environ.get("BLUEPRINT_GUARD", "block")
     if mode not in ("block", "ask", "off"):  # review R2-N4: an unknown value is block (1.x allowed every write)
-        print(f"BLUEPRINT_GUARD={mode!r} is not one of block, ask, off; treating it as block.", file=sys.stderr)
+        print(f"BLUEPRINT_GUARD={mode!r} is not one of block, ask, off.", file=sys.stderr)  # treated as block
         mode = "block"
     if args.when == "pre" and mode == "off":
         sys.exit(0)
