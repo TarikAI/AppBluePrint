@@ -315,15 +315,15 @@ def feature_rows(plan, ctx):
     got, torn = {}, set()
     for f in ctx.get("features") if isinstance(ctx.get("features"), list) else []:
         if isinstance(f, dict) and isinstance(f.get("id"), str):
-            if f["id"] in got and got[f["id"]].get("status") != f.get("status"):
-                torn.add(f["id"])  # two entries for one feature that disagree: trust neither
+            if f["id"] in got and any(got[f["id"]].get(k) != f.get(k) for k in ("status", "milestone")):
+                torn.add(f["id"])  # two entries for one feature that disagree: trust neither, whichever comes first
             got.setdefault(f["id"], f)
     rows = []
     for fid, f in section_index(plan, "features").items():
         rep = got.get(fid, {})
         draft = f.get("draft") is True
         status = rep.get("status") if isinstance(rep.get("status"), str) and rep.get("status") else "planned"
-        if status == "draft" or fid in torn:
+        if status == "draft" or rep.get("draft") is True and not draft or fid in torn:
             status = "planned"  # only the plan makes a draft, and a draft is set below
         row = dict(rep)
         if fid in torn:
@@ -331,7 +331,7 @@ def feature_rows(plan, ctx):
         if "milestone" in rep and (_s(rep.get("milestone")) or None) != (_s(f.get("milestone")) or None):
             status = "planned"  # the payload disagrees with the plan about where it belongs: nothing is trusted
             row.pop("statusText", None)
-        if status == "planned" and rep.get("status") == "draft":
+        if status == "planned" and (rep.get("status") == "draft" or rep.get("draft") is True):
             row.pop("statusText", None)
         row.update({"id": fid, "title": _s(rep.get("title")) or _s(f.get("title")),
                     "milestone": _s(f.get("milestone")) or None, "owner": _s(rep.get("owner")) or _s(f.get("owner")),

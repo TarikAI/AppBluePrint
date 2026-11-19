@@ -1265,6 +1265,35 @@ class ReviewRoundTwoTest(TempRoot):
         self.assertNotEqual(plan_only["plan"]["features"][0]["criteria"][0]["scenario"], "CHANGED")
         self.assertEqual(plan_only["plan"]["unknowns"][0]["blocks"], ["P2"])
 
+
+    # round 3
+    def test_a_payload_entry_marked_draft_for_a_plan_feature_that_is_not_is_planned(self):
+        ok = stub_features(inbox="accepted")
+        ctx = self.milestone([ok[0], dict(ok[1], draft=True)])
+        self.assertFalse(ctx["milestones"][0]["done"])
+        self.assertEqual(ctx["milestones"][0]["progress"]["accepted"], 1)
+        text = roadmap_md.views(ctx)["ROADMAP.md"]
+        self.assertIn("| F-inbox Review snags in the inbox | planned |", text)
+        self.assertIn("Features: accepted 1 of 2", text)
+
+    def test_a_feature_counted_planned_for_disagreeing_entries_shows_planned(self):
+        ok = stub_features(inbox="verified")
+        a = dict(ok[1], statusText="verified, 1 criterion awaits evaluation")
+        b = dict(ok[1], status="failed", statusText="failed: C1")
+        for entries in ([ok[0], a, b], [ok[0], b, a]):
+            ctx = self.milestone(entries)
+            row = next(f for f in roadmap.feature_rows(ctx["plan"], ctx) if f["id"] == "F-inbox")
+            self.assertEqual(roadmap.feature_status_text(row), "planned")
+            self.assertIn("| F-inbox Review snags in the inbox | planned |", roadmap_md.views(ctx)["ROADMAP.md"])
+
+    def test_duplicate_entries_that_differ_on_milestone_are_planned_in_either_order(self):
+        ok = stub_features(inbox="accepted")
+        elsewhere = dict(ok[1], milestone="M2")
+        for entries in ([ok[0], ok[1], elsewhere], [ok[0], elsewhere, ok[1]]):
+            ctx = self.milestone(entries)
+            self.assertFalse(ctx["milestones"][0]["done"])
+            self.assertEqual(ctx["milestones"][0]["progress"]["accepted"], 1)
+
     # next on a plan that already fails validation: fix the plan first
     def test_next_on_a_broken_plan_is_to_fix_it(self):
         plan = v2_plan()
