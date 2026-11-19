@@ -85,11 +85,13 @@ def _write_atomic(root, path, rel, data):
     target = Path(os.path.realpath(path))
     tmp = target.with_name(target.name + ".tmp")
     tmp_rel = _shown(root, tmp, rel + ".tmp")
+    keep = False  # a file already at the temporary name that could not be opened for writing is not ours to remove
     try:
         try:
             tmp.write_bytes(data)
         except OSError as exc:
             kind = "blocked" if tmp.exists() and not tmp.is_file() else "tmp"
+            keep = tmp.exists()
             raise _WriteError(_shown(root, getattr(exc, "filename", None), tmp_rel) if kind == "tmp" else tmp_rel,
                               getattr(exc, "strerror", None) or str(exc), kind)
         try:
@@ -98,7 +100,7 @@ def _write_atomic(root, path, rel, data):
             raise _WriteError(rel, getattr(exc, "strerror", None) or str(exc), "replace")
     except BaseException:
         with contextlib.suppress(OSError):
-            if tmp.is_file():
+            if not keep and tmp.is_file():
                 tmp.unlink()
         raise
 

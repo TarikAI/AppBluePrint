@@ -525,15 +525,18 @@ class FailureTest(MigrateCase):
     def test_a_read_only_plan_is_refused_before_anything_is_written(self):
         mode = self.plan_path.stat().st_mode
         os.chmod(self.plan_path, stat.S_IREAD)
-        self.addCleanup(os.chmod, self.plan_path, mode)
-        shot = snapshot(self.root)
-        r = self.migrate("--json")
-        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-        err = self.envelope(r)
-        self.assertEqual(err["error"]["code"], "write-failed")
-        self.assertIn("blueprint.json", err["error"]["entry"])
-        self.assertEqual(snapshot(self.root), shot)  # no backup, no half-written state
-        self.assertFalse((self.bp / "blueprint.v1.json").exists())
+        try:  # restored here, not in a cleanup: cleanups run after tearDown has removed the folder
+            shot = snapshot(self.root)
+            r = self.migrate("--json")
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            err = self.envelope(r)
+            self.assertEqual(err["error"]["code"], "write-failed")
+            self.assertIn("blueprint.json", err["error"]["entry"])
+            self.assertEqual(snapshot(self.root), shot)  # no backup, no half-written state
+            self.assertFalse((self.bp / "blueprint.v1.json").exists())
+            self.assertTrue(self.plan_path.is_file())  # the plan is never absent after a refusal, on any platform
+        finally:
+            os.chmod(self.plan_path, mode)
 
     def test_an_interrupted_replace_leaves_the_plan_whole_and_the_backup_kept(self):
         original = self.plan_path.read_bytes()
@@ -1014,12 +1017,17 @@ class Round2Test(MigrateCase):
     def test_a_temporary_file_that_cannot_be_written_keeps_its_own_name(self):
         tmp = self.bp / "blueprint.json.tmp"
         tmp.write_text("x", encoding="utf-8")
+        original = self.plan_path.read_bytes()
         os.chmod(tmp, stat.S_IREAD)
-        self.addCleanup(os.chmod, tmp, stat.S_IWRITE | stat.S_IREAD)
-        code, out, err, exc = self.run_in_process()
-        self.assertEqual((code, exc.error, exc.entry), (1, "write-failed", ".blueprint/blueprint.json.tmp"))
-        self.assertTrue(exc.message.startswith("cannot write .blueprint/blueprint.json.tmp: "), exc.message)
-        self.assertTrue(exc.next.startswith("make .blueprint/blueprint.json.tmp writable, then run: python"), exc.next)
+        try:  # restored here, not in a cleanup: cleanups run after tearDown has removed the folder
+            code, out, err, exc = self.run_in_process()
+            self.assertEqual((code, exc.error, exc.entry), (1, "write-failed", ".blueprint/blueprint.json.tmp"))
+            self.assertTrue(exc.message.startswith("cannot write .blueprint/blueprint.json.tmp: "), exc.message)
+            self.assertTrue(exc.next.startswith("make .blueprint/blueprint.json.tmp writable, then run: python"), exc.next)
+            self.assertTrue(tmp.is_file())  # a file we could not open is not ours to remove (POSIX could unlink it)
+            self.assertEqual(self.plan_path.read_bytes(), original)
+        finally:
+            os.chmod(tmp, stat.S_IWRITE | stat.S_IREAD)
 
     def test_a_hard_linked_plan_gets_one_warning(self):
         other = self.root / "other-name.json"
