@@ -1,6 +1,12 @@
 """commands.progress: sync, status, owner, claim, mark, verify, guard, hook, moved from blueprint.py 1.3.0 (contract 1.5).
 
-Domain modules (status, data, verify) are imported inside the handlers (contract 1.2).
+Domain modules (status, data, verify) are imported inside the handlers (contract 1.2). The 2.0 flags of these
+commands (7.2) are declared here and reach their implementation through hooks (1.4); a flag whose module is not built
+answers not-built:
+
+    status --feature F          status_card (features)      status --features            features
+    status --milestone M/--tasks   roadmap                  status --unknowns            unknowns
+    verify --feature F [--criterion C] [--repeat N] [--by ID] [--json]   verify_feature (records)
 """
 import argparse
 import json
@@ -8,11 +14,132 @@ import os
 import sys
 from pathlib import Path
 
-from bp.core import append_log, bp_dir, die, find_root, git_head, norm, now_iso
+from bp import registry
+from bp.version import TOOL_VERSION
+from bp.core import (BlueprintError, append_log, bp_dir, die, emit, find_root, git_head, norm, now_iso, path_key,
+                     project_path)
 from bp.globs import pattern_instance_rx
+from bp.learn import record_incident
 from bp.plan import GLYPH, LABEL, STATES, load_plan, load_state, owner_of, planned_file, save_state
+from bp.registry import command_built
 from bp.validate import validate_plan
 from bp.views.render import render_all
+
+# status flags of 2.0 -> the module that implements them (through its status_lines or status_card hook)
+STATUS_FLAGS = {"feature": "features", "features": "features", "milestone": "roadmap", "tasks": "roadmap",
+                "unknowns": "unknowns"}
+
+
+def not_built(what, module):
+    """The 7.3 not-built error for a 2.0 feature whose module is missing from this build."""
+    return BlueprintError("not-built", f"{what} is not built in tool {TOOL_VERSION}; it arrives with "
+                          f"{registry.ARRIVES.get(module, 'a later workstream')} (app-blueprint 2.0)",
+                          next="update the skill, then run: python <skill>/scripts/blueprint.py init --refresh-tool")
+
+
+def register(name, p):
+    """Arguments of sync, status, owner, claim, mark, verify, guard and hook (cli.main calls this per subcommand)."""
+    if name == "sync":
+        p.add_argument("--quiet", action="store_true")
+        p.add_argument("--no-render", action="store_true")
+        p.add_argument("--strict", action="store_true", help="exit 1 if there are unplanned files or missing modify targets (for CI)")
+        p.set_defaults(fn=cmd_sync)
+    elif name == "status":
+        p.add_argument("--owner")
+        p.add_argument("--phase")
+        p.add_argument("--next", action="store_true", help="list files ready to build now")
+        p.add_argument("--json", action="store_true")
+        p.add_argument("--features", action="store_true", help="feature counts by status")
+        p.add_argument("--feature", metavar="F", help="the card of one feature: files, criteria, evaluation")
+        p.add_argument("--milestone", metavar="M", help="progress of one milestone")
+        p.add_argument("--tasks", action="store_true", help="tasks and their status")
+        p.add_argument("--unknowns", action="store_true", help="open questions and what they block")
+        p.set_defaults(fn=cmd_status)
+    elif name == "owner":
+        p.add_argument("path")
+        p.set_defaults(fn=cmd_owner)
+    elif name == "claim":
+        p.add_argument("path")
+        p.add_argument("--by", required=True)
+        p.add_argument("--note")
+        p.add_argument("--force", action="store_true")
+        p.set_defaults(fn=cmd_claim)
+    elif name == "mark":
+        p.add_argument("path")
+        p.add_argument("state", choices=["built", "blocked", "planned"])
+        p.add_argument("--by", required=True)
+        p.add_argument("--note")
+        p.add_argument("--force", action="store_true")
+        p.set_defaults(fn=cmd_mark)
+    elif name == "verify":
+        p.add_argument("--phase")
+        p.add_argument("--owner")
+        p.add_argument("--run", action="store_true")
+        p.add_argument("--timeout", type=int, default=900)
+        p.add_argument("--stale", action="store_true", help="only files whose last passing proof no longer holds")
+        p.add_argument("--feature", metavar="F", help="check a feature's criteria (with --run, records the results)")
+        p.add_argument("--criterion", metavar="C", help="with --feature: only this criterion")
+        p.add_argument("--repeat", type=int, metavar="N", help="with --feature: run each check N times; all must pass")
+        p.add_argument("--by", metavar="ID", help="with --feature: the roster id running the checks")
+        p.add_argument("--json", action="store_true", help="with --feature: print the records as one JSON object")
+        p.set_defaults(fn=cmd_verify)
+    elif name == "guard":
+        p.add_argument("path")
+        p.add_argument("--by", help="owner id (default: $BLUEPRINT_OWNER)")
+        p.set_defaults(fn=cmd_guard)
+    elif name == "hook":
+        p.add_argument("when", choices=["pre", "post"])
+        p.set_defaults(fn=cmd_hook)
+
+
+GUARD_REPAIR = ("Writes are refused until the plan loads. Fix .blueprint/blueprint.json, then run: "
+                "python .blueprint/bin/blueprint.py validate")
+
+
+def _load_for_guard(args, root, rel, ask=False):
+    """The plan for guard and hook pre. A blueprint that exists but cannot be loaded, for any reason (a load error, or
+    a crash, which is also recorded as an incident), refuses every write (exit 2, or the ask decision) except one to
+    .blueprint/blueprint.json itself, so the plan can be repaired."""
+    try:
+        return load_plan(root)
+    except SystemExit as e:
+        if e.code in (0, None):
+            raise
+        if not getattr(e, "printed", True):  # a BlueprintError whose message is not on stderr yet
+            print(f"error: {e.message}", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 - review R2-M1: never let a crash allow a write
+        record_incident(args, exc)
+    if path_key(rel) == path_key(".blueprint/blueprint.json"):
+        sys.exit(0)
+    if ask:
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "ask",
+                                                 "permissionDecisionReason": GUARD_REPAIR}}))
+        sys.exit(0)
+    print(GUARD_REPAIR, file=sys.stderr)
+    sys.exit(2)
+
+
+def _guard_signal(root, msg):
+    """The loop signal for a guard_decision refusal (contract 9.4)."""
+    code = ("guard-unplanned" if " is not in the blueprint" in msg else
+            "guard-wrong-owner" if " is owned by " in msg else None)
+    if code:
+        registry.signal(root, "guard", code)
+
+
+def _write_refusal(args, root, plan, path, by):
+    """The refuse("write") message of a 2.0 module (protected paths, 4.8), or None. A hook that crashes refuses: the
+    guard fails closed, and the crash is recorded as an incident."""
+    try:
+        msg = registry.refusal("write", root, plan, path, by)
+        if isinstance(msg, (tuple, list)):  # (message, error, next): the guard prints the message
+            msg = str(msg[0]) if msg else None
+    except Exception as exc:  # noqa: BLE001 - fail closed, never let a broken hook allow a write
+        record_incident(args, exc)
+        return f"{path}: the guard could not check this write (incident recorded), so it refuses it. Run doctor."
+    if msg:
+        registry.signal(root, "guard", "guard-protected")
+    return msg
 
 
 def cmd_sync(args):
@@ -80,7 +207,7 @@ def cmd_sync(args):
             if len(data_issues) > 12:
                 print(f"    ... and {len(data_issues) - 12} more (see map.html, Data)")
     if not args.no_render:
-        errors, _ = validate_plan(plan)
+        errors, _ = validate_plan(plan, root=root)
         if errors:
             if not args.quiet:
                 print(f"  Views not refreshed: the blueprint has {len(errors)} validation error(s). Run validate.")
@@ -92,19 +219,32 @@ def cmd_sync(args):
 
 
 def cmd_status(args):
-    from bp.status import compute, next_ready, summarize
+    from bp.status import next_ready, summarize
+    from bp.views.context import blocked_by, build_context, status_json
     root = find_root(args.root)
     plan = load_plan(root)
     state = load_state(root)
-    comp = compute(root, plan, state)
+    for flag, module in STATUS_FLAGS.items():  # 2.0 flags need their module (7.2); read with getattr (1.4)
+        if getattr(args, flag, None) and not registry.exists(module):
+            raise not_built(f"status --{flag}", module)
+    ctx = build_context(root, plan, state)
+    comp = ctx["comp"]
     rows = comp["rows"]
     if args.owner:
         rows = [r for r in rows if r["owner"] == args.owner]
     if args.phase:
         rows = [r for r in rows if r["phase"] == args.phase]
     if args.json:
-        print(json.dumps({"rows": rows, "patterns": comp["patterns"], "unplanned": state.get("unplanned", []),
-                          "syncedAt": state.get("syncedAt")}, indent=2, ensure_ascii=False))
+        out = status_json(ctx, {"rows": rows, "patterns": comp["patterns"], "unplanned": state.get("unplanned", []),
+                                "syncedAt": state.get("syncedAt")})
+        print(json.dumps(out, indent=2, ensure_ascii=False))
+        return
+    if getattr(args, "feature", None):  # the feature card only (status_card, features)
+        card = registry.hook("status_card")
+        if card is None:
+            raise not_built("status --feature", "features")
+        for line in card(ctx, args.feature):
+            print(line)
         return
     total = len(rows)
     done = sum(1 for r in rows if r["status"] == "verified")
@@ -129,12 +269,26 @@ def cmd_status(args):
         for r in blocked:
             print(f"    ▲ {r['path']} ({r['owner']}): {r.get('note') or ''}")
     if args.next:
-        ready = next_ready(plan, comp["rows"], args.owner)
+        blocked = set(ctx["blocked"].get("phases") or ())
+        ready = next_ready(plan, comp["rows"], args.owner, blocked_phases=blocked)
         print("\n  Ready to build next:")
+        for ph in plan["phases"]:  # 2.6: files of a phase blocked by an open unknown are not offered
+            if ph.get("id") in blocked and any(r["phase"] == ph["id"] and r["status"] in ("planned", "claimed", "ondisk")
+                                               for r in comp["rows"]):
+                print(f"    (phase {ph['id']} skipped: blocked by {', '.join(blocked_by(ctx, 'phase', ph['id'])) or 'an open unknown'})")
         for r in ready[:20]:
             print(f"    {r['path']}  ({r['owner']}, {r['phase']})")
         if not ready:
             print("    nothing: everything in the current phase is claimed, built or waiting on a dependency")
+    n_stale = sum(1 for r in rows if r.get("stale"))
+    if n_stale and plan.get("_from") != 1:  # contract 4.7; a version 1 plan keeps 1.3.0's output (W0 rule)
+        print(f"\n  ↻ {n_stale} file(s) need re-verifying (inputs changed): verify --stale --run")
+    for _, lines in registry.collect("status_lines", ctx, args):  # 2.0 hook lines, after the 1.x output
+        for line in lines or []:
+            print(line)
+    if plan.get("_from") == 1:  # contract 3.3; the migrate hint only once the command exists (1.5 row d)
+        print("\nSchema version 1: " + ("run migrate to use milestones, features, tasks and unknowns."
+                                        if command_built("migrate") else "it keeps working."))
 
 
 def cmd_owner(args):
@@ -162,6 +316,13 @@ def cmd_claim(args):
     if not planned_file(plan, path) and not any(pattern_instance_rx(p.get("glob", "")).match(path) for p in plan["patterns"]):
         die(f"{path} is not in the blueprint. Propose a blueprint change first.", 3)
     require_owner(plan, path, args.by, args.force)
+    if not getattr(args, "force", False):  # 2.0: refuse("claim") hooks, e.g. a phase blocked by an unknown (2.6)
+        got = registry.refusal("claim", root, plan, path, args.by)
+        if got:  # a message, or (message, error, next) from the hook (review N5)
+            msg, error, nxt = (tuple(got) + (None, None))[:3] if isinstance(got, (tuple, list)) else (got, None, None)
+            raise BlueprintError(error or "blocked-by-unknown", str(msg), entry=f"file {path}", code=3,
+                                 next=nxt or "blueprint.py status --unknowns (or claim again with --force if the "
+                                             "lead says so)")
     set_file_state(root, path, "claimed", args.by, args.note)
     print(f"{args.by} claimed {path}")
 
@@ -183,11 +344,43 @@ def cmd_mark(args):
     print(f"{path}: {args.state} (by {args.by})")
 
 
+def _verify_feature(args, root, plan):
+    """verify --feature F (7.2) through the verify_feature hook of records. Fail closed: exit 0 only when the hook says
+    0 and every record it returns has result pass."""
+    from bp.views.context import build_context
+    fn = registry.hook("verify_feature")
+    if fn is None:
+        raise not_built("verify --feature", "records")
+    records, code = fn(args, build_context(root, plan, load_state(root)))
+    records = list(records or [])
+    if getattr(args, "json", False):
+        emit(args, "verify", {"records": records}, [])
+    ok = code == 0 and type(code) is int and all(isinstance(r, dict) and r.get("result") == "pass" for r in records)
+    sys.exit(0 if ok else 1)
+
+
 def cmd_verify(args):
     from bp.verify import record_file_proofs, run_check, verify_groups
+    feature = getattr(args, "feature", None)
+    with_feature = {"--criterion": getattr(args, "criterion", None), "--repeat": getattr(args, "repeat", None),
+                    "--by": getattr(args, "by", None), "--json": getattr(args, "json", False) or None}
+    used = [k for k, v in with_feature.items() if v is not None]
+    if used and not feature:
+        raise BlueprintError("usage", f"{', '.join(used)} go{'es' if len(used) == 1 else ''} with --feature F",
+                             next="blueprint.py verify --feature F --run", code=64)
+    if getattr(args, "repeat", None) is not None and args.repeat < 1:
+        raise BlueprintError("usage", "--repeat must be 1 or more", next="blueprint.py verify --feature F --run --repeat 3",
+                             code=64)
     root = find_root(args.root)
     plan = load_plan(root)
-    groups = verify_groups(plan, phase=args.phase, owner=args.owner)
+    if feature:
+        _verify_feature(args, root, plan)
+        return
+    only = None
+    if getattr(args, "stale", False):  # files whose last proof passed but no longer holds (contract 4.7)
+        from bp.status import compute
+        only = {r["path"] for r in compute(root, plan, load_state(root))["rows"] if r["stale"]}
+    groups = verify_groups(plan, phase=args.phase, owner=args.owner, only=only)
     if not groups:
         print("No verify commands in scope.")
         return
@@ -206,6 +399,8 @@ def cmd_verify(args):
             print(f"  timed out after {args.timeout}s")
         print(f"  {'passed' if ok else 'FAILED'} for {len(paths)} file(s)")
         failed += 0 if ok else 1
+        if not ok:
+            registry.signal(root, "verify", f"verify-{result['result']}")  # 9.4
         record_file_proofs(root, plan, state, cmd, paths, result)
         append_log(root, {"event": "verify", "cmd": cmd, "ok": ok, "files": len(paths)})
     save_state(root, state)
@@ -216,8 +411,22 @@ def cmd_verify(args):
 def cmd_guard(args):
     from bp.status import guard_decision
     root = find_root(args.root)
-    plan = load_plan(root)
-    code, msg = guard_decision(root, plan, args.path, args.by or os.environ.get("BLUEPRINT_OWNER"))
+    rel = project_path(root, args.path)
+    path = rel if rel is not None else norm(args.path)  # outside the project: decided on the given path, as 1.x
+    if (bp_dir(root) / "blueprint.json").exists():
+        plan = _load_for_guard(args, root, path)
+    else:
+        try:
+            plan = load_plan(root)
+        except BlueprintError as e:  # no blueprint: the 1.x message (already printed) and exit 1, not the guard's 2
+            sys.exit(e.code)
+    by = args.by or os.environ.get("BLUEPRINT_OWNER")
+    code, msg = guard_decision(root, plan, path, by)
+    if code:
+        _guard_signal(root, msg)
+    else:  # 2.0: refuse("write") hooks after the 1.x guard allows (contract 1.4, 4.8)
+        msg = _write_refusal(args, root, plan, path, by)
+        code = 2 if msg else 0
     if msg:
         print(msg, file=sys.stderr)
     sys.exit(code)
@@ -235,18 +444,27 @@ def cmd_hook(args):
     root = find_root(args.root or payload.get("cwd"))
     if not raw or not (bp_dir(root) / "blueprint.json").exists():
         sys.exit(0)
-    try:
-        rel = norm(os.path.relpath(Path(raw).resolve(), root))
-    except ValueError:
+    rel = project_path(root, raw)
+    if rel is None:  # outside the project: not this guard's business (1.x)
         sys.exit(0)
-    if rel.startswith("../"):
+    # BLUEPRINT_GUARD: block (default) stops the write and tells the agent why;
+    # ask lets the person approve it; off disables the guard.
+    mode = os.environ.get("BLUEPRINT_GUARD", "block")
+    if mode not in ("block", "ask", "off"):  # review R2-N4: an unknown value is block (1.x allowed every write)
+        print(f"BLUEPRINT_GUARD={mode!r} is not one of block, ask, off.", file=sys.stderr)  # treated as block
+        mode = "block"
+    if args.when == "pre" and mode == "off":
         sys.exit(0)
-    plan = load_plan(root)
+    plan = _load_for_guard(args, root, rel, ask=mode == "ask") if args.when == "pre" else load_plan(root)
     if args.when == "pre":
-        # BLUEPRINT_GUARD: block (default) stops the write and tells the agent why;
-        # ask lets the person approve it; off disables the guard.
-        mode = os.environ.get("BLUEPRINT_GUARD", "block")
-        code, msg = guard_decision(root, plan, rel, os.environ.get("BLUEPRINT_OWNER"))
+        by = os.environ.get("BLUEPRINT_OWNER")
+        code, msg = guard_decision(root, plan, rel, by)
+        if mode in ("block", "ask"):
+            if code:
+                _guard_signal(root, msg)
+            else:  # 2.0: refuse("write") hooks after the 1.x guard allows (contract 1.4, 4.8)
+                msg = _write_refusal(args, root, plan, rel, by)
+                code = 2 if msg else 0
         if code and mode == "block":
             print(msg, file=sys.stderr)
             sys.exit(2)

@@ -12,10 +12,22 @@ Work toward 2.0 on the `v2` branch. The tool reports version 1.9.N until 2.0.0 i
 - `init --refresh-tool` upgrades an old single-file copy to the package. The copy is safe to interrupt: an incomplete or mismatched copy makes `guard` and the pre-write hook refuse (exit 2) and other commands exit 1 with the command that repairs it. It also copes with read-only files and with folders another program holds open.
 - `doctor` shows whether a project's copy is the single-file or the package layout, and the plan's schema version.
 - Incident records name the module file and function (`rules.py:120:validate`).
+- `init` writes a version 2 `blueprint.json`. Version 1 plans keep working and are never rewritten; `validate` adds a `schema-v1` warning and `status` says so in one line. `status --json` and `export json` gain `features`, `milestones`, `tasks` and `unknowns` (empty for a version 1 plan).
+- Proofs are stricter. Hashing ignores line-ending differences, so a 1.x proof of a CRLF file goes stale once. A file whose planned dependency changed is no longer verified. `verify --stale` lists what needs checking again.
+- `guard` and the pre-write hook refuse (exit 2) whenever `.blueprint/blueprint.json` exists but cannot be loaded, whatever the reason: bad JSON, wrong encoding, a wrong shape or version. The one write still allowed is the fix to `blueprint.json` itself. 1.3.0 let writes through in some of these cases.
+- The guard resolves every spelling of a path before deciding: mixed separators, case, 8.3 short names, `..`, trailing dots, `\\?\` and network-share forms on Windows.
+- An unknown `BLUEPRINT_GUARD` value now blocks and says which values are accepted. 1.3.0 allowed every write.
+- The `version` field is checked when the plan loads, not only by `validate`; a plan from a newer tool is refused with a message that says to update the tool.
+- With `--json`, a plan that cannot load prints a JSON failure object on stdout as well as the text on stderr.
+- `--help` lists the 2.0 commands after the existing ones. Commands that are not built yet say so and name the version that brings them.
 
 ### Added
 
 - `maintainers/design/v2-contract.md`: the contract for 2.0 (package layout, schema 2, evidence, the study engine, commands and workstreams).
+- Plug-in points for the 2.0 modules (roadmap, features, unknowns, evidence, records): each adds its validation rules, views, status lines, map tabs and commands as a new file, without editing the core. A module that is present but broken is named in the error, and `doctor` still runs to report it.
+- Generated views beyond `STRUCTURE.md`, `ROSTER.md` and `map.html` are tracked in `state.json`, removed when no longer produced, and never written over a file of yours with the same name.
+- `.blueprint/bin/MANIFEST` lists the files of the copied tool, so an incomplete copy is detected and refused.
+- Test fixtures for the study lanes, all synthetic and built in code: APK, AAB, IPA, Electron asar and hostile archives (checked against the real `aapt2` and `dexdump`), and HAR files, source maps, bundles, captures, SQLite files and JADX, apktool and rea exports.
 
 ## [1.3.0] - 2026-11-18
 

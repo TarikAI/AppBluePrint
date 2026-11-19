@@ -1,59 +1,75 @@
 {
+  "stateVersion": 2,
   "files": {
     "apps/web/src/api.ts": {
       "state": "claimed",
       "by": "frontend-engineer",
-      "at": "2026-11-19T05:36:24Z"
+      "at": "2026-11-19T15:35:34Z"
     },
     "crates/snag-api/src/main.rs": {
       "state": "built",
       "by": "backend-engineer",
-      "at": "2026-11-19T05:36:25Z"
+      "at": "2026-11-19T15:35:34Z"
     },
     "crates/snag-core/src/lib.rs": {
       "verified": {
         "ok": true,
         "cmd": "python -c \"pass\"",
-        "at": "2026-11-19T05:36:25Z",
-        "sha": "eaae095dc502a4b64e1cf81beb134d0dd3395c5e"
+        "at": "2026-11-19T15:35:34Z",
+        "sha": "a01a88d2d75fb3aacc9333400725f4ae31a86244",
+        "inputs": {
+          "crates/snag-core/src/lib.rs": "sha256:54c3122412d63137b4ac72c5ef10c874cc3ef3d035d83ad971c4645bcf907b94"
+        }
       }
     },
     "crates/snag-api/migrations/0001_snags.sql": {
       "verified": {
         "ok": true,
         "cmd": "python -c \"pass\"",
-        "at": "2026-11-19T05:36:25Z",
-        "sha": "f3b5de686992bc667d3bfa4100d550cd7bf8f939"
+        "at": "2026-11-19T15:35:34Z",
+        "sha": "336dbecffbd893f05ffa3c5ffb7037d18ffab42d",
+        "inputs": {
+          "crates/snag-api/migrations/0001_snags.sql": "sha256:21d20b4d9377a89813a13ed3c8dc5aca98e4b762e0c782958e30babf01f3ef6f"
+        }
       }
     },
     "Cargo.toml": {
       "verified": {
         "ok": true,
         "cmd": "python -c \"pass\"",
-        "at": "2026-11-19T05:36:25Z",
-        "sha": "f30e2a958d607f9dfa096510a39adff03f74bf5c"
+        "at": "2026-11-19T15:35:35Z",
+        "sha": "f49470e4712c014e77a922b46df937e6105c1c2d",
+        "inputs": {
+          "Cargo.toml": "sha256:563f8e613b9ac0e9f74e8d14f0e6f57db12a1bb336a4927076d9c128dfcc9f2d"
+        }
       }
     },
     ".env.example": {
       "verified": {
         "ok": true,
         "cmd": "python -c \"pass\"",
-        "at": "2026-11-19T05:36:25Z",
-        "sha": "de10024ec5f13309f2df4c20cd348e133ddc1d56"
+        "at": "2026-11-19T15:35:35Z",
+        "sha": "38ae86c3745ed5a0b8eb862f233300780e893aa4",
+        "inputs": {
+          ".env.example": "sha256:2e377eb055fed5b8533885e18f1fbc30a1dbc8d49938ea44e3590ba23d23f5e3"
+        }
       }
     },
     "README.md": {
       "verified": {
         "ok": true,
         "cmd": "python -c \"pass\"",
-        "at": "2026-11-19T05:36:25Z",
-        "sha": "be30718c5ddcbb5ab0959f81f835d84276710c99"
+        "at": "2026-11-19T15:35:35Z",
+        "sha": "1cfcfc6c5f11bc8db9cf4f195b5f66a700a824db",
+        "inputs": {
+          "README.md": "sha256:13316a99ef6e3cff0e4486dcf9767177492cefab57940120c647d1edccf83ac8"
+        }
       }
     },
     "apps/web/package.json": {
       "state": "blocked",
       "by": "frontend-engineer",
-      "at": "2026-11-19T05:36:25Z",
+      "at": "2026-11-19T15:35:35Z",
       "note": "waiting on the generated API client"
     }
   },
@@ -67,8 +83,9 @@
   "unplanned": [
     "notes/todo.txt"
   ],
-  "syncedAt": "2026-11-19T05:36:26Z",
-  "head": "e4f436d",
+  "syncedAt": "2026-11-19T15:35:35Z",
+  "head": "453f216",
+  "tasks": {},
   "ignoredTracked": {
     "count": 0,
     "paths": []

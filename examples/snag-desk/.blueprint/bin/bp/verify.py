@@ -6,8 +6,9 @@ timeout is a failure; an OSError from starting the shell propagates (1.x recorde
 import subprocess
 import time
 
-from bp.core import file_sha, now_iso
+from bp.core import now_iso
 from bp.plan import item_verify, owner_of
+from bp.status import HASHER, proof_inputs
 
 
 def verify_groups(plan, phase=None, owner=None, only=None):
@@ -38,10 +39,17 @@ def run_check(cmd, cwd, timeout):
 
 
 def record_file_proofs(root, plan, state, cmd, paths, result):
-    """Record the outcome on every present file of the group, as 1.x did (sha only when it passed)."""
+    """Record the outcome on every present file of the group (contract 4.5). A pass writes the proof: sha (sha1 of the
+    normalised content, so a 1.x tool can still read it) and inputs (the file and its dependency closure, digested).
+    Anything else (fail, timeout, error) writes ok false with the result; only a pass ever counts."""
     ok = result["result"] == "pass"
     for p in paths:
         fp = root / p
         rec = state["files"].setdefault(p, {})
-        if fp.is_file():
-            rec["verified"] = {"ok": ok, "cmd": cmd, "at": now_iso(), "sha": file_sha(fp) if ok else None}
+        if not fp.is_file():
+            continue
+        if ok:
+            rec["verified"] = {"ok": True, "cmd": cmd, "at": now_iso(), "sha": HASHER.sha1(fp),
+                               "inputs": proof_inputs(root, plan, [p])}
+        else:
+            rec["verified"] = {"ok": False, "cmd": cmd, "at": now_iso(), "sha": None, "result": result["result"]}

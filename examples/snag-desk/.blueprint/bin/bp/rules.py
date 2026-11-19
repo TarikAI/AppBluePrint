@@ -1,39 +1,73 @@
 """rules: the 1.x structural rules of validate_plan (files, modules, phases, owners, team), moved from blueprint.py 1.3.0.
 
-validate.validate_plan calls validate(), then data.validate_data(), then validate_team(): the 1.x order.
+validate.validate_findings calls the validate hooks in DOMAIN order (this module's first, then data's, then the 2.0
+modules'), then validate_team(): the 1.x order core, data, team.
 """
 import json
 import re
 
-from bp.version import SCHEMA_VERSION
+from bp.version import SUPPORTED_SCHEMAS
 from bp.core import norm
 from bp.globs import pattern_instance_rx
 from bp.plan import ACTIONS, ROSTER_KINDS, WRITE_ACCESS, item_verify, owner_of, phase_index
 
+# The 1.x VALIDATION_CODES after the data entries, in their 1.x order (contract 7.4; data.CODES comes before these).
+CODES = [
+    (r"^version must be", "version"),
+    (r"^app\.name is empty", "app-name"),
+    (r" without \w+:", "missing-id"),
+    (r"^duplicate ", "duplicate-id"),
+    (r"^no phases", "no-phases"),
+    (r"^stack entry .*missing", "stack-incomplete"),
+    (r"depends on unknown module", "module-dependency"),
+    (r"^module .*empty purpose", "module-purpose"),
+    (r"dependency cycle", "module-cycle"),
+    (r"kind must be agent or human", "roster-kind"),
+    (r"use a repo-relative path", "file-path"),
+    (r"action must be", "file-action"),
+    (r"unknown module", "unknown-module"),
+    (r"unknown phase", "unknown-phase"),
+    (r"empty purpose", "missing-purpose"),
+    (r"no verify command", "missing-verify"),
+    (r"which is not planned", "unplanned-dependency"),
+    (r"lands in a later phase", "later-phase-dependency"),
+    (r"^pattern ", "pattern-incomplete"),
+    (r"needs pattern and owner", "owner-rule-incomplete"),
+    (r"is not in the roster", "owner-not-in-roster"),
+    (r"no owner rule matches", "unowned"),
+    (r"partly overlap", "owner-overlap"),
+    (r"not an agent in team\.json", "team-unknown-agent"),
+    (r"not workspace-write", "team-no-write"),
+]
+
+
+def uniq(items, key, label, E):
+    """The 1.x id check: `<label> without <key>: {...}` for a missing id, `duplicate <label> <key>: <id>` for a repeat
+    (codes missing-id and duplicate-id). Returns the set of ids seen. The 2.0 sections use it too (contract 7.4)."""
+    seen = set()
+    for it in items:
+        v = it.get(key)
+        if not v:
+            E(f"{label} without {key}: {json.dumps(it)[:80]}")
+        elif v in seen:
+            E(f"duplicate {label} {key}: {v}")
+        seen.add(v)
+    return seen
+
 
 def validate(plan, E, W, vctx):
     """The body of 1.x validate_plan up to the data check, unchanged. E and W append an error or a warning."""
-    if plan.get("version") != SCHEMA_VERSION:
-        E(f"version must be {SCHEMA_VERSION}")
+    v = plan.get("version")
+    if not (type(v) is int and v in SUPPORTED_SCHEMAS):  # load_plan rejects these first; direct callers get this
+        E("version must be 1 or 2")
     if not (plan.get("app") or {}).get("name"):
         E("app.name is empty")
 
-    def uniq(items, key, label):
-        seen = set()
-        for it in items:
-            v = it.get(key)
-            if not v:
-                E(f"{label} without {key}: {json.dumps(it)[:80]}")
-            elif v in seen:
-                E(f"duplicate {label} {key}: {v}")
-            seen.add(v)
-        return seen
-
-    mods = uniq(plan["modules"], "id", "module")
-    phases = uniq(plan["phases"], "id", "phase")
-    roster = uniq(plan["roster"], "id", "roster entry")
-    uniq(plan["files"], "path", "file")
-    uniq(plan["patterns"], "id", "pattern")
+    mods = uniq(plan["modules"], "id", "module", E)
+    phases = uniq(plan["phases"], "id", "phase", E)
+    roster = uniq(plan["roster"], "id", "roster entry", E)
+    uniq(plan["files"], "path", "file", E)
+    uniq(plan["patterns"], "id", "pattern", E)
     pidx = phase_index(plan)
     if not plan["phases"]:
         E("no phases: phase 1 must be a walking skeleton")
