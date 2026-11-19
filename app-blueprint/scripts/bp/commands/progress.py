@@ -104,8 +104,9 @@ def cmd_status(args):
     if args.phase:
         rows = [r for r in rows if r["phase"] == args.phase]
     if args.json:
-        print(json.dumps({"rows": rows, "patterns": comp["patterns"], "unplanned": state.get("unplanned", []),
-                          "syncedAt": state.get("syncedAt")}, indent=2, ensure_ascii=False))
+        out = {"rows": rows, "patterns": comp["patterns"], "unplanned": state.get("unplanned", []),
+               "syncedAt": state.get("syncedAt"), "features": [], "milestones": [], "tasks": [], "unknowns": []}
+        print(json.dumps(out, indent=2, ensure_ascii=False))
         return
     total = len(rows)
     done = sum(1 for r in rows if r["status"] == "verified")

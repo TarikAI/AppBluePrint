@@ -10,12 +10,12 @@ import sys
 from pathlib import Path
 
 from bp.version import TOOL_VERSION
-from bp.core import append_log, bp_dir, die, find_root, norm, read_json, write_json
+from bp.core import append_log, bp_dir, die, emit, find_root, norm, read_json, write_json
 from bp.learn import _copy_version, _file_tool_version
 from bp.migrate import plan_version, upgrade_state
-from bp.plan import SKELETON, load_plan, load_state, owner_of, save_state
+from bp.plan import SECTIONS_V2, SKELETON, load_plan, load_state, owner_of, save_state
 from bp.registry import command_built
-from bp.validate import record_friction, validate_plan
+from bp.validate import record_friction, validate_findings, validate_plan
 from bp.views.render import render_all
 from bp.export import agenticteam_tasks, shq
 from bp.install import copy_tool
@@ -29,19 +29,29 @@ def cmd_validate(args):
         team = read_json(Path(args.team))
         if team is None:
             die(f"team file not found: {args.team}")
-    errors, warnings = validate_plan(plan, team)
-    for w in warnings:
-        print("warning:", w)
-    for e in errors:
-        print("error:", e)
-    n_files, n_pat = len(plan["files"]), len(plan["patterns"])
+    found = validate_findings(plan, team, root=root)
+    errors = [f for f in found if f["level"] == "error"]
+    warnings = [f for f in found if f["level"] == "warning"]
     if errors:
         record_friction(root, errors)
+    if getattr(args, "json", False):  # contract 7.2: the findings and the counts
+        counts = {"files": len(plan["files"]), "patterns": len(plan["patterns"]), "modules": len(plan["modules"]),
+                  "phases": len(plan["phases"]), "owners": len(plan["roster"]), "resources": len(plan["resources"])}
+        counts.update({k: len(plan.get(k) or []) for k in SECTIONS_V2})
+        emit(args, "validate", {"errors": errors, "warnings": warnings, "counts": counts}, [])
+        sys.exit(1 if errors else 0)
+    for w in warnings:
+        print("warning:", w["message"])
+    for e in errors:
+        print("error:", e["message"])
+    n_files, n_pat = len(plan["files"]), len(plan["patterns"])
+    if errors:
         print(f"\n{len(errors)} error(s), {len(warnings)} warning(s). The blueprint is not ready.")
         sys.exit(1)
     res = f", {len(plan['resources'])} data resources" if plan["resources"] else ""
+    new = "".join(f", {len(plan[k])} {k}" for k in ("features", "milestones", "tasks", "unknowns") if plan.get(k))
     print(f"OK: {n_files} files, {n_pat} patterns, {len(plan['modules'])} modules, "
-          f"{len(plan['phases'])} phases, {len(plan['roster'])} owners{res}. {len(warnings)} warning(s).")
+          f"{len(plan['phases'])} phases, {len(plan['roster'])} owners{res}{new}. {len(warnings)} warning(s).")
 
 
 def cmd_render(args):
@@ -159,7 +169,7 @@ def cmd_export(args):
     elif fmt == "json":
         print(json.dumps({"app": plan["app"], "phases": plan["phases"], "roster": plan["roster"], "rows": comp["rows"],
                           "patterns": comp["patterns"], "unplanned": state.get("unplanned", []), "syncedAt": state.get("syncedAt"),
-                          "data": data_view(plan, state)},
+                          "data": data_view(plan, state), "features": [], "milestones": [], "tasks": [], "unknowns": []},
                          indent=2, ensure_ascii=False))
     elif fmt == "agenticteam":
         team = read_json(Path(args.team)) if args.team else None

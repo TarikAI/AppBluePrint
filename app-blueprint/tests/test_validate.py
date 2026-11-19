@@ -808,7 +808,8 @@ class FindingsTest(TempRoot):
             self.assertEqual(set(f), {"level", "code", "entry", "message", "next"})
         self.assertEqual([(f["level"], f["code"], f["message"]) for f in found],
                          [("error", "app-name", "app.name is empty"),
-                          ("error", "unknown-module", "file Cargo.toml: unknown module 'nope'")])
+                          ("error", "unknown-module", "file Cargo.toml: unknown module 'nope'"),
+                          ("error", "missing-verify", "file Cargo.toml: no verify command (set it on the file or its module)")])
         errors, warnings = self.v.validate_plan(self.load(plan))
         self.assertEqual((errors, warnings), ([f["message"] for f in found], []))
 
@@ -896,7 +897,7 @@ class FindingsTest(TempRoot):
         self.assertEqual(r.returncode, 1)
         data = json.loads(r.stdout)["data"]
         self.assertEqual([f["code"] for f in data["errors"]], ["app-name"])
-        self.assertEqual([f["code"] for f in data["warnings"]], ["schema-v1"])
+        self.assertEqual([f["code"] for f in data["warnings"]], ["schema-v1", "other"])  # + the example's data warning
         r = self.cli("validate")
         self.assertIn("warning: blueprint.json is schema version 1", r.stdout)
         self.write_plan(v1_plan())

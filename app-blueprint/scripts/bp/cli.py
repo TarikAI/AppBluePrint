@@ -69,6 +69,7 @@ def main(argv=None):
 
     p = add("validate", cmd_validate, "check the plan: fields, phases, dependencies, ownership overlaps")
     p.add_argument("--team", help="AgenticTeam team.json: check owner ids and write access")
+    p.add_argument("--json", action="store_true", help="print the findings and counts as one JSON object")
 
     p = add("render", cmd_render, "write STRUCTURE.md, ROSTER.md and map.html")
     p.add_argument("--check", action="store_true", help="fail if the views are out of date")

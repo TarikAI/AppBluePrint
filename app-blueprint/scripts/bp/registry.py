@@ -1,8 +1,16 @@
 """registry: the module lists and hook collection that let workstreams add behaviour without editing shared files
-(contract 1.4). Imports nothing of bp statically; every module is reached through importlib.
+(contract 1.4). Imports nothing of bp statically; every module is reached through importlib, so a module that a later
+wave adds is picked up by its file alone, and one that does not exist yet is skipped.
+
+Hooks are module-level names (all optional; a module defines only what it needs). Signatures, owners and merge rules
+are those of contract 1.4: CODES, validate, context, file_tags, roster_sections, views, map_payload, status_lines,
+status_json, status_card, verify_feature, refuse, register.
 """
+import importlib
 import importlib.util
 
+DOMAIN = ("rules", "data", "unknowns", "records", "features", "roadmap", "evidence")
+VIEWS = ("views.roadmap_md", "views.features_md")
 COMMAND_TABLE = {   # every subcommand of 2.0 -> its module under bp
     "init": "commands.plan", "validate": "commands.plan", "render": "commands.plan", "contracts": "commands.plan",
     "export": "commands.plan", "sync": "commands.progress", "status": "commands.progress", "owner": "commands.progress",
@@ -10,6 +18,81 @@ COMMAND_TABLE = {   # every subcommand of 2.0 -> its module under bp
     "hook": "commands.progress", "db-check": "commands.data", "feedback": "commands.learn", "report": "commands.learn",
     "doctor": "commands.learn", "migrate": "commands.migrate", "task": "commands.roadmap", "accept": "commands.records",
     "evidence": "commands.evidence", "study": "commands.study"}
+
+# Views that exist only while their section has entries (contract 8): render deletes them, and render --check reports
+# them, when no VIEWS module returns them.
+OPTIONAL_VIEWS = ("ROADMAP.md", "FEATURES.md")
+
+# Where a 2.0 subcommand or flag arrives, for the not-built message (contract 11).
+ARRIVES = {"migrate": "W0-B", "task": "W1-R", "accept": "W3-V", "evidence": "W2-E", "study": "W2-E",
+           "unknowns": "W1-U", "records": "W3-V", "features": "W1-F", "roadmap": "W1-R", "signals": "W3-L"}
+
+
+def _import(name):
+    """bp.<name>, or None when that module does not exist. Any other import error propagates (a bug)."""
+    full = "bp." + name
+    try:
+        return importlib.import_module(full)
+    except ModuleNotFoundError as e:
+        if e.name == full:
+            return None
+        raise
+
+
+def modules(kind):
+    """The modules of DOMAIN or VIEWS that exist, in list order."""
+    names = {"DOMAIN": DOMAIN, "VIEWS": VIEWS}[kind.upper()]
+    return [m for m in (_import(n) for n in names) if m is not None]
+
+
+def _short(mod):
+    return mod.__name__[3:] if mod.__name__.startswith("bp.") else mod.__name__
+
+
+def _hooked(name):
+    return [m for m in modules("DOMAIN") + modules("VIEWS") if callable(getattr(m, name, None))]
+
+
+def hook(name):
+    """The hook function `name` of the single module that defines it (status_card, verify_feature), or None. Two
+    modules defining it is a bug."""
+    found = _hooked(name)
+    if len(found) > 1:
+        raise RuntimeError(f"hook {name} is defined by {', '.join(_short(m) for m in found)}; it must have one owner")
+    return getattr(found[0], name) if found else None
+
+
+def collect(hook, *args):
+    """[(module name, result)] of every DOMAIN then VIEWS module defining the hook, called with args, in order."""
+    return [(_short(m), getattr(m, hook)(*args)) for m in _hooked(hook)]
+
+
+def codes():
+    """[(regex, code)]: CODES of the new DOMAIN modules in DOMAIN order, then data.CODES, then rules.CODES (the 1.x
+    list, whose broad regexes must come last, contract 7.4)."""
+    mods = {_short(m): m for m in modules("DOMAIN")}
+    order = [n for n in DOMAIN if n not in ("rules", "data")] + ["data", "rules"]
+    return [entry for n in order if n in mods for entry in getattr(mods[n], "CODES", None) or []]
+
+
+def refusal(action, root, plan, path, by):
+    """The first refusal message of a DOMAIN module's refuse hook (action "write" or "claim"), or None."""
+    for m in _hooked("refuse"):
+        msg = m.refuse(action, root, plan, path, by)
+        if msg:
+            return msg
+    return None
+
+
+def signal(root, signal, code):
+    """Record an automatic loop signal through bp.signals when it exists (contract 9.4). Capture never breaks a
+    command: a missing module is a no-op and any error inside it is ignored."""
+    try:
+        mod = _import("signals")
+        if mod is not None:
+            mod.record(root, signal, code)
+    except Exception:  # noqa: BLE001 - capture is best effort, like learn.store_append
+        pass
 
 
 def exists(name):
