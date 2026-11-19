@@ -5,6 +5,7 @@ last. The package is built in bin/bp.new and swapped in, so a reader sees either
 """
 import os
 import shutil
+import stat
 import sys
 import time
 
@@ -50,9 +51,49 @@ def _replace(src, dst):
             time.sleep(0.2)
 
 
+def _writable(path):
+    """Clear the read-only bit of path (best effort); leaves the other mode bits alone."""
+    try:
+        os.chmod(path, os.stat(path).st_mode | stat.S_IWRITE)
+    except OSError:
+        pass
+
+
+def _copy(src, dst):
+    """Copy the bytes only: a read-only skill file must not become a read-only file in .blueprint/bin."""
+    if os.path.lexists(dst):
+        _writable(dst)
+        os.remove(dst)
+    shutil.copyfile(src, dst)
+
+
 def _rmtree(path):
-    if path.exists():
-        shutil.rmtree(path)
+    """Delete a folder even when files in it are read-only (Windows refuses to delete those).
+
+    The read-only bits are cleared by hand first, so no onerror/onexc handler is needed (their names differ across
+    Python 3.10 to 3.14). Raises OSError if the folder still cannot be deleted, for example when it is in use.
+    """
+    if not os.path.lexists(path):
+        return
+    for folder, dirs, files in os.walk(path):
+        for name in dirs + files:
+            _writable(os.path.join(folder, name))
+    shutil.rmtree(path)
+
+
+def _clear_leftover(path):
+    """Remove a leftover of an interrupted refresh; if it is locked, move it aside; if that fails too, exit 1."""
+    try:
+        _rmtree(path)
+        return
+    except OSError:
+        pass
+    try:
+        os.rename(path, path.with_name(f"bp.stale-{time.time_ns():x}"))
+    except OSError:
+        die(f"Could not remove {path}, left by an interrupted refresh: it is in use. Close what holds it open "
+            "(an editor, a terminal, a running copy of the tool), then run: python <skill>/scripts/blueprint.py "
+            "init --refresh-tool")
 
 
 def copy_tool(root, _stop_after=None):
@@ -70,20 +111,28 @@ def copy_tool(root, _stop_after=None):
     written = []
     # step 2: the package, built beside the old one and swapped in
     new, old, live = dest / "bp.new", dest / "bp.old", dest / "bp"
-    _rmtree(new)  # leftovers of an interrupted refresh
-    _rmtree(old)
+    for stale in sorted(dest.glob("bp.stale-*")):  # leftovers that were locked last time: best effort
+        try:
+            _rmtree(stale)
+        except OSError:
+            pass
+    _clear_leftover(new)  # leftovers of an interrupted refresh
+    _clear_leftover(old)
     pkg = TOOL_HOME / "bp"
     files = _package_files()
     for i, src in enumerate(files):
         rel = src.relative_to(pkg)
         (new / rel).parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, new / rel)
+        _copy(src, new / rel)
         if _stop_after == "2-partial" and i == len(files) // 2:
             return written
     if live.exists():
         _replace(live, old)
     _replace(new, live)
-    _rmtree(old)
+    try:
+        _rmtree(old)  # best effort: the next refresh clears or moves aside what is left
+    except OSError:
+        pass
     written += ["bp/" + p.relative_to(pkg).as_posix() for p in files]
     if _stop_after == 2:
         return written
@@ -91,12 +140,16 @@ def copy_tool(root, _stop_after=None):
     for step, sources in ((3, [TOOL_HOME / "blueprint.py"]), (4, _assets())):
         for src in sources:
             tmp = dest / (src.name + ".tmp")
-            shutil.copy2(src, tmp)
+            _copy(src, tmp)
+            if (dest / src.name).exists():
+                _writable(dest / src.name)  # Windows will not replace a read-only file
             _replace(tmp, dest / src.name)
             written.append(src.name)
         if _stop_after == step:
             return written
     # step 5: VERSION last, so doctor reports the copy current only when it is complete
+    if (dest / "VERSION").exists():
+        _writable(dest / "VERSION")
     (dest / "VERSION").write_text(TOOL_VERSION + "\n", encoding="utf-8")
     written.append("VERSION")
     return written
