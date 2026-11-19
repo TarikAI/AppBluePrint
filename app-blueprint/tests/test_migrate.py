@@ -432,6 +432,20 @@ class MalformedTest(MigrateCase):
             with self.subTest(content=content[:20]):
                 self.refused(content, "bad-json")
 
+    def test_a_huge_integer_is_refused_as_bad_json_with_the_file_unchanged(self):
+        text = json.dumps(v1_plan())
+        self.plan_path.write_bytes((text[:-1] + ', "big": ' + "9" * 5000 + "}").encode("utf-8"))
+        os.utime(self.plan_path, ns=(OLD, OLD))
+        shot = snapshot(self.root)
+        for flags in (["--json"], ["--dry-run", "--json"]):
+            with self.subTest(flags=flags):
+                r = self.migrate(*flags)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertNotIn("Traceback", r.stderr)
+                self.assertEqual(self.envelope(r)["error"]["code"], "bad-json")
+                self.assertTrue(self.envelope(r)["error"]["next"])
+                self.assertEqual(snapshot(self.root), shot)
+
     def test_no_blueprint_and_a_folder_in_its_place(self):
         self.plan_path.unlink()
         r = self.migrate("--json")

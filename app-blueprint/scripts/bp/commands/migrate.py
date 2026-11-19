@@ -160,13 +160,9 @@ def _read_plan(root):
     try:
         original = path.read_bytes()
         return original, json.loads(original.decode("utf-8"), object_pairs_hook=dups), dups.keys
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+    except (OSError, ValueError, RecursionError):  # not readable, not UTF-8, not JSON, or too deep (a ValueError)
         load_raw_plan(root)  # raises no-blueprint / bad-json with the 1.x message; it cannot succeed here
         raise
-    except ValueError:  # a number literal Python refuses to convert; can go once plan.load_raw_plan handles ValueError
-        raise BlueprintError("bad-json", "blueprint.json has a number that is too long to read (more than 4300 digits)",
-                             entry="blueprint.json",
-                             next=f"shorten that number in .blueprint/blueprint.json, then run: {_run(root, 'migrate')}")
 
 
 def _read_state(root):
