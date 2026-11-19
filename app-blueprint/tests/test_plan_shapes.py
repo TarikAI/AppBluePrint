@@ -84,5 +84,6 @@ class ScalarShapeTest(ShapeBase):
                     ["export", "csv"], ["export", "json"], ["export", "codeowners"], ["export", "agenticteam"],
                     ["contracts"], ["guard", "a", "--by", "x"], ["claim", "a", "--by", "x"], ["verify"]):
             r = tb.run(cmd, self.dir)
-            self.assertEqual(r.returncode, 1, (cmd, r.stdout, r.stderr))
+            # 2.0 (orchestrator decision M1): guard fails closed on a plan that cannot load, exit 2 instead of 1
+            self.assertEqual(r.returncode, 2 if cmd[0] == "guard" else 1, (cmd, r.stdout, r.stderr))
             self.assertNotIn("Traceback", r.stderr)

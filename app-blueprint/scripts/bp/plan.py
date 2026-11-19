@@ -5,9 +5,10 @@ load_plan reads any supported schema version and returns a version 2 plan: versi
 behind load_plan never sees a wrongly typed value (contract 3.3).
 """
 import json
+import sys
 
 from bp.version import SCHEMA_VERSION
-from bp.core import bp_dir, die, norm, read_json, write_json
+from bp.core import BlueprintError, bp_dir, die, norm, read_json, write_json
 from bp.globs import glob_match
 from bp.migrate import upgrade_plan, upgrade_state
 
@@ -203,6 +204,8 @@ def _shape_problems_2x(plan):
         bad.append("version is required")
     elif type(v) is not int:
         bad.append(f"version must be a whole number (got {json_kind(v)})")
+    elif v < 1:
+        bad.append(f"version must be 1 or 2 (got {v})")  # a version above 2 is schema-too-new (upgrade_plan)
     for key, table in V2_FIELDS.items():
         sec = plan.get(key)
         if sec is None:
@@ -258,15 +261,28 @@ def normalize_plan(plan):
                             _drop_nulls(x)
 
 
+FIX_NEXT = "fix .blueprint/blueprint.json, then run: python .blueprint/bin/blueprint.py validate"
+
+
+def _load_error(error, msg, next):  # noqa: A002
+    """A plan load error: the 1.x text on stderr (exactly what die() printed), then a BlueprintError (exit 1) that
+    already counts as printed, so --json callers still get the 7.1 failure envelope and guard can fail closed."""
+    print(msg, file=sys.stderr)
+    e = BlueprintError(error, msg, next=next)
+    e.printed = True
+    raise e
+
+
 def load_raw_plan(root):
     """blueprint.json as parsed JSON, untouched (no checks, no upgrade). Writers of the plan start from this (3.3)."""
     path = bp_dir(root) / "blueprint.json"
     if not path.exists():
-        die(f"No blueprint at {path}. Run: blueprint.py init --name \"App name\"")
+        _load_error("no-blueprint", f"No blueprint at {path}. Run: blueprint.py init --name \"App name\"",
+                    'blueprint.py init --name "App name"')
     try:
         return read_json(path)
     except json.JSONDecodeError as e:
-        die(f"blueprint.json is not valid JSON: {e}")
+        _load_error("bad-json", f"blueprint.json is not valid JSON: {e}", FIX_NEXT)
 
 
 def load_plan(root):
@@ -274,11 +290,12 @@ def load_plan(root):
     with every message at once; a version other than 1 or 2 raises schema-too-new. Never writes blueprint.json."""
     raw = load_raw_plan(root)
     if not isinstance(raw, dict):
-        check_plan_shapes(raw)  # exits with the 1.3.0 message
+        _load_error("bad-shape", f"blueprint.json must be an object (got {json_kind(raw)})" + SHAPE_FOOTER, FIX_NEXT)
     bad = _shape_problems_1x(raw) + _shape_problems_2x(raw)
     if bad:
-        die("\n".join("blueprint.json: " + b for b in bad) + SHAPE_FOOTER)
+        _load_error("bad-shape", "\n".join("blueprint.json: " + b for b in bad) + SHAPE_FOOTER, FIX_NEXT)
     plan = upgrade_plan(raw)
+    plan.pop("_from", None)  # an in-memory marker only: a "_from" in the file is ignored (dropped from the plan)
     if raw["version"] == 1:
         plan["_from"] = 1
     normalize_plan(plan)

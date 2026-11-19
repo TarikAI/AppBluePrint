@@ -200,8 +200,8 @@ class GoldenViewsTest(unittest.TestCase):
                     comp = tool.compute(root, plan, state)
                     return ("ok", (errors, warnings), tool.render_structure(plan, state, comp),
                             tool.render_roster(plan, state, comp))
-            except SystemExit as e:
-                return ("exit", e.code, err.getvalue() + (getattr(e, "message", "") or ""))
+            except SystemExit as e:  # a load error already on stderr is not counted twice (getattr: 1.3.0 die())
+                return ("exit", e.code, err.getvalue() + ("" if getattr(e, "printed", True) else e.message))
 
         # 1.5 row k: the top-level version is checked at load from 2.0 on (1.3.0 reported it only in validate)
         version_errors = ("blueprint.json: version is required", "blueprint.json: version must be a whole number",

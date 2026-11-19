@@ -136,7 +136,8 @@ class TempRoot(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
                 bplan.load_plan(self.root)
         except SystemExit as e:
-            return e.code, err.getvalue() + (getattr(e, "message", "") or "")
+            unprinted = "" if getattr(e, "printed", True) else (getattr(e, "message", "") or "")
+            return e.code, err.getvalue() + unprinted
         return None, err.getvalue()
 
 
@@ -204,8 +205,17 @@ class UpgradePlanTest(unittest.TestCase):
         up["features"].clear()
         self.assertEqual(raw, v2_plan())
 
+    def test_zero_or_negative_is_a_shape_error(self):  # review N3
+        for v in (0, -1):
+            raw = v1_plan()
+            raw["version"] = v
+            with self.assertRaises(core.BlueprintError) as cm:
+                migrate.upgrade_plan(raw)
+            self.assertEqual((cm.exception.error, cm.exception.message),
+                             ("bad-shape", "blueprint.json: version must be 1 or 2"))
+
     def test_other_versions_are_schema_too_new(self):
-        for v in (3, 0, -1, 99):
+        for v in (3, 99, 2 ** 70):
             with self.subTest(version=v):
                 raw = v1_plan()
                 raw["version"] = v

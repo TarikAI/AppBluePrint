@@ -28,6 +28,8 @@ def upgrade_plan(raw):
         raise BlueprintError("bad-shape", f"blueprint.json: version {what}", next="fix it, then run validate")
     if v == 2:
         return copy.deepcopy(raw)
+    if v < 1:
+        raise BlueprintError("bad-shape", "blueprint.json: version must be 1 or 2", next="fix it, then run validate")
     if v != 1:
         raise BlueprintError("schema-too-new", f"blueprint.json is schema version {v}; this tool reads 1 and 2",
                              next="update the skill, then run init --refresh-tool")

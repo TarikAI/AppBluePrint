@@ -92,6 +92,47 @@ def register(name, p):
         p.set_defaults(fn=cmd_hook)
 
 
+def project_path(root, raw):
+    """The path guard and hook pre decide on (one function, so they cannot drift): raw resolved against the project
+    root (an absolute path as it is), with '.', '..', repeated separators, symlinks and junctions resolved, and on
+    Windows backslashes and letter case taken from the disk; then made root-relative with forward slashes. None when
+    it resolves outside the project (or on another drive)."""
+    p = Path(str(raw))
+    if not p.is_absolute():
+        p = Path(root) / p
+    try:
+        rel = norm(os.path.relpath(p.resolve(), Path(root).resolve()))
+    except (ValueError, OSError):
+        return None
+    if rel == ".." or rel.startswith("../"):
+        return None
+    return rel
+
+
+GUARD_REPAIR = ("Writes are refused until the plan loads. Fix .blueprint/blueprint.json, then run: "
+                "python .blueprint/bin/blueprint.py validate")
+
+
+def _load_for_guard(root, rel, ask=False):
+    """The plan for guard and hook pre. A blueprint that exists but cannot load (any load error) refuses every write
+    (exit 2, or the ask decision) except one to .blueprint/blueprint.json itself, so the plan can be repaired."""
+    try:
+        return load_plan(root)
+    except SystemExit as e:
+        if e.code in (0, None):
+            raise
+        if not getattr(e, "printed", True):  # a BlueprintError whose message is not on stderr yet
+            print(f"error: {e.message}", file=sys.stderr)
+        if rel == ".blueprint/blueprint.json":
+            sys.exit(0)
+        if ask:
+            print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "ask",
+                                                     "permissionDecisionReason": GUARD_REPAIR}}))
+            sys.exit(0)
+        print(GUARD_REPAIR, file=sys.stderr)
+        sys.exit(2)
+
+
 def _guard_signal(root, msg):
     """The loop signal for a guard_decision refusal (contract 9.4)."""
     code = ("guard-unplanned" if " is not in the blueprint" in msg else
@@ -377,13 +418,21 @@ def cmd_verify(args):
 def cmd_guard(args):
     from bp.status import guard_decision
     root = find_root(args.root)
-    plan = load_plan(root)
+    rel = project_path(root, args.path)
+    path = rel if rel is not None else norm(args.path)  # outside the project: decided on the given path, as 1.x
+    if (bp_dir(root) / "blueprint.json").exists():
+        plan = _load_for_guard(root, path)
+    else:
+        try:
+            plan = load_plan(root)
+        except BlueprintError as e:  # no blueprint: the 1.x message (already printed) and exit 1, not the guard's 2
+            sys.exit(e.code)
     by = args.by or os.environ.get("BLUEPRINT_OWNER")
-    code, msg = guard_decision(root, plan, args.path, by)
+    code, msg = guard_decision(root, plan, path, by)
     if code:
         _guard_signal(root, msg)
     else:  # 2.0: refuse("write") hooks after the 1.x guard allows (contract 1.4, 4.8)
-        msg = _write_refusal(args, root, plan, norm(args.path), by)
+        msg = _write_refusal(args, root, plan, path, by)
         code = 2 if msg else 0
     if msg:
         print(msg, file=sys.stderr)
@@ -402,17 +451,16 @@ def cmd_hook(args):
     root = find_root(args.root or payload.get("cwd"))
     if not raw or not (bp_dir(root) / "blueprint.json").exists():
         sys.exit(0)
-    try:
-        rel = norm(os.path.relpath(Path(raw).resolve(), root))
-    except ValueError:
+    rel = project_path(root, raw)
+    if rel is None:  # outside the project: not this guard's business (1.x)
         sys.exit(0)
-    if rel.startswith("../"):
+    # BLUEPRINT_GUARD: block (default) stops the write and tells the agent why;
+    # ask lets the person approve it; off disables the guard.
+    mode = os.environ.get("BLUEPRINT_GUARD", "block")
+    if args.when == "pre" and mode == "off":
         sys.exit(0)
-    plan = load_plan(root)
+    plan = _load_for_guard(root, rel, ask=mode == "ask") if args.when == "pre" else load_plan(root)
     if args.when == "pre":
-        # BLUEPRINT_GUARD: block (default) stops the write and tells the agent why;
-        # ask lets the person approve it; off disables the guard.
-        mode = os.environ.get("BLUEPRINT_GUARD", "block")
         by = os.environ.get("BLUEPRINT_OWNER")
         code, msg = guard_decision(root, plan, rel, by)
         if mode in ("block", "ask"):

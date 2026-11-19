@@ -190,6 +190,7 @@ class BlueprintError(SystemExit):
         self.message = message
         self.entry = entry
         self.next = next
+        self.printed = False  # True when the human message is already on stderr (the plan load errors keep 1.x text)
 
     def __str__(self):
         return self.message

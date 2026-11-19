@@ -85,11 +85,13 @@ def _guarding(args):
 
 
 def report_error(args, e):
-    """Print a BlueprintError: the 7.1 failure envelope on stdout with --json, else `error:` and `  next:` on stderr."""
+    """Print a BlueprintError: `error:` and `  next:` on stderr (unless already printed there), and with --json also
+    the 7.1 failure envelope as the only thing on stdout."""
     if getattr(args, "json", False):
         print(json.dumps({"ok": False, "command": args.cmd, "error": {"code": e.error, "message": e.message,
                                                                       "entry": e.entry, "next": e.next}},
                          indent=2, ensure_ascii=False))
+    if getattr(e, "printed", False):
         return
     print(f"error: {e.message}", file=sys.stderr)
     if e.next:
