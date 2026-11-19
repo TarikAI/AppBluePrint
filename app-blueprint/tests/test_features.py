@@ -35,7 +35,7 @@ def messages(plan, code):
 
 
 def feat(plan, fid):
-    return next(f for f in plan["features"] if f["id"] == fid)
+    return next(f for f in plan["features"] if f.get("id") == fid)
 
 
 def file_(plan, path):
@@ -755,7 +755,7 @@ class HooksTest(ProjectBase):
 
     def test_map_payload_and_status_json(self):
         pay = features.map_payload(self.ctx())
-        self.assertEqual(set(pay), {"features", "featureStates", "featureGlyph", "featureLabel", "levels"})
+        self.assertEqual(set(pay), {"features", "featureStates", "featureGlyph", "featureLabel", "levels", "featureNext"})
         self.assertEqual(pay["featureStates"], ["draft", "planned", "building", "built", "verified", "accepted", "failed", "blocked"])
         self.assertEqual(pay["featureGlyph"], {"draft": "◇", "planned": "○", "building": "◑", "built": "●", "verified": "✔",
                                                "accepted": "◉", "failed": "✖", "blocked": "▲"})
@@ -1026,6 +1026,11 @@ class MapScriptsTest(ProjectBase):
             self.assertIn("blueprint.py render", out["text"])
             self.assertEqual([n["label"] for n in out["build"]], ["No features yet"])
 
+    def test_the_empty_state_uses_the_payloads_next_step(self):
+        out = self.js({"rows": [], "features": [], "featureNext": "Run: blueprint.py migrate, then add features[]"})
+        self.assertIn("Run: blueprint.py migrate", out["text"])
+        self.assertEqual(out["build"][0]["title"], "Run: blueprint.py migrate, then add features[]")
+
     def test_the_tab_and_the_branch_mode(self):
         self.plan["patterns"].append({"id": "screen", "glob": "apps/web/src/screens/*.tsx", "module": "web", "phase": "P1",
                                       "purpose": "screens", "instance": "one screen", "features": ["F-inbox"]})
@@ -1087,6 +1092,449 @@ class MindMapSurfaceTest(unittest.TestCase):
                   "console.log(typeof mindMap, typeof BP_BRANCHES);")
         r = subprocess.run([NODE, "-e", script, str(S.SKILL / "assets" / "mindmap.js")], capture_output=True, text=True)
         self.assertEqual((r.returncode, r.stdout.strip()), (0, "function undefined"), r.stderr)
+
+
+# ------------------------------------------------------------------------------------------ review round 1
+
+def features_rows(feature, chk=None):
+    """The criteria rows of the payload for one feature, with synthetic checks."""
+    plan = {"features": [dict(feature, id="F-x", title="t", statement="s", kind="add", owner="o")], "files": [], "patterns": [],
+            "roster": [{"id": "o"}], "owners": [], "milestones": []}
+    ctx = {"plan": plan, "comp": {"rows": [], "patterns": []}, "checks": {"F-x": chk} if chk is not None else {}}
+    features.context(Path("."), plan, {"files": {}, "patterns": {}}, ctx)
+    return ctx["features"][0]["criteria"]
+
+
+class ReviewValidationTest(unittest.TestCase):
+    def test_a_command_criterion_cannot_require_manual(self):
+        p = v2_plan()
+        feat(p, "F-log-snag")["criteria"][0]["level"] = "manual"
+        found = findings(p, "criterion-level")
+        self.assertEqual(len(found), 1)
+        self.assertIn("criterion F-log-snag/C1: level manual needs an evaluation; remove verify or lower the level", found[0]["message"])
+        self.assertEqual(validate.classify_error(found[0]["message"]), "criterion-level")
+        self.assertTrue(found[0]["next"])
+        p = v2_plan()  # inherited from the feature level
+        feat(p, "F-log-snag")["level"] = "manual"  # C1 inherits it; C2 says unit itself
+        self.assertEqual(len(findings(p, "criterion-level")), 1)
+        feat(p, "F-log-snag")["criteria"][1].pop("level")
+        self.assertEqual(len(findings(p, "criterion-level")), 2)
+        p = v2_plan()  # a criterion without verify may require manual; the example's does
+        self.assertEqual(findings(p, "criterion-level"), [])
+        feat(p, "F-inbox")["criteria"][0]["verify"] = "   "  # a blank verify is no verify
+        self.assertEqual(findings(p, "criterion-level"), [])
+        feat(p, "F-inbox")["criteria"][0]["verify"] = "pnpm test"
+        self.assertEqual(len(findings(p, "criterion-level")), 1)
+
+    def test_an_id_that_is_the_old_placeholder_is_still_checked(self):
+        p = v2_plan()
+        feat(p, "F-inbox")["id"] = "?"
+        self.assertIn("feature id '?' has the wrong form", messages(p, "bad-id")[0])
+
+    def test_features_without_an_id_are_each_reported_and_do_not_hide_the_rest(self):
+        p = v2_plan()
+        a, b = copy.deepcopy(feat(p, "F-inbox")), copy.deepcopy(feat(p, "F-inbox"))
+        del a["id"], b["id"]
+        del feat(p, "F-log-snag")["kind"]  # a later feature's own problem is still found
+        p["features"] = [a, b] + p["features"]
+        self.assertEqual(len(findings(p, "missing-id")), 2)
+        self.assertEqual(len(findings(p, "feature-incomplete")), 1)
+        self.assertEqual(findings(p, "feature-no-files"), [], "no spurious 'no planned file' for an id-less feature")
+        self.assertEqual(findings(p, "feature-no-criteria"), [])
+
+    def test_source_study_has_the_study_id_form(self):
+        p = v2_plan()
+        feat(p, "F-inbox")["source"] = {"study": "nope", "behaviours": []}
+        self.assertIn("study id 'nope' has the wrong form", messages(p, "bad-id")[0])
+        self.assertEqual(validate.classify_error(messages(p, "bad-id")[0]), "bad-id")
+        for good in ("S-acme", "S-" + "a" * 48):
+            feat(p, "F-inbox")["source"] = {"study": good}
+            self.assertEqual(findings(p, "bad-id"), [])
+        feat(p, "F-inbox")["source"] = {"study": "S-" + "a" * 49}
+        self.assertTrue(findings(p, "bad-id"))
+        feat(p, "F-inbox")["source"] = {"behaviours": ["B-1"]}  # no study: nothing to check
+        self.assertEqual(findings(p, "bad-id"), [])
+
+    def test_every_message_classifies_to_its_own_code_and_none_is_other(self):
+        import test_plan_fuzz as tf
+        base = v2_plan()
+        plans = []
+        hostile = copy.deepcopy(base)
+        hostile["features"][0]["id"] = "F-a b: needs title\n"
+        hostile["features"][1]["id"] = "?"
+        hostile["files"][1]["features"] = ["F-a b: needs title\n", "nope"]
+        hostile["features"][0]["criteria"][0]["id"] = "C 1\n"
+        plans.append(hostile)
+        for path in tf.mutation_paths(base):
+            for value in ("", None, "nope", [], "F-x y", 5, {}):
+                plan = copy.deepcopy(base)
+                tf.apply(plan, path, value)
+                plans.append(plan)
+        seen = set()
+        mine = set(features.CODE_EXAMPLES) | {"missing-id", "duplicate-id"}
+        for plan in plans:
+            try:
+                found = validate.validate_findings(plan) if plan.get("version") == 2 else []
+            except (AttributeError, TypeError, KeyError):
+                continue  # a plan that did not come through load_plan: rules.py stumbles first, not this module
+            for f in found:
+                if f["code"] not in mine or not f["entry"] or not str(f["entry"]).split(" ")[0] in ("feature", "criterion", "file", "pattern"):
+                    continue
+                seen.add(f["code"])
+                self.assertNotEqual(validate.classify_error(f["message"]), "other", f["message"])
+                self.assertEqual(validate.classify_error(f["message"]), f["code"], f["message"])
+        self.assertGreater(len(seen), 8)
+
+    def test_every_E_and_W_call_passes_its_code(self):
+        import ast
+        tree = ast.parse((S.SCRIPTS / "bp" / "features.py").read_text(encoding="utf-8"))
+        calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in ("E", "W")]
+        self.assertGreater(len(calls), 20)
+        for n in calls:
+            self.assertIn("code", [k.arg for k in n.keywords], f"line {n.lineno}: E/W without code=")
+
+
+class ReviewDeriveTest(unittest.TestCase):
+    def st(self, feature, its, chk, blocked=False):
+        return features.derive_status(feature, its, chk, blocked)
+
+    def accepted_fixture(self):
+        f = F(criteria=[crit("C1"), crit("C2", verify=False)])
+        chk = checks({"C1": entry(), "C2": entry(via="evaluation", level="e2e")}, True, evaluation({"C2": "pass"}))
+        self.assertEqual(self.st(f, items(*V), chk), "accepted")
+        return f, chk
+
+    def test_m1_a_criterion_nobody_can_identify_keeps_the_feature_below_verified(self):
+        f, chk = self.accepted_fixture()
+        for bad in ({"scenario": "never evaluated"}, {"id": ""}, {"id": None}, {"id": 5}, "junk", None, {"id": "C2"}):
+            with self.subTest(extra=bad):
+                g = dict(f, criteria=f["criteria"] + [bad])
+                self.assertEqual(self.st(g, items(*V), chk), "built")
+        dup = F(criteria=[crit("C1"), crit("C1", verify=False)])
+        self.assertEqual(self.st(dup, items(*V), checks({"C1": entry()}, True, evaluation({"C1": "pass"}))), "built")
+        # the cap is "at most built": lower rungs are unchanged
+        g = dict(f, criteria=f["criteria"] + [{"scenario": "x"}])
+        self.assertEqual(self.st(g, items("ondisk", "built"), chk), "building")
+        self.assertEqual(self.st(g, items("planned"), chk), "planned")
+
+    def test_m1_the_payload_lists_such_a_criterion_with_a_question_mark_and_unknown(self):
+        f = F(criteria=[crit("C1", verify=False), {"scenario": "no id", "action": "a", "expected": "e"},
+                        crit("C1", verify=False), {"id": "", "scenario": "empty"}])
+        rows = features_rows(f)
+        self.assertEqual([r["id"] for r in rows], ["C1", "?", "C1", "?"])
+        self.assertEqual([r["identified"] for r in rows], [False, False, False, False])
+        self.assertEqual([r["result"] for r in rows], ["unknown"] * 4)
+        self.assertTrue(all(r["checkText"] == "unknown" or not r["verify"] for r in rows))
+        solo = features_rows(F(criteria=[crit("C1")]))[0]
+        self.assertTrue(solo["identified"])
+
+    def test_m2a_a_command_pass_needs_a_known_level_that_is_high_enough(self):
+        f = F(level="integration")
+        for level, want in (("unit", "built"), ("integration", "verified"), ("e2e", "verified"), (None, "built"), ("E2E", "built"),
+                            ("bogus", "built"), ("manual", "built"), (5, "built")):
+            with self.subTest(level=level):
+                self.assertEqual(self.st(f, items(*V), checks({"C1": entry(level=level)})), want)
+        # the criterion's own level and the verifyLevel cap (integration when absent, 2.9)
+        e2e = F(criteria=[crit("C1", level="e2e")])
+        self.assertEqual(self.st(e2e, items(*V), checks({"C1": entry(level="e2e")})), "built", "capped at integration")
+        e2e_cap = F(criteria=[crit("C1", level="e2e", verifyLevel="e2e")])
+        self.assertEqual(self.st(e2e_cap, items(*V), checks({"C1": entry(level="e2e")})), "verified")
+        self.assertEqual(self.st(e2e_cap, items(*V), checks({"C1": entry(level="integration")})), "built")
+        capped = F(criteria=[crit("C1", level="e2e", verifyLevel="integration")])
+        self.assertEqual(self.st(capped, items(*V), checks({"C1": entry(level="e2e")})), "built")
+        unit = F(level="unit", criteria=[crit("C1", verifyLevel="unit")])
+        self.assertEqual(self.st(unit, items(*V), checks({"C1": entry(level="e2e")})), "verified")
+        feature_e2e = F(level="e2e")  # no verifyLevel: the command counts as integration at most
+        self.assertEqual(self.st(feature_e2e, items(*V), checks({"C1": entry(level="e2e")})), "built")
+        bad_cap = F(criteria=[crit("C1", verifyLevel="huge")])
+        self.assertEqual(self.st(bad_cap, items(*V), checks({"C1": entry(level="e2e")})), "built")
+        # a command never satisfies manual
+        manual = F(level="manual", criteria=[crit("C1", verifyLevel="e2e")])
+        self.assertEqual(self.st(manual, items(*V), checks({"C1": entry(level="e2e")})), "built")
+        self.assertEqual(self.st(manual, items(*V), checks({"C1": entry(level="e2e")}, True, evaluation({"C1": "pass"}))), "built")
+        # with an evaluation present the same level rule gives the same answer
+        self.assertEqual(self.st(f, items(*V), checks({"C1": entry(level="unit")}, True, evaluation({"C1": "pass"}))), "built")
+
+    def test_m2b_stale_is_fresh_only_when_it_is_false(self):
+        for stale, want in ((False, "verified"), (True, "built"), ("true", "built"), (1, "built"), (None, "built"), ("false", "built"),
+                            (0, "built"), ([], "built")):
+            with self.subTest(stale=stale):
+                self.assertEqual(self.st(F(), items(*V), checks({"C1": entry(stale=stale)})), want)
+        e = entry()
+        del e["stale"]
+        self.assertEqual(self.st(F(), items(*V), checks({"C1": e})), "built", "a missing stale key is stale")
+        f = F(criteria=[crit("C1", verify=False)])
+        for stale in ("true", 1, None):
+            chk = checks({"C1": entry(via="evaluation", level="e2e", stale=stale)}, True, evaluation({"C1": "pass"}))
+            self.assertEqual(self.st(f, items(*V), chk), "verified")
+
+    def test_m2b_the_payload_reports_the_same_staleness(self):
+        for stale, want in ((False, False), (True, True), ("true", True), (1, True), (None, True)):
+            row = features_rows(F(criteria=[crit("C1")]), checks({"C1": entry(stale=stale)}))[0]
+            self.assertIs(row["stale"], want, stale)
+        self.assertIs(features_rows(F(), checks({}))[0]["stale"], False, "no record at all is not stale, it is unknown")
+
+    def test_m2c_only_the_exact_string_pass_is_a_pass(self):
+        for r in ("PASS", " pass", "pass ", "Pass", True, 1, None, ["pass"], {"pass": 1}):
+            with self.subTest(result=r):
+                self.assertEqual(self.st(F(), items(*V), checks({"C1": entry(r)})), "built")
+                self.assertEqual(features_rows(F(), checks({"C1": entry(r)}))[0]["result"], "unknown")
+        self.assertEqual(self.st(F(), items(*V), checks({"C1": entry("pass")})), "verified")
+
+
+class ReviewViewTest(ProjectBase):
+    def md(self, plan=None, chk=None, blocked=None):
+        if plan is not None:
+            self.write_plan(plan)
+        from bp.views import features_md
+        return features_md.views(self.ctx(checks=chk if chk is not None else {}, blocked=blocked))["FEATURES.md"]
+
+    def test_hostile_values_stay_on_one_line_and_inert(self):
+        p = v2_plan()
+        f = feat(p, "F-log-snag")
+        evil = "x\n## injected\n| a | b |\n<img src=x onerror=1> & more"
+        f.update(title=evil, statement=evil, kind="add\n## kind", owner="backend-lead\n## owner", milestone="M1\n## ms",
+                 dependsOn=["F-x\n## dep"], source={"study": "S-a\n## study", "behaviours": []})
+        f["criteria"][0].update(scenario=evil, action=evil, expected=evil, mustNot=evil)
+        file_(p, "crates/snag-api/src/main.rs")["path"] = "crates/snag`api\n## path.rs"
+        file_(p, "crates/snag-api/tests/snags.rs")["dependsOn"] = []
+        blocked = {"phases": set(), "milestones": set(), "features": {"F-log-snag"}, "by": {"feature:F-log-snag": ["U-a\n## unk"]}}
+        text = self.md(p, {}, blocked)
+        for line in text.splitlines():
+            for bad in ("## injected", "## kind", "## owner", "## ms", "## dep", "## study", "## path", "## unk", "| a | b"):
+                self.assertFalse(line.startswith(bad), line)
+        self.assertNotIn("<img", text)
+        self.assertIn("&lt;img src=x onerror=1>", text)
+        self.assertIn("&amp; more", text)
+        self.assertEqual(len([l for l in text.splitlines() if l.startswith("## ")]), 2, "only the two feature headings")
+        self.assertIn("``crates/snag`api ## path.rs``", text)
+
+    def test_a_pipe_in_a_cell_is_escaped(self):
+        p = v2_plan()
+        feat(p, "F-log-snag")["criteria"][0]["expected"] = "a | b"
+        text = self.md(p)
+        self.assertIn("| a \\| b |", text)
+        self.assertNotIn("| a | b |", text)
+
+    def test_a_statement_cannot_start_a_heading(self):
+        p = v2_plan()
+        feat(p, "F-log-snag")["statement"] = "# not a heading"
+        self.assertFalse(any(l.startswith("# not a heading") for l in self.md(p).splitlines()))
+
+    def test_the_check_column_shows_pass_only_for_a_command_result(self):
+        chk = {"F-log-snag": checks({"C1": entry(via="evaluation"), "C2": entry(level="unit")})}
+        text = self.md(v2_plan(), chk)
+        row1 = next(l for l in text.splitlines() if l.startswith("| C1 | The API runs"))
+        self.assertIn("| unknown |", row1)
+        row2 = next(l for l in text.splitlines() if l.startswith("| C2 |"))
+        self.assertIn("| pass (unit) |", row2)
+
+    def test_the_evaluation_column_honours_via(self):
+        p = v2_plan()
+        chk = {"F-inbox": checks({"C1": entry(via="command", level="e2e")}, True, evaluation({}))}
+        row = next(l for l in self.md(p, chk).splitlines() if l.startswith("| C1 | Two snags"))
+        self.assertTrue(row.endswith("| manual | - | unknown |"), row)
+        chk = {"F-inbox": checks({"C1": entry(via="evaluation", level="e2e")}, True, evaluation({"C1": "pass"}))}
+        row = next(l for l in self.md(p, chk).splitlines() if l.startswith("| C1 | Two snags"))
+        self.assertTrue(row.endswith("| manual | - | pass (e2e) |"), row)
+
+    def test_a_pass_below_the_required_level_says_why(self):
+        p = v2_plan()
+        feat(p, "F-inbox")["level"] = "e2e"
+        feat(p, "F-inbox")["criteria"][0]["level"] = "e2e"
+        chk = {"F-inbox": checks({"C1": entry("unknown", via=None, level=None)}, True, evaluation({"C1": "pass"}, level="unit"))}
+        self.assertIn("| e2e | - | below level (unit &lt; e2e) |", self.md(p, chk))  # "<" is escaped in Markdown
+        card = "\n".join(features.status_card(self.ctx(checks=chk), "F-inbox"))
+        self.assertIn("Evaluation: below level (unit < e2e)", card)
+        chk = {"F-inbox": checks({"C1": entry("pass", via="evaluation", level="unit")}, True, evaluation({"C1": "pass"}, level="unit"))}
+        self.assertIn("below level (unit &lt; e2e)", self.md(p, chk))
+
+    def test_the_card_and_md_show_unidentifiable_criteria(self):
+        p = v2_plan()
+        feat(p, "F-inbox")["criteria"].append({"scenario": "orphan", "action": "a", "expected": "e"})
+        self.assertIn("| ? | orphan | a | e |", self.md(p))
+        card = "\n".join(features.status_card(self.ctx(), "F-inbox"))
+        self.assertIn("    ? [e2e] unknown", card)
+
+    def test_pattern_glyph_shows_blocked_in_preference_and_the_lowest_otherwise(self):
+        self.plan["patterns"].append({"id": "screen", "glob": "apps/web/src/screens/*.tsx", "module": "web", "phase": "P1",
+                                      "purpose": "screens", "instance": "one screen", "features": ["F-inbox"]})
+        self.write_plan(self.plan)
+        for rel in "ABC":
+            self.touch(f"apps/web/src/screens/{rel}.tsx")
+        plan, st = self.load()
+        # 0.tsx is recorded but not on disk (planned) and sorts first: only the blocked preference can show the triangle
+        st["patterns"] = {"screen": {"instances": [f"apps/web/src/screens/{x}.tsx" for x in "0ABC"]}}
+        st["files"]["apps/web/src/screens/A.tsx"] = {"state": "built"}
+        st["files"]["apps/web/src/screens/B.tsx"] = {"state": "blocked"}
+        from bp.views import features_md
+        self.assertIn("- ▲ ⟨pattern screen⟩", features_md.views(self.ctx(state=st))["FEATURES.md"])
+        st["files"]["apps/web/src/screens/B.tsx"] = {"state": "built"}
+        self.assertIn("- ○ ⟨pattern screen⟩", features_md.views(self.ctx(state=st))["FEATURES.md"],
+                      "0 is only planned: the lowest wins, not the highest")
+
+
+class ReviewHookTest(ProjectBase):
+    def test_may_accept_excludes_the_feature_owner_even_when_the_owner_owns_no_item(self):
+        p = v2_plan()
+        p["roster"].append({"id": "lead", "kind": "agent"})
+        feat(p, "F-inbox")["owner"] = "lead"  # lead owns no file: only the owner rule excludes it
+        self.write_plan(p)
+        who = dict(features.roster_sections(self.ctx()))["Who may accept what"].splitlines()[-1]
+        self.assertEqual(who, "| F-inbox | cto-architect, backend-lead, evaluator, owner |")
+
+    def test_may_accept_excludes_the_owners_of_items_who_are_not_the_feature_owner(self):
+        p = v2_plan()
+        feat(p, "F-inbox")["owner"] = "cto-architect"  # frontend-engineer owns the items, the owner owns none of them
+        self.write_plan(p)
+        who = dict(features.roster_sections(self.ctx()))["Who may accept what"].splitlines()[-1]
+        self.assertEqual(who, "| F-inbox | backend-lead, evaluator, owner |")
+
+    def test_file_tags_are_empty_when_the_plan_has_no_features(self):
+        p = v2_plan()
+        p["features"], p["milestones"], p["tasks"], p["unknowns"] = [], [], [], []
+        for f in p["files"]:
+            f.pop("features", None)
+        file_(p, "crates/snag-api/src/main.rs")["infrastructure"] = True
+        self.write_plan(p)
+        self.assertEqual(features.file_tags(self.ctx()), {})
+
+    def test_status_features_prints_the_blocked_by_line(self):
+        base = {"phases": {"P2"}, "milestones": set(), "features": set(), "by": {"phase:P2": ["U-offline"]}}
+        ctx = self.ctx(checks={}, blocked=base)
+        lines = features.status_lines(ctx, type("A", (), {"features": True})())
+        self.assertIn("        blocked by U-offline", lines)
+        self.assertNotIn("        blocked by U-offline", features.status_lines(ctx, type("A", (), {"features": False})()))
+
+    def test_a_planned_file_with_no_row_counts_as_planned(self):
+        plan, st = self.load()
+        got = features.feature_items(self.root, plan, st, {"rows": [], "patterns": []}, "F-log-snag")
+        self.assertEqual([i["status"] for i in got], ["planned", "planned"])
+        rows = [{"path": "crates/snag-api/src/main.rs", "status": "nonsense"}]
+        got = features.feature_items(self.root, plan, st, {"rows": rows, "patterns": []}, "F-log-snag")
+        self.assertEqual([i["status"] for i in got], ["planned", "planned"])
+
+    def test_the_payload_does_not_alias_the_plan(self):
+        p = v2_plan()
+        feat(p, "F-inbox")["source"] = {"study": "S-a", "behaviours": ["B-1"]}
+        self.write_plan(p)
+        plan, st = self.load()
+        ctx = build_context(self.root, plan, st)
+        src = next(f for f in ctx["features"] if f["id"] == "F-inbox")["source"]
+        self.assertEqual(src, {"study": "S-a", "behaviours": ["B-1"]})
+        self.assertIsNot(src, feat(plan, "F-inbox")["source"])
+        self.assertIsNot(src["behaviours"], feat(plan, "F-inbox")["source"]["behaviours"])
+        src["study"] = "changed"
+        src["behaviours"].append("B-2")
+        self.assertEqual(feat(plan, "F-inbox")["source"], {"study": "S-a", "behaviours": ["B-1"]})
+
+    def test_the_empty_state_names_the_next_step(self):
+        self.assertIn("render", features.map_payload(self.ctx())["featureNext"])
+        self.write_plan(v1_plan())
+        nxt = features.map_payload(self.ctx())["featureNext"]
+        self.assertIn("migrate", nxt)
+        self.assertNotIn("render", nxt)
+
+    def test_status_json_with_feature_is_the_cores_business(self):
+        """`status --json --feature F` prints the whole object: cmd_status in bp/commands/progress.py answers --json
+        before it looks at --feature, and the status_json hook gets no arguments."""
+        code, out, err = self.run_("status", "--json", "--feature", "F-ghost")
+        self.assertEqual(code, 0, err)
+        self.assertIn("features", json.loads(out))
+
+
+class PerformanceTest(TempRoot):
+    def test_thousands_of_features_are_linear(self):
+        import time
+        n = 3000
+        plan = v2_plan()
+        plan["milestones"], plan["tasks"], plan["unknowns"] = [], [], []
+        plan["features"] = [{"id": f"F-{i}", "title": "t", "statement": "s", "kind": "add", "owner": "backend-lead",
+                             "criteria": [{"id": "C1", "scenario": "s", "action": "a", "expected": "e", "verify": "true"}]}
+                            for i in range(n)]
+        plan["files"] = [{"path": f"src/f{i}.rs", "action": "create", "module": "api", "phase": "P1", "purpose": "p",
+                          "features": [f"F-{i}"]} for i in range(n)]
+        self.write_plan(plan)
+        loaded = quiet(bplan.load_plan, self.root)[0]
+        st = bplan.load_state(self.root)
+        comp = status.compute(self.root, loaded, st)
+        ctx = {"root": self.root, "plan": loaded, "state": st, "comp": comp, "checks": {},
+               "blocked": {"phases": set(), "milestones": set(), "features": set(), "by": {}}, "features": []}
+        started = time.time()
+        features.context(self.root, loaded, st, ctx)
+        took = time.time() - started
+        self.assertEqual(len(ctx["features"]), n)
+        self.assertLess(took, 2.0, f"features.context took {took:.1f}s for {n} features")
+        started = time.time()
+        for hook in (features.file_tags, features.roster_sections, features.map_payload, features.status_json):
+            hook(ctx)
+        from bp.views import features_md
+        features_md.views(ctx)
+        self.assertLess(time.time() - started, 2.0)
+
+
+class WholeValueTest(unittest.TestCase):
+    """Every id, level and kind matches the whole string: a trailing newline, a carriage return or a leading space is
+    never accepted (re.fullmatch, not re.match with $)."""
+    BAD = ("{}\n", "{}\r\n", " {}", "{} ", "{}\r")
+
+    def test_feature_ids(self):
+        for tpl in self.BAD:
+            p = v2_plan()
+            bad = tpl.format("F-inbox")
+            feat(p, "F-inbox")["id"] = bad
+            for f in p["files"]:
+                f["features"] = [bad if x == "F-inbox" else x for x in f.get("features", [])] or None
+                if f["features"] is None:
+                    del f["features"]
+            self.assertTrue(any("feature id" in m for m in messages(p, "bad-id")), repr(bad))
+
+    def test_criterion_ids(self):
+        for tpl in self.BAD:
+            p = v2_plan()
+            feat(p, "F-inbox")["criteria"][0]["id"] = tpl.format("C1")
+            self.assertTrue(any("criterion id" in m for m in messages(p, "bad-id")), repr(tpl))
+
+    def test_study_ids(self):
+        for tpl in self.BAD:
+            p = v2_plan()
+            feat(p, "F-inbox")["source"] = {"study": tpl.format("S-acme")}
+            self.assertTrue(any("study id" in m for m in messages(p, "bad-id")), repr(tpl))
+
+    def test_levels_and_kinds(self):
+        for tpl in self.BAD:
+            p = v2_plan()
+            feat(p, "F-inbox")["level"] = tpl.format("e2e")
+            self.assertTrue(findings(p, "criterion-level"), repr(tpl))
+            p = v2_plan()
+            feat(p, "F-inbox")["criteria"][0]["level"] = tpl.format("unit")
+            self.assertTrue(findings(p, "criterion-level"), repr(tpl))
+            p = v2_plan()
+            feat(p, "F-log-snag")["criteria"][0]["verifyLevel"] = tpl.format("e2e")
+            self.assertTrue(findings(p, "criterion-level"), repr(tpl))
+            p = v2_plan()
+            feat(p, "F-inbox")["kind"] = tpl.format("add")
+            self.assertTrue(findings(p, "feature-kind"), repr(tpl))
+
+    def test_the_tab_script_has_no_id_patterns_of_its_own(self):
+        text = (S.SKILL / "assets" / "tab-features.js").read_text(encoding="utf-8")
+        self.assertNotIn("test(", text)
+        self.assertNotIn(".match(", text)
+
+
+class DuplicateRosterIdTest(ProjectBase):
+    def test_a_roster_id_listed_twice_is_one_id_and_never_gains_a_property(self):
+        p = v2_plan()
+        p["roster"].append({"id": "evaluator", "kind": "human"})  # same id, a conflicting entry
+        p["roster"].append({"id": "backend-lead", "kind": "human"})
+        self.write_plan(p)
+        sections = dict(features.roster_sections(self.ctx()))
+        who = sections["Who may accept what"].splitlines()[-2:]
+        self.assertEqual(who, ["| F-log-snag | cto-architect, frontend-engineer, evaluator, owner |",
+                               "| F-inbox | cto-architect, backend-lead, evaluator, owner |"])
+        self.assertEqual(sections["Features owned"].splitlines()[2:],
+                         ["| backend-lead | F-log-snag |", "| frontend-engineer | F-inbox |"])
+        self.assertEqual(features.roster_ids(p), ["cto-architect", "backend-lead", "frontend-engineer", "evaluator", "owner"])
 
 
 if __name__ == "__main__":

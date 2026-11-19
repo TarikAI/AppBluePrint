@@ -187,7 +187,7 @@ if (typeof BP_BRANCHES !== 'undefined' && BP_BRANCHES && typeof BP_BRANCHES.push
       var glyphs = D.featureGlyph || {};
       var byPath = H.byPath || {};
       if (!feats.length) {
-        return [{ label: 'No features yet', title: 'Add features[] to blueprint.json and link files with files[].features, then run render', dot: 'var(--warn)' }];
+        return [{ label: 'No features yet', title: typeof D.featureNext === 'string' && D.featureNext ? D.featureNext : 'Add features[] to blueprint.json and link files with files[].features, then run render', dot: 'var(--warn)' }];
       }
       function leaves(f) {
         var out = [];

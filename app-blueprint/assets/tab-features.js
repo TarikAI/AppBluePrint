@@ -20,23 +20,12 @@ BP_TABS.push({
     }
     function pill(text, kind) { return el('span', { cls: 'pill' + (kind ? ' ' + kind : ''), text: text }); }
     function kindOf(status) { return status === 'accepted' || status === 'verified' ? 'ok' : (status === 'failed' || status === 'blocked' ? 'bad' : (status === 'draft' ? 'warn' : '')); }
-    function check(c) {
-      if (c.stale) return 'stale';
-      if (c.result !== 'pass') return c.result || 'unknown';
-      var bits = [];
-      if (c.resultLevel) bits.push(c.resultLevel);
-      if (c.repeat && typeof c.repeat.n === 'number' && typeof c.repeat.passed === 'number') bits.push(c.repeat.passed + '/' + c.repeat.n);
-      return 'pass' + (bits.length ? ' (' + bits.join(', ') + ')' : '');
-    }
-    function evaluation(c) {
-      if (c.verify) return c.evaluation || '-';
-      if (c.stale) return 'stale';
-      if (c.result === 'pass' && c.via === 'evaluation') return 'pass' + (c.resultLevel ? ' (' + c.resultLevel + ')' : '');
-      return c.evaluation && c.evaluation !== 'pass' ? c.evaluation : 'unknown';
-    }
+    // the texts come from the payload (checkText, evaluationText), so every view says the same; the fallbacks cover an older payload
+    function check(c) { return typeof c.checkText === 'string' ? c.checkText : (c.verify ? (c.stale ? 'stale' : (c.result || 'unknown')) : '-'); }
+    function evaluation(c) { return typeof c.evaluationText === 'string' ? c.evaluationText : (c.verify ? (c.evaluation || '-') : (c.evaluation || 'unknown')); }
 
     if (!feats.length) {
-      host.appendChild(el('p', { cls: 'empty', text: 'No features yet. Add features[] with acceptance criteria to blueprint.json, link files to them with files[].features, then run: python .blueprint/bin/blueprint.py render' }));
+      host.appendChild(el('p', { cls: 'empty', text: typeof D.featureNext === 'string' && D.featureNext ? D.featureNext : 'No features yet. Add features[] with acceptance criteria to blueprint.json, link files to them with files[].features, then run: python .blueprint/bin/blueprint.py render' }));
       return;
     }
 
@@ -91,7 +80,7 @@ BP_TABS.push({
         t.appendChild(el('thead', null, [el('tr', null, ['ID', 'Given', 'When', 'Then', 'Must not', 'Level', 'Check', 'Evaluation'].map(function (h) { return el('th', { text: h }); }))]));
         var tb = el('tbody');
         f.criteria.forEach(function (c) {
-          tb.appendChild(el('tr', null, [c.id, c.scenario, c.action, c.expected, c.mustNot || '', c.level, c.verify ? check(c) : '-', evaluation(c)].map(function (v) { return el('td', { text: String(v) }); })));
+          tb.appendChild(el('tr', null, [c.id, c.scenario, c.action, c.expected, c.mustNot || '', c.level, check(c), evaluation(c)].map(function (v) { return el('td', { text: String(v) }); })));
         });
         t.appendChild(tb); wrap.appendChild(t); d.appendChild(wrap);
       } else d.appendChild(el('p', { cls: 'empty', text: 'No acceptance criteria yet. Add criteria[] with scenario, action and expected.' }));
