@@ -1,12 +1,13 @@
-"""views.roster: moved from blueprint.py 1.3.0 (contract 1.5)."""
+"""views.roster: ROSTER.md, moved from blueprint.py 1.3.0 (contract 1.5), with the 2.0 sections of 8.3."""
 import io
 
+from bp import registry
 from bp.plan import GLYPH, owner_of
 from bp.data import data_view
 from bp.views.structure import md_cell
 
 
-def render_roster(plan, state, comp):
+def render_roster(plan, state, comp, ctx=None):
     rows, pats = comp["rows"], comp["patterns"]
     out = io.StringIO()
     w = out.write
@@ -47,4 +48,10 @@ def render_roster(plan, state, comp):
             for p in ps:
                 w(f"- ⟨pattern⟩ `{p['glob']}`: {p['instance']}\n")
             w("\n")
+    if ctx is not None:  # 2.0: sections from the roster_sections hooks, after the 1.x ones (contract 1.4, 8.3)
+        for _, sections in registry.collect("roster_sections", ctx):
+            for title, body in sections or []:
+                if not out.getvalue().endswith("\n\n"):
+                    w("\n")
+                w(f"## {title}\n\n{str(body).rstrip()}\n\n")
     return out.getvalue()

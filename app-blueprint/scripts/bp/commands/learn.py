@@ -7,10 +7,28 @@ import os
 import platform
 import sys
 
-from bp.version import TOOL_VERSION
+from bp.version import MIN_SCHEMA2_TOOL, TOOL_VERSION
 from bp.core import TOOL_HOME, append_log, bp_dir, die, find_root, read_json, read_jsonl
-from bp.learn import (ISSUES_URL, NO_CAPTURE_ENV, _copy_version, _version_tuple, capture_on, copy_layout,
+from bp.learn import (FEEDBACK_KINDS, ISSUES_URL, NO_CAPTURE_ENV, _copy_version, _version_tuple, capture_on, copy_layout,
                       installed_skill_versions, project_ident, redact, store_append, store_dir)
+from bp.migrate import plan_version
+from bp.registry import command_built
+
+
+def register(name, p):
+    """Arguments of feedback, report and doctor (cli.main calls this per subcommand, contract 1.4)."""
+    if name == "feedback":
+        p.add_argument("--kind", required=True, choices=FEEDBACK_KINDS)
+        p.add_argument("--note", required=True, help="what went wrong or what the user corrected, in one or two sentences")
+        p.add_argument("--part", help="part of the skill, e.g. 'SKILL.md step 4', 'preset:nextjs-prisma', 'command:sync'")
+        p.add_argument("--by", help="who is recording it (default: $BLUEPRINT_OWNER)")
+        p.set_defaults(fn=cmd_feedback)
+    elif name == "report":
+        p.add_argument("incident", nargs="?", help="incident id (default: the latest)")
+        p.set_defaults(fn=cmd_report)
+    elif name == "doctor":
+        p.add_argument("--strict", action="store_true", help="exit 1 if this project's tool copy is out of date")
+        p.set_defaults(fn=cmd_doctor)
 
 
 def cmd_feedback(args):
@@ -71,12 +89,18 @@ def cmd_doctor(args):
             raw = read_json(bp_dir(root) / "blueprint.json")
             schema = json.dumps(raw.get("version")) if isinstance(raw, dict) else "unreadable"
         except (OSError, ValueError):
-            schema = "unreadable"
-        print(f"  blueprint.json schema: {schema}")
+            raw, schema = None, "unreadable"
+        # contract 1.7: the migrate hint only once the command exists (1.5 row d)
+        hint = " (run migrate to use 2.0 planning)" if plan_version(raw) == 1 and command_built("migrate") else ""
+        print(f"  blueprint.json schema: {schema}{hint}")
         # a single-file copy is always out of date for a package tool (contract 1.7)
         if copied == "missing" or layout == "single-file" or _version_tuple(copied) < _version_tuple(newest):
             stale = True
             print(f"  Out of date: run  python <skill>/scripts/blueprint.py init --refresh-tool  (newest is {newest})")
+        if plan_version(raw) == 2 and copied != "missing" and _version_tuple(copied) < _version_tuple(MIN_SCHEMA2_TOOL):
+            stale = True
+            print(f"  This project's tool copy is older than {MIN_SCHEMA2_TOOL} and cannot read schema version 2: "
+                  "run  python <skill>/scripts/blueprint.py init --refresh-tool")
     else:
         print(f"  no blueprint in {root}")
     d = store_dir()

@@ -65,6 +65,18 @@ def resource_owner(plan, r):
     return None
 
 
+CODES = [  # the data entries of the 1.x VALIDATION_CODES, in their 1.x order (contract 7.4)
+    (r"^store ", "store-invalid"),
+    (r"^resource ", "resource-invalid"),
+    (r"uses unknown resource|access for ", "uses-invalid"),
+]
+
+
+def validate(plan, E, W, vctx):
+    """The validate hook (contract 1.4): the 1.x data rules."""
+    validate_data(plan, E, W)
+
+
 def validate_data(plan, E, W):
     stores = set()
     for s in plan.get("stores", []):
