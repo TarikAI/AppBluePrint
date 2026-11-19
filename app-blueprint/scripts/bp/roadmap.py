@@ -11,7 +11,7 @@ import datetime
 import json
 import re
 
-from bp.core import BlueprintError, append_log, now_iso
+from bp.core import BlueprintError, append_log, copy_json, now_iso
 from bp.plan import load_state, save_state
 
 TASK_STATES = ("todo", "doing", "done", "blocked")
@@ -224,6 +224,19 @@ def unmet_dependencies(plan, tid, tasks, features):
     return out
 
 
+def _plan_fix(tid, owner, owner_action, roster):
+    """What is wrong with the plan around a task when the command we would suggest cannot work, else None."""
+    if owner not in roster:
+        why = f"task {tid}: owner {owner!r} is not a roster entry"
+    elif roster[owner].get("kind") == "conflict":
+        why = f"roster id {owner!r} has entries of different kinds"
+    elif owner_action and not _human(roster, owner):
+        why = f"task {tid} is an owner action, so its owner must be a human roster entry"
+    else:
+        return None
+    return f"fix .blueprint/blueprint.json ({why}), then run: {BP} validate"
+
+
 def _task_error(error, message, tid, next, code=1):  # noqa: A002 (next is the contract's name)
     return BlueprintError(error, message, entry=f"task {tid}", next=next, code=code)
 
@@ -241,11 +254,13 @@ def set_task(root, plan, tid, status, by, note=None, force=False):
     task = tasks[tid]
     roster = _roster(plan)
     owner = _s(task.get("owner"))
-    again = f"{BP} task {tid} {status if status in TASK_STATES else 'doing'} --by {owner}" + (
-        ' --note "waiting on ..."' if status == "blocked" else "")
+    owner_action = any(t.get("ownerAction") is True for t in _list(plan, "tasks") if t.get("id") == tid)
+    again = _plan_fix(tid, owner, owner_action, roster) or (
+        f"{BP} task {tid} {status if status in TASK_STATES else 'doing'} --by {owner}"
+        + (' --note "waiting on ..."' if status == "blocked" else ""))
     if by not in roster:
         raise _task_error("unknown-roster", f"--by {by!r} is not in the roster (roster ids: "
-                          + (", ".join(sorted(roster)) or "none") + ")", tid, again if owner in roster else f"{BP} validate")
+                          + (", ".join(sorted(roster)) or "none") + ")", tid, again)
     if status not in TASK_STATES:
         raise _task_error("usage", f"{status!r} is not a task status (use one of: {', '.join(TASK_STATES)})", tid,
                           f"{BP} task --help", 64)
@@ -254,17 +269,16 @@ def set_task(root, plan, tid, status, by, note=None, force=False):
                           f'{BP} task {tid} blocked --by {by} --note "waiting on ..."', 64)
     state = load_state(root)
     current = _state_task(state, tid).get("status")
-    owner_action = any(t.get("ownerAction") is True for t in _list(plan, "tasks") if t.get("id") == tid)
     if owner_action and not _human(roster, by) and (status == "done" or current == "done"):
-        person = owner if _human(roster, owner) else next((i for i in roster if _human(roster, i)), None)
+        person = owner if _human(roster, owner) else None
         why = ("only a person can mark it done" if status == "done" and current != "done"
                else "a person marked it done, and only a person can change that")
         raise _task_error("owner-action-human", f"{tid} is an owner action: {why}, and {by} is not a human roster entry",
                           tid, f"{BP} task {tid} {status} --by {person}" + (' --note "waiting on ..."' if status == "blocked" else "")
-                          if person else f"{BP} validate", 3)
+                          if person else again, 3)
     if by != owner and not force:
         raise _task_error("wrong-owner", f"{tid} is owned by {owner or 'nobody'}, not {by}; ask {owner or 'the lead'}, "
-                          "or use --force if the lead says so", tid, again if owner in roster else f"{BP} status --tasks", 3)
+                          "or use --force if the lead says so", tid, again, 3)
     if not isinstance(state.get("tasks"), dict):
         state["tasks"] = {}
     rec = {"status": status, "by": by, "at": now_iso(), "note": note if note else None}
@@ -298,18 +312,26 @@ def feature_rows(plan, ctx):
     """One row per feature of the PLAN, in plan order: the plan decides what exists, which milestone it is in and whether
     it is a draft; the features payload (ctx["features"]) only supplies the status and what goes with it. A feature the
     payload does not report (or reports in another milestone) is `planned`, so a milestone can never read done while one is missing from it."""
-    got = {}
+    got, torn = {}, set()
     for f in ctx.get("features") if isinstance(ctx.get("features"), list) else []:
         if isinstance(f, dict) and isinstance(f.get("id"), str):
+            if f["id"] in got and got[f["id"]].get("status") != f.get("status"):
+                torn.add(f["id"])  # two entries for one feature that disagree: trust neither
             got.setdefault(f["id"], f)
     rows = []
     for fid, f in section_index(plan, "features").items():
         rep = got.get(fid, {})
         draft = f.get("draft") is True
         status = rep.get("status") if isinstance(rep.get("status"), str) and rep.get("status") else "planned"
+        if status == "draft" or fid in torn:
+            status = "planned"  # only the plan makes a draft, and a draft is set below
         row = dict(rep)
+        if fid in torn:
+            row.pop("statusText", None)
         if "milestone" in rep and (_s(rep.get("milestone")) or None) != (_s(f.get("milestone")) or None):
             status = "planned"  # the payload disagrees with the plan about where it belongs: nothing is trusted
+            row.pop("statusText", None)
+        if status == "planned" and rep.get("status") == "draft":
             row.pop("statusText", None)
         row.update({"id": fid, "title": _s(rep.get("title")) or _s(f.get("title")),
                     "milestone": _s(f.get("milestone")) or None, "owner": _s(rep.get("owner")) or _s(f.get("owner")),
@@ -323,7 +345,8 @@ def feature_rows(plan, ctx):
 
 
 def is_draft(f):
-    return f.get("draft") is True or f.get("status") == "draft"
+    """A draft is what the plan says (feature_rows sets `draft` from it), never what a payload's status says."""
+    return f.get("draft") is True
 
 
 def _syncd(state):
@@ -415,8 +438,8 @@ def map_payload(ctx):
     """milestones and tasks (8.5), plus `roadmap`: what the Roadmap tab needs to tell the story ROADMAP.md tells with or
     without the features and unknowns modules (plan-based membership and totals, the open questions)."""
     return {"milestones": ctx.get("milestones") or [], "tasks": ctx.get("tasks") or [],
-            "roadmap": {"counts": counts(ctx), "features": feature_rows(ctx.get("plan") or {}, ctx),
-                        "unknowns": open_questions(ctx)}}
+            "roadmap": {"counts": counts(ctx), "features": copy_json(feature_rows(ctx.get("plan") or {}, ctx)),
+                        "unknowns": copy_json(open_questions(ctx))}}
 
 
 def status_json(ctx):
@@ -449,8 +472,8 @@ def line(text):
 
 
 def cell(text):
-    """Plan text for a markdown table cell: line(), with `|` escaped."""
-    return line(text).replace("|", "\\|")
+    """Plan text for a markdown table cell: line(), with `` and `|` escaped (the backslash first)."""
+    return line(text).replace("\\", "\\\\").replace("|", "\\|")
 
 
 def _migrate_or(plan, other):

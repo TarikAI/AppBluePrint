@@ -1191,5 +1191,139 @@ class TabRoundOneTest(TabRunTest):
         self.assertNotIn("function", out["text"])
 
 
+class ReviewRoundTwoTest(TempRoot):
+    """Review round 2: the plan decides what is a draft, duplicates fail closed, escaping, copies, plan-fix nexts."""
+    ctx = ViewTest.ctx
+
+    def setUp(self):
+        super().setUp()
+        self.plan_json = v2_plan()
+
+    def milestone(self, features, state=None):
+        done = {"syncedAt": "2027-01-10T09:00:00Z", "tasks": {"T-domain": {"status": "done"}}}
+        return self.ctx(state=state or done, features=features)
+
+    # M2a: the plan, not the payload, says what a draft is
+    def test_a_payload_draft_status_for_a_plan_feature_that_is_not_a_draft_is_planned(self):
+        ok = stub_features(inbox="accepted")
+        ctx = self.milestone([ok[0], dict(ok[1], status="draft", statusText="draft")])
+        m = ctx["milestones"][0]
+        self.assertFalse(m["done"])
+        self.assertEqual(m["progress"], {"features": 2, "accepted": 1, "tasks": 1, "done": 1})
+        self.assertIn("Features: accepted 1 of 2", roadmap_md.views(ctx)["ROADMAP.md"])
+        row = next(f for f in roadmap.feature_rows(ctx["plan"], ctx) if f["id"] == "F-inbox")
+        self.assertEqual((row["status"], row["draft"]), ("planned", False))
+        self.assertFalse(roadmap.is_draft({"draft": False, "status": "draft"}))
+
+    def test_a_plan_draft_stays_a_draft_whatever_the_payload_says(self):
+        p = v2_plan()
+        p["features"][1]["draft"] = True
+        ok = stub_features(inbox="accepted")
+        ctx = self.ctx(p, state={"tasks": {"T-domain": {"status": "done"}}}, features=[ok[0], dict(ok[1], draft=False, status="accepted")])
+        row = next(f for f in roadmap.feature_rows(ctx["plan"], ctx) if f["id"] == "F-inbox")
+        self.assertEqual((row["status"], row["draft"]), ("draft", True))
+        self.assertEqual(ctx["milestones"][0]["progress"]["features"], 1)
+
+    # M2b: entries for one id that disagree are not trusted
+    def test_duplicate_payload_entries_that_disagree_are_planned(self):
+        ok = stub_features(inbox="accepted")
+        ctx = self.milestone([ok[0], ok[1], dict(ok[1], status="failed", statusText="failed")])
+        self.assertFalse(ctx["milestones"][0]["done"])
+        self.assertEqual(ctx["milestones"][0]["progress"]["accepted"], 1)
+        ctx = self.milestone([ok[0], ok[1], dict(ok[1])])  # identical duplicates are fine
+        self.assertTrue(ctx["milestones"][0]["done"])
+
+    def test_a_payload_entry_without_a_milestone_key_is_used_for_the_plans_milestone(self):
+        ok = stub_features(inbox="accepted")
+        ctx = self.milestone([{k: v for k, v in f.items() if k != "milestone"} for f in ok])
+        self.assertTrue(ctx["milestones"][0]["done"])
+
+    # table cells: backslash first, then the pipe
+    def test_backslashes_and_pipes_in_cells(self):
+        self.assertEqual(roadmap.cell("a\\|b"), "a\\\\\\|b")
+        self.assertEqual(roadmap.cell("a|b\\"), "a\\|b\\\\")
+        p = v2_plan()
+        p["tasks"][0]["title"] = "a\\|b"
+        ctx = self.ctx(p)
+        self.assertIn("T-domain a\\\\\\|b (you)", roadmap_md.views(ctx)["ROADMAP.md"])
+        self.assertIn("T-domain a\\\\\\|b (you)", roadmap.roster_sections(ctx)[0][1])
+
+    # no aliasing: the payload is a copy
+    def test_the_roadmap_payload_shares_nothing_with_the_plan_or_the_features_payload(self):
+        feats = stub_features()
+        ctx = self.ctx(features=feats)
+        out = roadmap.map_payload(ctx)["roadmap"]
+        out["features"][0]["criteria"].append("x")
+        out["features"][0]["criteria"][0]["id"] = "CHANGED"
+        out["features"][0]["blockedBy"].append("U-x")
+        self.assertEqual([c["id"] for c in feats[0]["criteria"]], ["C1", "C2"])
+        self.assertEqual(feats[0]["blockedBy"], [])
+        plan_only = self.ctx(features=[])
+        out = roadmap.map_payload(plan_only)["roadmap"]
+        out["features"][0]["criteria"][0]["scenario"] = "CHANGED"
+        out["unknowns"][0]["blocks"].append("P9")
+        self.assertNotEqual(plan_only["plan"]["features"][0]["criteria"][0]["scenario"], "CHANGED")
+        self.assertEqual(plan_only["plan"]["unknowns"][0]["blocks"], ["P2"])
+
+    # next on a plan that already fails validation: fix the plan first
+    def test_next_on_a_broken_plan_is_to_fix_it(self):
+        plan = v2_plan()
+        plan["tasks"][0]["owner"] = "backend-lead"  # an owner action owned by an agent
+        self.write_plan(plan)
+        loaded = bplan.load_plan(self.root)
+        for args in (("T-domain", "done", "evaluator"), ("T-domain", "doing", "owner"), ("T-domain", "doing", "nobody")):
+            with self.assertRaises(BlueprintError) as cm:
+                roadmap.set_task(self.root, loaded, *args)
+            self.assertTrue(cm.exception.next.startswith("fix .blueprint/blueprint.json ("), cm.exception.next)
+            self.assertTrue(cm.exception.next.endswith(f"then run: {PREFIX} validate"), cm.exception.next)
+        plan = self.duplicate_kinds()
+        loaded = bplan.load_plan(self.root)
+        with self.assertRaises(BlueprintError) as cm:
+            roadmap.set_task(self.root, loaded, "T-domain", "doing", "backend-lead")
+        self.assertIn("different kinds", cm.exception.next)
+        self.assertTrue(cm.exception.next.startswith("fix .blueprint/blueprint.json ("))
+
+    def duplicate_kinds(self):
+        plan = v2_plan()
+        human = next(r for r in plan["roster"] if r["id"] == "owner")
+        plan["roster"].append(dict(human, kind="agent"))
+        self.write_plan(plan)
+        return plan
+
+    # the other surviving mutations
+    def test_status_milestone_prints_one_line_per_task_and_feature(self):
+        p = v2_plan()
+        p["tasks"][0]["title"] = "Register\n## the domain"
+        p["tasks"][0]["owner"] = "owner"
+        p["features"][0]["title"] = "Log\na snag"
+        ctx = self.ctx(p, features=[dict(stub_features()[0], statusText="accepted\nnow"), stub_features()[1]])
+        lines = roadmap.status_lines(ctx, type("A", (), {"milestone": "M1", "tasks": False})())
+        self.assertFalse(any("\n" in l for l in lines))
+        self.assertIn("    task T-domain  todo  owner (you)  Register ## the domain", lines)
+        self.assertIn("    feature F-log-snag  accepted now", lines)
+
+
+@unittest.skipUnless(shutil.which("node"), "node is not installed")
+class TabRoundTwoTest(TabRunTest):
+    def test_the_tab_date_rule_rejects_trailing_characters(self):
+        base = {"milestones": [{"id": "M1", "name": "n", "due": "x", "features": [], "tasks": [], "progress": {}}], "tasks": [],
+                "features": [], "unknowns": [], "syncedAt": "2027-01-01T00:00:00Z"}
+        bad = ["2027-01-15\n", "2027-01-15\r", " 2027-01-15", "2027-01-15 ", "2027-02-29", "2027-13-01", "0000-01-01"]
+        good = ["2027-01-15", "2028-02-29"]
+        outs = self.run_tab([dict(base, milestones=[dict(base["milestones"][0], due=d)]) for d in bad + good])
+        for d, o in zip(bad, outs):
+            self.assertNotIn("Timeline", o["text"], repr(d))
+        for d, o in zip(good, outs[len(bad):]):
+            self.assertIn("Timeline", o["text"], repr(d))
+
+    def test_the_tiles_read_the_roadmap_counts(self):
+        d = {"milestones": [{"id": "M1", "name": "n", "features": [], "tasks": [], "progress": {}}], "tasks": [],
+             "features": [], "unknowns": [],
+             "roadmap": {"counts": {"milestones": 1, "milestonesDone": 0, "featuresAccepted": 7, "features": 9, "tasksDone": 0,
+                                    "tasks": 0, "blocking": 0}, "features": [], "unknowns": []}}
+        (out,) = self.run_tab([d])
+        self.assertIn("7 / 9", out["text"])
+
+
 if __name__ == "__main__":
     unittest.main()
