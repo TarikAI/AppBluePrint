@@ -1055,6 +1055,52 @@ class DeepNestingTest(unittest.TestCase):
         self.assertEqual(r.returncode, 1, r.stderr)
         self.assertEqual(json.loads(r.stdout)["error"]["code"], "bad-json")
 
+    def test_doctor_on_a_plan_too_deep_to_read(self):  # review P10-1
+        root = self.project("doctor", "top", self.LIMIT + 500)
+        r = S.run_script(S.LAUNCHER, ["doctor", "--root", root], root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("blueprint.json schema: unreadable", r.stdout)
+
+    def test_a_deep_version_2_state_is_copied_without_recursion(self):  # review P10-5
+        deep = json.loads(deep_json(3000))
+        st = migrate.upgrade_state({"stateVersion": 2, "files": {}, "x": deep})
+        self.assertIsNot(st["x"], deep)
+        self.assertEqual(st["tasks"], {})
+
+    def test_copy_json_refuses_a_cycle_and_copies_shared_parts(self):  # review P10-2
+        loop = [1]
+        loop.append(loop)
+        with self.assertRaisesRegex(ValueError, "cyclic value"):
+            core.copy_json(loop)
+        d = {"a": {"b": [loop]}}
+        with self.assertRaisesRegex(ValueError, "cyclic value"):
+            core.copy_json(d)
+        shared = {"k": [1, 2]}
+        out = core.copy_json({"one": shared, "two": [shared, shared]})
+        self.assertEqual(out, {"one": shared, "two": [shared, shared]})
+        self.assertIsNot(out["one"], out["two"][0])
+        self.assertIsNot(out["two"][0], out["two"][1])
+        self.assertIsNot(out["one"], shared)
+
+    def test_recursion_in_a_load_step_is_mapped_only_for_a_deep_plan(self):  # review P10-3
+        from bp import plan as bplan_mod
+
+        def recurse(plan):
+            return recurse(plan)
+
+        shallow = self.project("shallow", "top", 5)
+        deep = self.project("deep", "top", 400)
+        with mock.patch.object(bplan_mod, "normalize_plan", recurse):
+            with self.assertRaises(RecursionError):  # a bug on a shallow plan: an incident, never "nested too deeply"
+                quiet(bplan_mod.load_plan, shallow)
+            with self.assertRaises(core.BlueprintError) as cm:
+                quiet(bplan_mod.load_plan, deep)
+        self.assertEqual((cm.exception.error, cm.exception.message),
+                         ("bad-json", "blueprint.json is nested too deeply to read"))
+        self.assertEqual(core.json_depth(json.loads(deep_json(400))), 400)
+        self.assertEqual(core.json_depth({"a": [1, {"b": []}]}), 4)
+        self.assertEqual(core.json_depth(5), 0)
+
     def test_upgrade_is_iterative_and_pure(self):
         deep = json.loads(deep_json(500))
         raw = dict(v1_plan(), x=deep)
