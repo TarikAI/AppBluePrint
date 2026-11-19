@@ -276,6 +276,8 @@ class SubcommandTest(CliTestBase):
         for argv, arrives in ((["migrate", "--dry-run"], "W0-B"), (["task", "T-domain", "done", "--by", "owner"], "W1-R"),
                               (["accept", "F-inbox", "--by", "evaluator", "--mode", "browser"], "W3-V"),
                               (["evidence", "list"], "W2-E"), (["study", "source", ".", "--own"], "W2-E")):
+            if argv[0] == "migrate" and registry.command_built("migrate"):
+                continue  # built since W0-B (tests/test_migrate.py)
             with self.subTest(argv=argv):
                 r = S.run_script(S.LAUNCHER, argv + ["--root", self.root], self.root)
                 self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
@@ -294,23 +296,24 @@ class SubcommandTest(CliTestBase):
             def register(name, parser):
                 parser.add_argument("--dry-run", action="store_true")
                 parser.add_argument("--json", action="store_true")
-                parser.set_defaults(fn=cmd_migrate)
+                parser.set_defaults(fn=cmd_accept)
 
-            def cmd_migrate(args):
-                emit(args, "migrate", {"dryRun": args.dry_run}, ["migrate ran, dry run: %s" % args.dry_run])
+            def cmd_accept(args):
+                emit(args, "accept", {"dryRun": args.dry_run}, ["accept ran, dry run: %s" % args.dry_run])
         '''
-        with extension({"commands/migrate.py": src}):
-            code, out, err = self.run_("migrate", "--dry-run")
-            self.assertEqual((code, out), (0, "migrate ran, dry run: True\n"), err)
-            code, out, _ = self.run_("migrate", "--json")
-            self.assertEqual(json.loads(out), {"ok": True, "command": "migrate", "data": {"dryRun": False}})
-            self.assertEqual(self.run_("migrate", "--bogus")[0], 2, "argparse usage errors keep exit 2")
-            # the migrate hints of 1.7 and 3.3 now appear (1.5 row d)
+        with extension({"commands/records.py": src}):
+            code, out, err = self.run_("accept", "--dry-run")
+            self.assertEqual((code, out), (0, "accept ran, dry run: True\n"), err)
+            code, out, _ = self.run_("accept", "--json")
+            self.assertEqual(json.loads(out), {"ok": True, "command": "accept", "data": {"dryRun": False}})
+            self.assertEqual(self.run_("accept", "--bogus")[0], 2, "argparse usage errors keep exit 2")
+            # the migrate hints of 1.7 and 3.3 appear once bp/commands/migrate.py exists (1.5 row d)
+            hint = registry.command_built("migrate")
             self.write_plan(v1_plan())
             code, out, _ = self.run_("validate")
-            self.assertIn("To use milestones, features, tasks and unknowns, run: blueprint.py migrate", out)
+            self.assertEqual("To use milestones, features, tasks and unknowns, run: blueprint.py migrate" in out, hint)
             code, out, _ = self.run_("status")
-            self.assertIn("Schema version 1: run migrate to use milestones, features, tasks and unknowns.", out)
+            self.assertEqual("Schema version 1: run migrate to use milestones, features, tasks and unknowns." in out, hint)
 
     def test_a_missing_lane_inside_a_handler_is_not_built(self):
         src = '''
@@ -1293,7 +1296,7 @@ class EndToEndExtensionTest(unittest.TestCase):
         self.assertEqual((r.returncode, r.stdout), (0, "F-inbox: planned\n"), r.stderr)
         r = S.run_script(copy_, ["guard", ".blueprint/state.json"], root)
         self.assertEqual(r.returncode, 2, r.stderr)
-        r = S.run_script(copy_, ["migrate"], root)
+        r = S.run_script(copy_, ["accept"], root)
         self.assertEqual(r.returncode, 1)
         self.assertIn("not built", r.stderr)
         self.assertEqual([str(p) for p in skill.rglob("__pycache__")] + [str(p) for p in root.rglob("__pycache__")], [])
