@@ -97,7 +97,7 @@ def cmd_render(args):
             sys.exit(1)
         print("Views are current.")
         return
-    render_all(root, plan, state)
+    render_all(root, plan, state, fail_on_conflict=True)  # only render fails on a view conflict (8)
 
 
 CONTRACT_TEMPLATE = """# {name}

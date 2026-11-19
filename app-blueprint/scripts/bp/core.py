@@ -97,7 +97,8 @@ def project_path(root, raw):
     repeated separators, symlinks and junctions are resolved, and case and separators come from the disk for the part
     that exists. When the drive spellings differ (an admin share \\host\C$, subst, a mapped drive), the resolved
     path's existing ancestors are compared with the root by os.path.samefile. On Windows the part that does not exist
-    yet loses the trailing dots and spaces of each segment, as Windows drops them when it creates the file. Forward
+    yet loses, in each segment, everything from its first ':' (an alternate data stream names the same file) and
+    then the trailing dots and spaces, as Windows does when it creates the file. Forward
     slashes; compare results with path_key."""
     p = Path(_strip_long_prefix(raw))
     if not p.is_absolute():
@@ -132,7 +133,9 @@ def project_path(root, raw):
                 base = base / seg
                 out.append(seg)
                 continue
-            out += [s.rstrip(" .") or s for s in parts[i:]]
+            # a segment loses everything from its first ':' (an alternate data stream, '::$DATA' or ':x', names the
+            # same file), then its trailing dots and spaces; the drive letter is in the root part, never here
+            out += [s.split(":", 1)[0].rstrip(" .") or s for s in parts[i:]]
             break
         parts = out
     return "/".join(parts) if parts else "."
