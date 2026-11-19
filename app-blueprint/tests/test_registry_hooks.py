@@ -201,7 +201,9 @@ class ValidationRuleExtensionTest(TempRoot):
             code, _, err = run_cli("validate", "--root", self.root)
             self.assertEqual(code, 0, err)
             seen = sys.modules["bp.unknowns"].SEEN
-            self.assertEqual(seen[-1], {"team": None, "evidenceIds": {"ev-1"}, "root": self.root, "studyCount": 0})
+            got = dict(seen[-1])
+            self.assertTrue(os.path.samefile(got.pop("root"), self.root))  # CI temp folders come in 8.3 short form
+            self.assertEqual(got, {"team": None, "evidenceIds": {"ev-1"}, "studyCount": 0})
             run_cli("render", "--root", self.root)  # every caller of the validate hooks builds vctx the same way
             self.assertEqual(seen[-1]["evidenceIds"], {"ev-1"})
             found = validate.validate_findings(v2_plan(), evidence_ids={"ev-9"})
