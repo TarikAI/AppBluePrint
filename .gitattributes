@@ -1,2 +1,4 @@
 * text=auto eol=lf
 *.png binary
+app-blueprint/tests/data/android/*.axml binary
+app-blueprint/tests/data/android/*.proto binary
