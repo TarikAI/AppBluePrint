@@ -33,36 +33,74 @@ PINNED = {
     "axml": "50bf79cf36fe07a14883e24b887d4c2b3cb4bca9d06c5ccf20ab61787cbf8462",
     "proto": "a48e9e26ef46b6cc93faf34c60d47901ef66362eae31299de6031e3ca0fe7a71",
     "dex": "dc403a7a59ef5905d32665f679fc11e86ead9b61ebbbe73f5fd1a847c5911c12",
-    "apk": "df161136c456eb0fea6f73b4eeff1a457dac3da24dbaee9bf2313d31cb560495",
+    "apk": "5f95b3de9c2407524ce57f8d9ae7463ba3822a2a4154be5daa2cd5b2330a678d",
     "aab": "3f11ba54e5d6004d8e78a458b3233a6a46fba1c1214a757659ec5dd5a74a38e4",
     "xapk": "efa13c7a528a3edcc3d325f6b5d84f90583ef6ddccef78745bf5c54c876337f5",
-    "ipa": "d96e45348539bd2d5ea21c3121d8d64108dae16deed898c7a71b6caaa751de82",
+    "ipa": "c55d95db75724a6d9a5903049f241d18942c37869f72b9c58b9479f622f00ed7",
     "asar": "0e2c43c68f289124242ec2c3a1d1d12e2ab22ea90a6befa987fd7872bf372441",
     "zip_slip": "7b1deb4c469dc44819583fad6f372da8e57ec0aeae19b25c6e56ab4725d95e00",
     "absolute": "335a599f0d823fd646a635fcf0eb8cf18fde6e2d8d6173589867091c3962cddf",
     "bomb": "7010de18603298b7a47017d03ddd26013087fbc44839f34f391010f1a87198d2",
     "many_entries": "7fb96d822b6ae0668914584c2ab39730286e16720290ecb1a9266e69ac14ee58",
-    "nested": "e56151db149b4355a6490d7fa8b00592bd331a11d27a1ae9508613aa75cf7186",
+    "nested": "5129194284ace448ce943237ac8904ea7a7d3e1cb269b0888a91549c8fc91f86",
     "symlink": "e4f9f89c0609dbcc05bfce896b963cf93c4d3f7a90ace8fa8ecd3ea95bcd4367",
     "encrypted": "a4782cc586b6e2ef4bba0a29eab02cf386013a02c2a271b0e0d185db2111174c",
     "duplicates": "b1baebf263c959d8e9d4f3b0dd465cb93faa43b65bfb1bdb0548c84d7baca422",
     "truncated": "54c9208b2d5901bf185a8e41c48f8a1ebc21f94662ce56c0ceaa478b1b66359d",
+    "nul_name": "648f8961bced06c0bf8a69f82a3fcc8db0fcff4b308203dfc5ce62d807495107",
+    "unsupported_method": "58b7bf1ef8caed2e48ff6550bb7d0f2f0714c88690f46d00134ce69ae24c6dcb",
+    "corrupt_deflate": "4b5044b081bf4f7f1a4782813c73b103549335d9284723ddfe81ec70e3ee18bc",
+    "truncated_member": "b7b18409f42a4c768ed59144ec3a601e1720fc5c94970451272eddfac0547840",
+    "many_directories": "a1cb37a713f5b591b5dce86443a9aea40896e4c48b966ab1fab82bd890fd0751",
+    "oversized": "74f491b978469ceb9adff4151f98d030a6ac60d7c9ed3e26b0f622cab458b110",
+    "electron_asar": "ca6590f7d5b33cf1899d75cd5ef954da56c110a07fc07bad47d718b2bc5f91f2",
+    "dex039": "1fc7c7b1fe0dd9dc357cb6cd648a4d293b482b7052e9eacf8574c832a9d4bfa2",
+    "axml_utf8": "458d19ba14cf0b5d02356bdd62e04598dd863a33baaafba31fc72be331478377",
+    "asar_traversal": "99fc3def3cc68317caa8f3bfe5d4fe351cc9580e39785ae8084759b9b5ab4921",
+    "asar_separator": "43ba0a1bb2960ee032efad1bdefa8d5991863a44140d8d11ad11738d6706ae68",
+    "asar_slash": "2885baf3af740b595f8778fed6d0c2dd5b22d16f01a3cacc11f4bfdde48850ec",
+    "asar_nul_name": "d23d30f7fab453c4cf068f40e6e9cd32bc1d35e9458476eae7788537335f75c1",
+    "asar_offset_oob": "cb117c43695a2c2afb9a5ff65a013a5a1fd9881fbb87ff70e137508fb5cf03e2",
+    "asar_size_oob": "edafc641bc77692c9ef3e2236704695eb129e84aeb9d2125f8d216b051cfd06c",
+    "asar_json_too_long": "57635603031847e2a95a1ad9421ffd4f5107cd1dffbe8edaafbc31d199c766b7",
+    "asar_offset_negative": "0e8171dc260d25e3297b248503f593af947160df13685ee0271786f57bfa5da4",
+    "asar_offset_hex": "c1d663a7589bd8246dc7f388599b5f21433d37896fe5c669dfbc4bfb7108a89c",
+    "asar_too_deep": "8d90406b70b97a0dc0ea3808955a9bc321cb64392e56eb85851abc7a0c25634a",
+    "asar_link_outside": "461816b603f0fc91fee99aa4fba652726c7a646b48c5d87c57393dbe8d53bcf9",
+    "asar_bad_json": "c3264100d0cda30174411d2ab58ca176f7f11d6134bc4ae8d7dd9de5ea34efed",
 }
 
 
 # ------------------------------------------------------------------------------------------------ test-side readers
 
 def pool_strings(chunk):
-    """The UTF-16 string pool of a 0x0001 chunk (bytes of the whole chunk), with every size cross-checked."""
+    """The string pool of a 0x0001 chunk (bytes of the whole chunk, UTF-16 or UTF-8), with every size cross-checked."""
     ctype, hsize, size = struct.unpack_from("<HHI", chunk, 0)
     assert (ctype, hsize, size) == (1, 28, len(chunk))
     count, styles, flags, start, style_start = struct.unpack_from("<5I", chunk, 8)
-    assert styles == 0 and style_start == 0 and flags & 0x100 == 0  # UTF-16, no styles
+    assert styles == 0 and style_start == 0 and flags & ~0x100 == 0  # no styles, no sorted flag
+    utf8 = bool(flags & 0x100)
     assert start == 28 + 4 * count
     offsets = struct.unpack_from("<%dI" % count, chunk, 28)
     out, end = [], start
     for off in offsets:
         pos = start + off
+        if utf8:  # two lengths (UTF-16 units, then bytes), each 1 byte, or 2 bytes when the high bit is set
+            lengths = []
+            for _ in range(2):
+                b0 = chunk[pos]
+                if b0 & 0x80:
+                    lengths.append(((b0 & 0x7F) << 8) | chunk[pos + 1])
+                    pos += 2
+                else:
+                    lengths.append(b0)
+                    pos += 1
+            text = chunk[pos:pos + lengths[1]].decode("utf-8")
+            assert len(text.encode("utf-16-le")) // 2 == lengths[0]
+            assert chunk[pos + lengths[1]] == 0
+            out.append(text)
+            end = max(end, pos + lengths[1] + 1)
+            continue
         n = struct.unpack_from("<H", chunk, pos)[0]
         pos += 2
         if n & 0x8000:
@@ -75,7 +113,7 @@ def pool_strings(chunk):
     return out
 
 
-def read_axml(blob):
+def read_axml(blob, unknown=None):
     """-> (strings, resource_map, elements, lines). elements: [(depth, name, {key: (resid, typed)})] where key is
     `prefix:name` (`@0x01010003` as the name when the name string is empty) and typed is ('s'|'i'|'h'|'b'|'r', value)."""
     ctype, hsize, size = struct.unpack_from("<HHI", blob, 0)
@@ -98,11 +136,11 @@ def read_axml(blob):
                 ns[strings[uri]] = strings[prefix]
         elif ctype == 0x0102:
             line, comment, nsi, name, astart, asize, count = struct.unpack_from("<IIIIHHH", chunk, 8)
-            assert (hsize, astart, asize, comment) == (16, 20, 20, 0xFFFFFFFF) and nsi == 0xFFFFFFFF
-            assert size == 36 + 20 * count
+            assert (hsize, comment) == (16, 0xFFFFFFFF) and nsi == 0xFFFFFFFF
+            assert astart >= 20 and asize >= 20 and size == 16 + astart + asize * count
             attrs = {}
             for k in range(count):
-                ans, aname, raw, vsize, res0, dtype, data = struct.unpack_from("<IIIHBBI", chunk, 36 + 20 * k)
+                ans, aname, raw, vsize, res0, dtype, data = struct.unpack_from("<IIIHBBI", chunk, 16 + astart + asize * k)
                 assert (vsize, res0) == (8, 0)
                 resid = resmap[aname] if aname < len(resmap) else None
                 local = strings[aname] or "@0x%08x" % resid
@@ -129,8 +167,9 @@ def read_axml(blob):
         elif ctype == 0x0103:
             assert (hsize, size) == (16, 24) and strings[struct.unpack_from("<I", chunk, 20)[0]]
             depth -= 1
-        else:
-            raise AssertionError(f"chunk {ctype:#x}")
+        else:  # a reader skips chunk types it does not know (the 4 header bytes say how far)
+            assert unknown is not None, f"chunk {ctype:#x}"
+            unknown.append(ctype)
         off += size
     assert off == len(blob) and depth == -1
     return strings, resmap, elements, lines
@@ -264,7 +303,7 @@ def mutf8_decode(data):
 
 def read_dex(b):
     """Re-parse a dex and verify every structural field. -> (strings, types)."""
-    assert b[:8] == b"dex\n035\0"
+    assert re.fullmatch(rb"dex\n03[5-9]\0", b[:8])
     checksum, = struct.unpack_from("<I", b, 8)
     assert checksum == zlib.adler32(b[12:]) & 0xFFFFFFFF, "adler32"
     assert b[12:32] == hashlib.sha1(b[32:]).digest(), "sha1 signature"
@@ -404,6 +443,10 @@ def build(tmp, fn, *args, **kwargs):
     return path.read_bytes()
 
 
+ASAR_KINDS = ("traversal", "separator", "slash", "nul-name", "offset-oob", "size-oob", "json-too-long",
+              "offset-negative", "offset-hex", "too-deep", "link-outside", "bad-json")
+
+
 def cases(tmp):
     """name -> bytes, for fixed inputs. Each call builds from scratch."""
     m, s, t = F.SNAGDESK_MANIFEST, F.SNAGDESK_STRINGS, F.SNAGDESK_TYPES
@@ -432,6 +475,16 @@ def cases(tmp):
         "encrypted": lambda: build(tmp, F.make_encrypted_member_zip),
         "duplicates": lambda: build(tmp, F.make_duplicate_names_zip),
         "truncated": lambda: build(tmp, F.make_truncated_zip),
+        "nul_name": lambda: build(tmp, F.make_nul_name_zip),
+        "unsupported_method": lambda: build(tmp, F.make_unsupported_method_zip),
+        "corrupt_deflate": lambda: build(tmp, F.make_corrupt_deflate_zip),
+        "truncated_member": lambda: build(tmp, F.make_truncated_member_zip),
+        "many_directories": lambda: build(tmp, F.make_many_directories_zip),
+        "oversized": lambda: build(tmp, F.make_oversized_member_zip),
+        "electron_asar": lambda: build(tmp, F.make_asar, F.ELECTRON_FILES),
+        "dex039": lambda: F.make_dex(s, t, version="039"),
+        "axml_utf8": lambda: F.make_axml(m, utf8=True, attr_size=24, attr_start=24, extra_chunk=(0x0FF0, b"x")),
+        **{"asar_" + k.replace("-", "_"): (lambda k=k: build(tmp, F.make_asar_hostile, k)) for k in ASAR_KINDS},
     }
 
 
@@ -460,7 +513,7 @@ class TestDeterminism(Base):
         self.assertTrue(all(e["time"] == (0, 0x21) and e["system"] == 3 for e in entries))  # 1980-01-01 00:00
 
     def test_small_fixtures_stay_small(self):
-        big = {"bomb", "many_entries"}
+        big = {"bomb", "many_entries", "many_directories", "oversized"}
         for name, make in cases(self.tmp).items():
             if name not in big:
                 self.assertLess(len(make()), 100 * 1024, name)
@@ -530,8 +583,7 @@ class TestAxml(Base):
         source = elements_from_xml(DATA / "AndroidManifest.xml")
         self.assertEqual(source, expected(F.SNAGDESK_MANIFEST))
         # aapt2 adds four attributes to <manifest>; everything else is identical
-        extras = {"android:compileSdkVersion": ("i", 36), "android:compileSdkVersionCodename": ("s", "16"),
-                  "platformBuildVersionCode": ("i", 36), "platformBuildVersionName": ("i", 16)}
+        extras = {k: typed(v) for k, v in F.AAPT2_ADDED_ATTRS.items()}
         g = strip_ids(g_elements)
         for key, value in extras.items():
             self.assertEqual(g[0][2].pop(key), value)
@@ -546,8 +598,7 @@ class TestAxml(Base):
     def test_equals_the_golden_byte_for_byte_except_line_numbers(self):
         golden = (DATA / "manifest.axml").read_bytes()
         elements = copy.deepcopy(F.SNAGDESK_MANIFEST)
-        elements[0][2].update({"android:compileSdkVersion": 36, "android:compileSdkVersionCodename": "16",
-                               "platformBuildVersionCode": 36, "platformBuildVersionName": 16})
+        elements[0][2].update(F.AAPT2_ADDED_ATTRS)
         ours = F.make_axml(elements)
         self.assertEqual(len(ours), len(golden))
         self.assertEqual(mask_lines(ours), mask_lines(golden))
@@ -556,8 +607,7 @@ class TestAxml(Base):
 
 # Attributes `aapt2 link` stamps into <manifest> from the installed SDK, not from the source XML: they change with the
 # platform android.jar and the build-tools (36 and "16" for the goldens; a newer SDK writes its own values).
-SDK_STAMPED = frozenset({"android:compileSdkVersion", "android:compileSdkVersionCodename",
-                         "platformBuildVersionCode", "platformBuildVersionName"})
+SDK_STAMPED = frozenset(F.AAPT2_ADDED_ATTRS)
 
 
 def without_sdk_stamps(elements):
@@ -629,8 +679,7 @@ class TestProto(Base):
     def test_matches_the_aapt2_golden(self):
         g_elements, g_texts = read_proto((DATA / "manifest.proto").read_bytes())
         g = strip_ids(g_elements)
-        extras = {"android:compileSdkVersion": ("i", 36), "android:compileSdkVersionCodename": ("s", "16"),
-                  "platformBuildVersionCode": ("i", 36), "platformBuildVersionName": ("i", 16)}
+        extras = {k: typed(v) for k, v in F.AAPT2_ADDED_ATTRS.items()}
         for key, value in extras.items():
             self.assertEqual(g[0][2].pop(key), value)
         ours, _ = read_proto(F.make_proto_manifest(F.SNAGDESK_MANIFEST))
@@ -862,24 +911,32 @@ class TestHostileZips(Base):
         with zipfile.ZipFile(self.tmp / "few.zip") as z:
             self.assertEqual(len(z.namelist()), 7)
 
-    def test_nested_beyond_the_depth_limit(self):
-        path = F.make_nested_zip(self.tmp / "nest.zip", depth=3)
-        blob, level = path.read_bytes(), 0
+    def descend(self, blob):
+        """names of the nested zip members, outermost first, and the innermost archive's member list"""
         chain = []
         while True:
             with zipfile.ZipFile(io.BytesIO(blob)) as z:
-                inner = [n for n in z.namelist() if n.endswith(".zip")]
+                inner = [n for n in z.namelist() if n.endswith(".apk")]
                 if not inner:
-                    self.assertEqual(z.namelist(), ["deep.txt"])
-                    break
-                self.assertEqual(len(z.namelist()), 1)
+                    return chain, z.namelist()
+                self.assertEqual(z.namelist(), inner)  # a level holds only the next one
                 chain.append(inner[0])
                 blob = z.read(inner[0])
-            level += 1
-        self.assertEqual(level, 3)
-        self.assertEqual(chain, ["inner1.zip", "inner2.zip", "inner3.zip"])
-        with zipfile.ZipFile(F.make_nested_zip(self.tmp / "n2.zip", depth=2)) as z:
-            self.assertEqual(z.namelist(), ["inner1.zip"])
+
+    def test_nested_apks_in_an_xapk_beyond_the_depth_limit(self):
+        # contract 6.2: depth 2 (XAPK -> APK) is allowed, anything deeper is not; nested members are .apk files
+        for depth, allowed in ((1, True), (2, True), (3, False)):
+            path = F.make_nested_zip(self.tmp / f"nest{depth}.xapk", depth=depth)
+            chain, innermost = self.descend(path.read_bytes())
+            self.assertEqual(chain, [f"inner{n}.apk" for n in range(1, depth + 1)])
+            self.assertIn("AndroidManifest.xml", innermost)  # the innermost is a real apk a lane could read
+            self.assertEqual(len(chain) <= 2, allowed)
+
+    def test_nested_member_name_is_a_parameter(self):
+        path = F.make_nested_zip(self.tmp / "n.zip", depth=2, member="level-{level}.zip")
+        with zipfile.ZipFile(path) as z:
+            self.assertEqual(z.namelist(), ["level-1.zip"])
+        self.assertEqual(F.make_nested_zip.__defaults__[1], "inner{level}.apk")
 
     def test_symlink_member(self):
         _, entries = self.entries(F.make_symlink_zip(self.tmp / "sym.zip"))
@@ -910,12 +967,12 @@ class TestHostileZips(Base):
 
     def test_oversized_member(self):
         size = 3 * 1024 * 1024 + 5
-        blob, entries = self.entries(F.make_oversized_member_zip(self.tmp / "big.zip", size=size))
+        blob, entries = self.entries(F.make_oversized_member_zip(self.tmp / "big.zip", size=size, stored=True))
         (big,) = entries
         self.assertEqual((big["method"], big["usize"], big["csize"]), (0, size, size))  # stored: no ratio to trip
         with zipfile.ZipFile(io.BytesIO(blob)) as z:
             self.assertIsNone(z.testzip())
-        self.assertEqual(F.make_oversized_member_zip.__defaults__, (64 * 1024 * 1024 + 1,))
+        self.assertEqual(F.make_oversized_member_zip.__defaults__, (64 * 1024 * 1024 + 1, False))
 
     def test_truncated_zip(self):
         blob = F.make_truncated_zip(self.tmp / "cut.zip").read_bytes()
@@ -967,6 +1024,18 @@ class TestWithAapt2(Base):
         out = run([AAPT2, "dump", "badging", str(apk)])
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertRegex(out.stdout, r"package: name='com\.example\.snagdesk' versionCode='42' versionName='1\.2\.3'")
+
+    def test_aapt2_reads_the_axml_variants_like_the_default(self):
+        # same tool, same SDK: the dump of each variant must equal the dump of the default layout
+        def dump(**options):
+            apk = F.make_apk(self.tmp / "v.apk", F.make_axml(F.SNAGDESK_MANIFEST, **options), None, None)
+            out = run([AAPT2, "dump", "xmltree", str(apk), "--file", "AndroidManifest.xml"])
+            self.assertEqual(out.returncode, 0, f"{options}: {out.stderr}")
+            return out.stdout
+        base = dump()
+        for options in ({"utf8": True}, {"attr_size": 24, "attr_start": 28}, {"extra_chunk": (0x0FF0, b"abcd")},
+                        {"utf8": True, "attr_size": 24, "attr_start": 24, "extra_chunk": (0x0FF0, b"abcd")}):
+            self.assertEqual(dump(**options), base, options)
 
     def test_aapt2_converts_our_proto_manifest_back_to_axml(self):
         proto_apk = F.make_apk(self.tmp / "p.apk", F.make_proto_manifest(F.SNAGDESK_MANIFEST), None, None,
@@ -1033,13 +1102,282 @@ class TestWithDexdump(Base):
             self.assertEqual(out.returncode, 0, f"{n}: {out.stdout}{out.stderr}")
 
     def test_dexdump_checks_the_checksum(self):
-        good = F.make_dex(F.SNAGDESK_STRINGS, F.SNAGDESK_TYPES)
-        bad = good[:-1] + bytes([good[-1] ^ 1])  # breaks adler32 and sha1
-        path = self.tmp / "bad.dex"
-        path.write_bytes(bad)
-        out = run([DEXDUMP, "-f", str(path)])
-        if out.returncode == 0:
-            self.skipTest("this dexdump does not verify checksums")
+        # `dexdump -c` verifies the checksum and exits: success on ours, failure once a byte is flipped
+        good = self.tmp / "good.dex"
+        good.write_bytes(F.make_dex(F.SNAGDESK_STRINGS, F.SNAGDESK_TYPES))
+        self.assertEqual(run([DEXDUMP, "-c", str(good)]).returncode, 0)
+        raw = good.read_bytes()
+        bad = self.tmp / "bad.dex"
+        bad.write_bytes(raw[:-1] + bytes([raw[-1] ^ 1]))  # breaks adler32 and sha1
+        self.assertNotEqual(run([DEXDUMP, "-c", str(bad)]).returncode, 0)
+
+    def test_dexdump_accepts_the_later_versions(self):
+        for version in ("037", "038", "039"):
+            path = self.tmp / f"{version}.dex"
+            path.write_bytes(F.make_dex(F.SNAGDESK_STRINGS, F.SNAGDESK_TYPES, version=version))
+            out = run([DEXDUMP, "-f", str(path)])
+            self.assertEqual(out.returncode, 0, f"{version}: {out.stdout}{out.stderr}")
+
+    def test_dexdump_accepts_the_apk_dex(self):
+        path = self.tmp / "a.apk"
+        F.make_apk(path, F.SNAGDESK_MANIFEST, F.SNAGDESK_STRINGS, F.SNAGDESK_TYPES)
+        with zipfile.ZipFile(path) as z:
+            (self.tmp / "classes.dex").write_bytes(z.read("classes.dex"))
+        self.assertEqual(run([DEXDUMP, "-c", str(self.tmp / "classes.dex")]).returncode, 0)
+
+
+# ----------------------------------------------------------------------------------------- review round: new tests
+
+class TestScannerMarkerAndConstants(Base):
+    def test_no_fixture_carries_the_scanner_marker(self):
+        # a line with the marker is skipped by learn.py scan-private, so a marker inside fixture bytes would hide a leak
+        self.assertNotIn("scan-private", F.SAMPLE_BUNDLE)
+        for name, make in cases(self.tmp).items():
+            self.assertNotIn(b"scan-private", make(), name)
+        for path in DATA.iterdir():
+            self.assertNotIn(b"scan-private", path.read_bytes(), path.name)
+
+    def test_fake_key_is_built_from_pieces_and_reaches_the_bundles(self):
+        self.assertEqual(F.FAKE_AWS_KEY, "AKIA" + "IOSFODNN7" + "EXAMPLE")
+        self.assertRegex(F.FAKE_AWS_KEY, r"^AKIA[0-9A-Z]{16}$")  # the shape lanes must scrub (contract 6.2 aws-key)
+        self.assertIn(F.FAKE_AWS_KEY, F.SAMPLE_BUNDLE)
+        source = (Path(__file__).resolve().parent / "fixtures_archives.py").read_text(encoding="utf-8")
+        self.assertNotIn(F.FAKE_AWS_KEY, source)  # the repo scanner needs no exemption
+
+    def test_exported_constants(self):
+        self.assertEqual(set(F.AAPT2_ADDED_ATTRS), {"android:compileSdkVersion", "android:compileSdkVersionCodename",
+                                                    "platformBuildVersionCode", "platformBuildVersionName"})
+        self.assertEqual(F.HERMES_MAGIC, bytes([0xC6, 0x1F, 0xBC, 0x03, 0xC1, 0x03, 0x19, 0x1F]))
+        self.assertTrue(F.HERMES_BUNDLE.startswith(F.HERMES_MAGIC))
+        with zipfile.ZipFile(io.BytesIO(F.ipa_bytes(F.IPA_INFO))) as z:
+            self.assertEqual(plistlib.loads(z.read("Payload/Snag.app/Info.plist")), F.IPA_INFO)
+        for key in ("CFBundleIdentifier", "CFBundleShortVersionString", "CFBundleVersion", "MinimumOSVersion",
+                    "UIBackgroundModes", "CFBundleURLTypes", "NSAppTransportSecurity", "NSCameraUsageDescription"):
+            self.assertIn(key, F.IPA_INFO)
+
+    def test_electron_file_set(self):
+        _, _, got = read_asar(F.asar_bytes(F.ELECTRON_FILES)[0])
+        text = {k: v[1].decode() for k, v in got.items() if v[0] == "file"}
+        main = json.loads(text["package.json"])["main"]
+        self.assertIn(main, text)
+        for needle in ('ipcMain.handle("', 'ipcMain.on("', "webContents.send(", "nodeIntegration: true",
+                       "contextIsolation: false", "webSecurity: false", 'setAsDefaultProtocolClient("snagdesk")',
+                       "preload:", "autoUpdater"):
+            self.assertIn(needle, text[main], needle)
+        preload = next(v for k, v in text.items() if "contextBridge" in v)
+        self.assertIn('contextBridge.exposeInMainWorld("api"', preload)
+        self.assertIn('ipcRenderer.invoke("', preload)
+        self.assertIn('ipcRenderer.send("', preload)
+        self.assertTrue(any(k.endswith(".html") for k in text))
+
+
+class TestAxmlVariants(Base):
+    ELEMENTS = [(0, "manifest", {"package": F.PACKAGE, "android:versionName": "café " + "x" * 130,
+                                 "android:label": "\U0001f600 emoji", "android:versionCode": 7}),
+                (1, "application", {"android:name": ".App", "android:exported": True})]
+
+    def roundtrip(self, **options):
+        blob = F.make_axml(self.ELEMENTS, **options)
+        unknown = []
+        strings, resmap, elements, _ = read_axml(blob, unknown)
+        self.assertEqual(strip_ids(elements), expected(self.ELEMENTS))
+        return blob, strings, unknown
+
+    def test_utf8_pool_with_two_byte_lengths(self):
+        blob, strings, _ = self.roundtrip(utf8=True)
+        self.assertEqual(struct.unpack_from("<I", blob, 8 + 16)[0] & 0x100, 0x100)  # pool flags
+        long_text = "café " + "x" * 130  # 135 UTF-16 units, 136 bytes: both lengths need the 2-byte form
+        self.assertIn(bytes([0x80, 135, 0x80, 136]) + long_text.encode("utf-8") + b"\0", blob)
+        # short strings keep the one-byte form; non-ASCII has different unit and byte counts
+        self.assertIn(bytes([4, 5]) + "café".encode() + b"\0", F.make_axml([(0, "m", {"v": "café"})], utf8=True))
+        self.assertIn(bytes([2, 4]) + "\U0001f600".encode() + b"\0", F.make_axml([(0, "m", {"v": "\U0001f600"})], utf8=True))
+
+    def test_utf8_and_utf16_describe_the_same_manifest(self):
+        a = read_axml(F.make_axml(F.SNAGDESK_MANIFEST, utf8=True))
+        b = read_axml(F.make_axml(F.SNAGDESK_MANIFEST))
+        self.assertEqual(a[0], b[0])
+        self.assertEqual(a[1:3], b[1:3])
+        self.assertLess(len(F.make_axml(F.SNAGDESK_MANIFEST, utf8=True)), len(F.make_axml(F.SNAGDESK_MANIFEST)))
+
+    def test_wide_attributes_and_attribute_start(self):
+        for start, size in ((20, 24), (24, 20), (28, 32)):
+            blob, _, _ = self.roundtrip(attr_start=start, attr_size=size)
+            off = blob.index(struct.pack("<HH", 0x0102, 16))
+            astart, asize = struct.unpack_from("<HH", blob, off + 8 + 16)
+            self.assertEqual((astart, asize), (start, size))
+        self.assertNotEqual(F.make_axml(self.ELEMENTS, attr_size=24), F.make_axml(self.ELEMENTS))
+
+    def test_unknown_chunk_is_skippable(self):
+        blob, _, unknown = self.roundtrip(extra_chunk=(0x0FF0, b"opaque-payload"))
+        self.assertEqual(unknown, [0x0FF0])
+        self.assertEqual(struct.unpack_from("<I", blob, 4)[0], len(blob))
+        self.assertIn(struct.pack("<HHI", 0x0FF0, 8, 24) + b"opaque-payload\0\0", blob)
+
+    def test_all_options_together_and_defaults_unchanged(self):
+        self.roundtrip(utf8=True, attr_start=24, attr_size=28, extra_chunk=(0x0FF1, b""))
+        self.assertEqual(F.make_axml(self.ELEMENTS), F.make_axml(self.ELEMENTS, utf8=False, attr_size=20, attr_start=20,
+                                                                  extra_chunk=None))
+
+    def test_bad_options(self):
+        for bad in ({"attr_size": 19}, {"attr_start": 16}, {"extra_chunk": (0x0102, b"")}, {"extra_chunk": (0x0001, b"")}):
+            with self.assertRaises(ValueError):
+                F.make_axml(self.ELEMENTS, **bad)
+
+
+class TestMoreHostileZips(Base):
+    def test_nul_in_a_member_name(self):
+        blob = F.make_nul_name_zip(self.tmp / "nul.zip").read_bytes()
+        entries = raw_zip(blob)  # read from the raw central directory: zipfile treats the NUL differently by version
+        names = [e["name"] for e in entries]
+        self.assertTrue(any("\0" in n for n in names), names)
+        self.assertIn("ok.txt", names)
+        self.assertEqual(blob.count(b"evil\0.txt"), 2)  # local header and central directory
+
+    def test_unsupported_compression_method(self):
+        blob = F.make_unsupported_method_zip(self.tmp / "m.zip").read_bytes()
+        by = {e["name"]: e for e in raw_zip(blob)}
+        self.assertEqual(by["weird.bin"]["method"], 99)
+        self.assertEqual(by["ok.txt"]["method"], 0)
+        with zipfile.ZipFile(io.BytesIO(blob)) as z:
+            with self.assertRaises(NotImplementedError):
+                z.read("weird.bin")
+            self.assertEqual(z.read("ok.txt"), b"fine\n")
+
+    def test_corrupt_deflate_data_with_a_valid_central_directory(self):
+        blob = F.make_corrupt_deflate_zip(self.tmp / "c.zip").read_bytes()
+        by = {e["name"]: e for e in raw_zip(blob)}
+        bad = by["bad.bin"]
+        self.assertEqual(bad["method"], 8)
+        start = bad["offset"] + 30 + len(b"bad.bin")
+        with self.assertRaises(zlib.error):
+            zlib.decompress(blob[start:start + bad["csize"]], -15)
+        with zipfile.ZipFile(io.BytesIO(blob)) as z:
+            self.assertEqual(z.namelist(), ["bad.bin", "ok.txt"])
+            with self.assertRaises((zlib.error, zipfile.BadZipFile, EOFError)):
+                z.read("bad.bin")
+            self.assertEqual(z.read("ok.txt"), b"fine\n")
+
+    def test_member_data_cut_short_with_an_intact_central_directory(self):
+        blob = F.make_truncated_member_zip(self.tmp / "t.zip").read_bytes()
+        entries = raw_zip(blob)
+        cut, nxt = entries[0], entries[1]
+        self.assertEqual(cut["name"], "cut.bin")
+        data_start = cut["offset"] + 30 + len(cut["name"])
+        self.assertGreater(cut["csize"], nxt["offset"] - data_start)  # the declared size runs into the next member
+        self.assertTrue(blob[-22:].startswith(b"PK\x05\x06"))
+        with zipfile.ZipFile(io.BytesIO(blob)) as z:
+            with self.assertRaises((zipfile.BadZipFile, EOFError, zlib.error)):
+                z.read("cut.bin")
+
+    def test_oversized_member_is_cheap_and_under_the_ratio_limit_by_default(self):
+        blob = F.make_oversized_member_zip(self.tmp / "big.zip").read_bytes()
+        (big,) = raw_zip(blob)
+        self.assertEqual(big["usize"], 64 * 1024 * 1024 + 1)
+        self.assertEqual(big["method"], 8)
+        self.assertLessEqual(big["usize"], 100 * big["csize"])  # the ratio rule does not fire: the size cap must
+        self.assertLess(len(blob), 4 * 1024 * 1024)
+        start = big["offset"] + 30 + len(b"big.bin")
+        inflater, total, crc = zlib.decompressobj(-15), 0, 0
+        data = blob[start:start + big["csize"]]
+        for i in range(0, len(data), 65536):
+            chunk = inflater.decompress(data[i:i + 65536])
+            total, crc = total + len(chunk), zlib.crc32(chunk, crc)
+        tail = inflater.flush()
+        total, crc = total + len(tail), zlib.crc32(tail, crc)
+        self.assertEqual((total, crc & 0xFFFFFFFF), (big["usize"], big["crc"]))
+        self.assertTrue(inflater.eof)
+
+    def test_oversized_member_stored_variant(self):
+        (big,) = raw_zip(F.make_oversized_member_zip(self.tmp / "s.zip", size=1000, stored=True).read_bytes())
+        self.assertEqual((big["method"], big["csize"], big["usize"]), (0, 1000, 1000))
+
+    def test_many_entries_as_directories_do_not_count_as_files(self):
+        entries = raw_zip(F.make_many_directories_zip(self.tmp / "d.zip").read_bytes())
+        self.assertEqual(len(entries), 50_001)
+        self.assertTrue(all(e["name"].endswith("/") and e["usize"] == 0 for e in entries))
+        with zipfile.ZipFile(self.tmp / "d.zip") as z:
+            self.assertEqual(sum(not i.is_dir() for i in z.infolist()), 0)
+
+
+class TestMoreHostileAsars(Base):
+    def header(self, path):
+        blob = Path(path).read_bytes()
+        four, header_size, payload, json_len = struct.unpack_from("<IIII", blob, 0)
+        return blob, four, header_size, json_len
+
+    def test_nul_in_a_name(self):
+        blob, _, _, jl = self.header(F.make_asar_hostile(self.tmp / "a.asar", "nul-name"))
+        (name,) = json.loads(blob[16:16 + jl])["files"]
+        self.assertIn("\0", name)
+
+    def test_folders_nested_beyond_64(self):
+        blob, _, _, jl = self.header(F.make_asar_hostile(self.tmp / "a.asar", "too-deep"))
+        node, depth = json.loads(blob[16:16 + jl]), 0
+        while "files" in node:
+            (name, node), = node["files"].items()
+            depth += 1
+        self.assertGreater(depth, 64)
+
+    def test_link_pointing_outside(self):
+        blob, _, _, jl = self.header(F.make_asar_hostile(self.tmp / "a.asar", "link-outside"))
+        (entry,) = json.loads(blob[16:16 + jl])["files"].values()
+        self.assertTrue(entry["link"].startswith("../"))
+
+    def test_malformed_json_with_consistent_lengths(self):
+        blob, four, header_size, jl = self.header(F.make_asar_hostile(self.tmp / "a.asar", "bad-json"))
+        self.assertEqual(four, 4)
+        self.assertLessEqual(16 + jl, len(blob))
+        with self.assertRaises(ValueError):
+            json.loads(blob[16:16 + jl])
+
+    def test_non_decimal_offsets(self):
+        for kind, text in (("offset-negative", "-1"), ("offset-hex", "0x10")):
+            blob, _, _, jl = self.header(F.make_asar_hostile(self.tmp / f"{kind}.asar", kind))
+            (entry,) = json.loads(blob[16:16 + jl])["files"].values()
+            self.assertEqual(entry["offset"], text)
+            self.assertFalse(entry["offset"].isdigit())
+
+    def test_unpacked_entry_whose_real_path_escapes(self):
+        try:
+            path = F.make_asar_hostile(self.tmp / "app.asar", "unpacked-escape")
+        except F.SymlinkUnavailable as e:
+            self.skipTest(str(e))
+        blob, _, _, jl = self.header(path)
+        tree = json.loads(blob[16:16 + jl])
+        entry = tree["files"]["dir"]["files"]["leak.txt"]
+        self.assertTrue(entry.get("unpacked"))
+        side = Path(str(path) + ".unpacked")
+        real = os.path.normcase(os.path.realpath(side / "dir" / "leak.txt"))
+        self.assertFalse(real.startswith(os.path.normcase(os.path.realpath(side)) + os.sep))
+        self.assertEqual(Path(os.path.realpath(side / "dir" / "leak.txt")).read_bytes(), b"outside\n")
+
+
+class TestSymlinkFolder(Base):
+    def test_folder_with_a_link_pointing_outside(self):
+        try:
+            made = F.make_folder_with_symlink(self.tmp / "tree")
+        except F.SymlinkUnavailable as e:
+            self.skipTest(str(e))
+        root = os.path.normcase(os.path.realpath(made["root"]))
+        self.assertTrue((made["root"] / "ok.txt").is_file())
+        self.assertTrue(made["links"])
+        for link in made["links"]:
+            real = os.path.normcase(os.path.realpath(link))
+            self.assertFalse(real.startswith(root + os.sep), link)  # resolves outside the folder
+            self.assertNotEqual(os.path.normcase(os.path.abspath(link)), real)
+        self.assertEqual((made["outside"] / "secret.txt").read_bytes(), b"outside\n")
+
+
+class TestDexVersions(Base):
+    def test_versions(self):
+        for version in ("035", "037", "038", "039"):
+            blob = F.make_dex(F.SNAGDESK_STRINGS, F.SNAGDESK_TYPES, version=version)
+            self.assertEqual(blob[:8], b"dex\n" + version.encode() + b"\0")
+            read_dex(blob)
+        self.assertEqual(F.make_dex(["a"], []), F.make_dex(["a"], [], version="035"))
+        for bad in ("034", "04", "abc", 35):
+            with self.assertRaises(ValueError):
+                F.make_dex(["a"], [], version=bad)
 
 
 # the pinned hashes are filled in by the first successful run of this module with FX1_PRINT_HASHES=1

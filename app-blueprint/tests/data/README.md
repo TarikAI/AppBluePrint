@@ -32,16 +32,20 @@ What differs, and why:
 * **aapt2 adds four attributes to `<manifest>`**: `android:compileSdkVersion` (36), `android:compileSdkVersionCodename`
   ("16"), `platformBuildVersionCode` (36) and `platformBuildVersionName` (16, an integer). The builder adds nothing by itself.
 * **Line numbers** in node headers (see above).
-* **Proto manifest**: aapt2 writes the attributes of `<manifest>` in its own order (`package` first), keeps the whitespace
-  text nodes of the source with real line and column positions, and writes the source position of every attribute. The builder
-  writes the same fields (text nodes by default, `text=False` drops them) with synthetic positions. The tests compare
-  elements, attribute names, resource ids, values and value types, not bytes.
+* **Proto manifest**: aapt2 does not sort attributes by resource id (in the golden `package` comes first, then the others in
+  an order of its own, with its four added attributes among them) and records real source positions: line and column on
+  elements, text nodes and namespace declarations, line only on attributes. The builder keeps the attribute order it is given
+  and writes synthetic positions (line = element number + 2, column = 4 x depth; line only on attributes). Whitespace text
+  nodes are written by default (`text=False` drops them), as aapt2 keeps those of the source. The tests compare elements,
+  attribute names, resource ids, values and value types, not bytes.
 * `aapt2 convert --output-format binary` turns the builder's proto manifest into an AXML equal to `make_axml`'s output
   apart from line numbers (checked in `test_aapt2_converts_our_proto_manifest_back_to_axml`).
 
 ### Notes for the parser workstream
 
-* The golden AXML uses a UTF-16 string pool (`flags` = 0), as contract 6.7 says. UTF-8 pools exist in the wild; the builder does not write them.
+* The golden AXML uses a UTF-16 string pool (`flags` = 0), as contract 6.7 says. UTF-8 pools exist in the wild: `make_axml(..., utf8=True)`
+  writes one (and `attr_size`, `attr_start`, `extra_chunk` write other legal layouts); aapt2 reads all of them, and
+  `test_aapt2_reads_the_axml_variants_like_the_default` checks that with the installed tool.
 * `0x01010000` (theme) is a reference value (`@0x01030224`, data type `0x01`); the proto side stores it as `@android:style/Theme.Material`
   plus a compiled reference item.
 * `package` has no namespace and no resource id; the aapt2-added `platformBuildVersionCode` and `platformBuildVersionName`
