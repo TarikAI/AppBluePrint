@@ -187,6 +187,23 @@ def _failed_file(home, name, exc):
     return name.replace(".", "/") + ".py"
 
 
+def is_project_copy(home=TOOL_HOME):
+    """True when the tool runs from a project's .blueprint/bin, False when it runs from the skill folder."""
+    return home.name == "bin" and home.parent.name == ".blueprint"
+
+
+def repair_command(home=TOOL_HOME):
+    """What fixes a damaged tool: refresh a project copy from the skill, or reinstall the skill itself."""
+    if is_project_copy(home):
+        return "python <skill>/scripts/blueprint.py init --refresh-tool"
+    return "reinstall the skill: python install.py (from the app-blueprint repository)"
+
+
+def _where(home):
+    """Wording for the launcher's incomplete message when the skill itself, not a copy, is damaged (review R2-N7)."""
+    return "" if is_project_copy(home) else "; this is the skill folder, not a project copy: " + repair_command(home)
+
+
 def check_package(home=TOOL_HOME):
     """The start-up completeness check (cli). Returns (module names present, failure), failure being None or
     (bp/... file, exception) for the first module that exists but fails to import.
@@ -200,7 +217,7 @@ def check_package(home=TOOL_HOME):
     missing = [m for m in sorted(set(required_modules(home)) | packages) if m not in present]
     if missing:
         names = [m.replace(".", "/") + ("/__init__.py" if m in packages else ".py") for m in missing]
-        raise ImportError(f"{', '.join(names)} missing")
+        raise ImportError(f"{', '.join(names)} missing" + _where(home))
     failure = None
     for name in present:
         if name in ("bp.api", "bp.cli"):  # the launcher imports these itself (bp.api imports bp.cli)
@@ -209,7 +226,7 @@ def check_package(home=TOOL_HOME):
             mod = importlib.import_module(name)
         except ModuleNotFoundError as e:
             if (e.name == "bp" or (e.name or "").startswith("bp.")) and e.name not in present:
-                raise ImportError(f"{e.name.replace('.', '/')}.py missing (needed by {name})") from e
+                raise ImportError(f"{e.name.replace('.', '/')}.py missing (needed by {name})" + _where(home)) from e
             failure = failure or (_failed_file(home, name, e), e)
             continue
         except Exception as e:  # noqa: BLE001 - reported by cli as a named failure and an incident

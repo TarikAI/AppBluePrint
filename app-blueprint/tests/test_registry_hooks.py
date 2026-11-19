@@ -460,7 +460,7 @@ class ViewFileTest(CliTestBase):
         import stat
         notes = self.root / ".blueprint" / "NOTES-3.md"
         state_path = self.root / ".blueprint" / "state.json"
-        self.run_("render")
+        self.run_("sync")  # writes state.json and the base views
         src = "WANT = [True]\ndef views(ctx):\n    return {'NOTES-3.md': 'n\\n'} if WANT[0] else {}\n"
         with extension({"views/features_md.py": src}):
             mod = importlib.import_module("bp.views.features_md")

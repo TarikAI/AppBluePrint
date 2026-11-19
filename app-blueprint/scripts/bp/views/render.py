@@ -6,10 +6,11 @@ and every tab-*.js asset inlined at the template's /*__TABS_JS__*/ placeholder, 
 """
 import json
 import re
+import sys
 
 from bp.version import TOOL_VERSION
 from bp import registry
-from bp.core import TOOL_HOME, bp_dir, find_asset, write_text_if_changed
+from bp.core import TOOL_HOME, BlueprintError, bp_dir, find_asset, write_text_if_changed
 from bp.plan import GLYPH, LABEL, STATES, save_state
 from bp.data import data_view
 from bp.status import compute
@@ -18,6 +19,7 @@ from bp.views.structure import render_structure
 from bp.views.roster import render_roster
 
 BASE_VIEWS = ("STRUCTURE.md", "ROSTER.md", "map.html")
+RESERVED_VIEWS = BASE_VIEWS + ("README.md",)  # init writes README.md for people to edit
 _VIEW_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*\.md$")
 
 
@@ -65,32 +67,42 @@ def _html_escape(s):
 
 
 def _hook_views(ctx):
-    """{filename: text} from every views hook; a name must be a plain .md file name in .blueprint/ and not a base view,
-    and two modules may not return the same name (else RuntimeError: a bug in a hook)."""
+    """{filename: (module, text)} from every views hook. A name must be a plain .md file name in .blueprint/, not a
+    base view, not README.md (init's, edited by hand) and not one another module returns (else RuntimeError: a bug
+    in a hook)."""
     out = {}
     for name, views in registry.collect("views", ctx):
         for fname, text in (views or {}).items():
-            if not isinstance(fname, str) or not _VIEW_NAME.match(fname) or fname in BASE_VIEWS or fname in out:
+            if not isinstance(fname, str) or not _VIEW_NAME.match(fname) or fname in RESERVED_VIEWS or fname in out:
                 raise RuntimeError(f"{name}.views returned the view name {fname!r}: a .md file name in .blueprint/, "
-                                   "not a base view and not one another module returns")
-            out[fname] = str(text)
+                                   "not a base view, not README.md and not one another module returns")
+            out[fname] = (name, str(text))
     return out
 
 
 def render_all(root, plan, state, quiet=False, check=False):
     """Write (or with check=True, compare) every view that should exist for this plan; returns the stale names.
 
-    The views hooks' files are recorded in state.json as "generatedViews". A recorded name that no module returns any
-    more should not exist: render deletes it (and records the new list), render --check reports it. Base views are
-    never deleted, and a file render never wrote is not touched. A version 1 plan with no hook views writes no key."""
+    The views hooks' files are recorded in state.json as "generatedViews": the union of the old and new names is
+    saved before any view is written, and the exact list after the deletions, so a crash in between leaves a superset
+    that the next render cleans up (review R2-M4). A recorded name that no module returns any more should not exist:
+    render deletes it, render --check reports it. Base views are never deleted; a file render never wrote is never
+    touched, and a view whose name is such a file is not written: render names it and the module, renders the other
+    views, and fails (view-conflict, exit 1). A plan with no hook views writes no key."""
     ctx = build_context(root, plan, state)
     comp = ctx["comp"]
     outputs = {"STRUCTURE.md": render_structure(plan, state, comp, ctx), "ROSTER.md": render_roster(plan, state, comp, ctx)}
-    hook_views = _hook_views(ctx)
-    outputs.update(hook_views)
-    recorded = state.get("generatedViews")
-    recorded = [n for n in recorded if isinstance(n, str) and _VIEW_NAME.match(n) and n not in BASE_VIEWS] \
-        if isinstance(recorded, list) else []
+    current = state.get("generatedViews") if "generatedViews" in state else []
+    recorded = [n for n in current if isinstance(n, str) and _VIEW_NAME.match(n) and n not in RESERVED_VIEWS]         if isinstance(current, list) else []
+    hook = _hook_views(ctx)
+    conflicts = {n: mod for n, (mod, _) in hook.items() if n not in recorded and (bp_dir(root) / n).exists()}
+    views = {n: text for n, (_, text) in hook.items() if n not in conflicts}
+    outputs.update(views)
+    if not check:
+        union = sorted(set(recorded) | set(views))
+        if union != current:
+            state["generatedViews"] = union
+            save_state(root, state)
     m = render_map(plan, state, comp, ctx)
     if m is not None:
         outputs["map.html"] = m
@@ -112,10 +124,16 @@ def render_all(root, plan, state, quiet=False, check=False):
             path.unlink()
             if not quiet:
                 print(f"removed .blueprint/{name} (nothing to show)")
-    now = sorted(hook_views)
-    if not check and now != (state.get("generatedViews") if "generatedViews" in state else []):
-        state["generatedViews"] = now
+    if not check and sorted(views) != state.get("generatedViews", []):
+        state["generatedViews"] = sorted(views)
         save_state(root, state)
+    for name, mod in sorted(conflicts.items()):
+        print(f"render: .blueprint/{name} exists and was not written by blueprint.py, but the view module {mod} writes "
+              "that name; move or rename it, then run render again.", file=sys.stderr)
+        stale.append(name)
     if m is None and not quiet:
         print("map.template.html not found next to the script; map.html skipped. Run init --refresh-tool.")
+    if conflicts and not check:
+        raise BlueprintError("view-conflict", f"{len(conflicts)} view(s) not written: " + ", ".join(sorted(conflicts)),
+                             next="move or rename the file(s) named above, then run render")
     return stale

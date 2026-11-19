@@ -16,7 +16,8 @@ from pathlib import Path
 
 from bp import registry
 from bp.version import TOOL_VERSION
-from bp.core import BlueprintError, append_log, bp_dir, die, emit, find_root, git_head, norm, now_iso
+from bp.core import (BlueprintError, append_log, bp_dir, die, emit, find_root, git_head, norm, now_iso, path_key,
+                     project_path)
 from bp.globs import pattern_instance_rx
 from bp.learn import record_incident
 from bp.plan import GLYPH, LABEL, STATES, load_plan, load_state, owner_of, planned_file, save_state
@@ -91,30 +92,14 @@ def register(name, p):
         p.set_defaults(fn=cmd_hook)
 
 
-def project_path(root, raw):
-    """The path guard and hook pre decide on (one function, so they cannot drift): raw resolved against the project
-    root (an absolute path as it is), with '.', '..', repeated separators, symlinks and junctions resolved, and on
-    Windows backslashes and letter case taken from the disk; then made root-relative with forward slashes. None when
-    it resolves outside the project (or on another drive)."""
-    p = Path(str(raw))
-    if not p.is_absolute():
-        p = Path(root) / p
-    try:
-        rel = norm(os.path.relpath(p.resolve(), Path(root).resolve()))
-    except (ValueError, OSError):
-        return None
-    if rel == ".." or rel.startswith("../"):
-        return None
-    return rel
-
-
 GUARD_REPAIR = ("Writes are refused until the plan loads. Fix .blueprint/blueprint.json, then run: "
                 "python .blueprint/bin/blueprint.py validate")
 
 
-def _load_for_guard(root, rel, ask=False):
-    """The plan for guard and hook pre. A blueprint that exists but cannot load (any load error) refuses every write
-    (exit 2, or the ask decision) except one to .blueprint/blueprint.json itself, so the plan can be repaired."""
+def _load_for_guard(args, root, rel, ask=False):
+    """The plan for guard and hook pre. A blueprint that exists but cannot be loaded, for any reason (a load error, or
+    a crash, which is also recorded as an incident), refuses every write (exit 2, or the ask decision) except one to
+    .blueprint/blueprint.json itself, so the plan can be repaired."""
     try:
         return load_plan(root)
     except SystemExit as e:
@@ -122,14 +107,16 @@ def _load_for_guard(root, rel, ask=False):
             raise
         if not getattr(e, "printed", True):  # a BlueprintError whose message is not on stderr yet
             print(f"error: {e.message}", file=sys.stderr)
-        if rel == ".blueprint/blueprint.json":
-            sys.exit(0)
-        if ask:
-            print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "ask",
-                                                     "permissionDecisionReason": GUARD_REPAIR}}))
-            sys.exit(0)
-        print(GUARD_REPAIR, file=sys.stderr)
-        sys.exit(2)
+    except Exception as exc:  # noqa: BLE001 - review R2-M1: never let a crash allow a write
+        record_incident(args, exc)
+    if path_key(rel) == path_key(".blueprint/blueprint.json"):
+        sys.exit(0)
+    if ask:
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "ask",
+                                                 "permissionDecisionReason": GUARD_REPAIR}}))
+        sys.exit(0)
+    print(GUARD_REPAIR, file=sys.stderr)
+    sys.exit(2)
 
 
 def _guard_signal(root, msg):
@@ -427,7 +414,7 @@ def cmd_guard(args):
     rel = project_path(root, args.path)
     path = rel if rel is not None else norm(args.path)  # outside the project: decided on the given path, as 1.x
     if (bp_dir(root) / "blueprint.json").exists():
-        plan = _load_for_guard(root, path)
+        plan = _load_for_guard(args, root, path)
     else:
         try:
             plan = load_plan(root)
@@ -463,9 +450,12 @@ def cmd_hook(args):
     # BLUEPRINT_GUARD: block (default) stops the write and tells the agent why;
     # ask lets the person approve it; off disables the guard.
     mode = os.environ.get("BLUEPRINT_GUARD", "block")
+    if mode not in ("block", "ask", "off"):  # review R2-N4: an unknown value is block (1.x allowed every write)
+        print(f"BLUEPRINT_GUARD={mode!r} is not one of block, ask, off; treating it as block.", file=sys.stderr)
+        mode = "block"
     if args.when == "pre" and mode == "off":
         sys.exit(0)
-    plan = _load_for_guard(root, rel, ask=mode == "ask") if args.when == "pre" else load_plan(root)
+    plan = _load_for_guard(args, root, rel, ask=mode == "ask") if args.when == "pre" else load_plan(root)
     if args.when == "pre":
         by = os.environ.get("BLUEPRINT_OWNER")
         code, msg = guard_decision(root, plan, rel, by)

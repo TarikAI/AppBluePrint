@@ -48,7 +48,9 @@ def upgrade_state(raw):
     if not isinstance(raw, dict):
         return raw
     if raw.get("stateVersion") == 2 and type(raw.get("stateVersion")) is int:
-        return copy.deepcopy(raw)
+        out = copy.deepcopy(raw)
+        out.setdefault("tasks", {})  # review R2-N5
+        return out
     out = {"stateVersion": 2}  # no stateVersion, or any value but the int 2: version 1 (review N2)
     out.update({k: copy.deepcopy(v) for k, v in raw.items() if k != "stateVersion"})
     if not isinstance(out.get("tasks"), dict):

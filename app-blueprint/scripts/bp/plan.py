@@ -283,6 +283,12 @@ def load_raw_plan(root):
         return read_json(path)
     except json.JSONDecodeError as e:
         _load_error("bad-json", f"blueprint.json is not valid JSON: {e}", FIX_NEXT)
+    except UnicodeDecodeError as e:  # review R2-M1: unreadable is a load error too (bad-json), never a crash
+        _load_error("bad-json", f"blueprint.json is not UTF-8 text: {e}", FIX_NEXT)
+    except RecursionError:
+        _load_error("bad-json", "blueprint.json is nested too deeply to read", FIX_NEXT)
+    except OSError as e:
+        _load_error("bad-json", f"blueprint.json cannot be read: {e.strerror or e}", FIX_NEXT)
 
 
 def load_plan(root):

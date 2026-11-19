@@ -13,7 +13,7 @@ import sys
 from bp.version import TOOL_VERSION
 from bp import registry
 from bp.core import TOOL_HOME, BlueprintError
-from bp.install import check_package
+from bp.install import check_package, repair_command
 from bp.learn import record_incident
 
 # The start-up completeness check (install.check_package): in a project copy every module its MANIFEST lists must
@@ -134,6 +134,18 @@ def main(argv=None):
             sys.stderr.reconfigure(encoding="utf-8")
         except (ValueError, OSError):
             pass
+    if LOAD_FAILURE is not None and args.cmd == "doctor":  # review R2-N6: doctor still runs, and reports it
+        rel, exc = LOAD_FAILURE
+        module = "bp." + rel[3:-3].replace("/", ".").replace(".__init__", "")
+        print(f"error: {module} ({rel}) failed to load: {type(exc).__name__}: {exc}", file=sys.stderr)
+        print(f"  next: {repair_command()}", file=sys.stderr)
+        try:
+            args.fn(args)
+        except SystemExit:
+            pass
+        except Exception as e:  # noqa: BLE001 - doctor reports what it can; the exit status says something is wrong
+            print(f"doctor could not finish: {type(e).__name__}: {e}", file=sys.stderr)
+        sys.exit(1)
     if LOAD_FAILURE is not None:  # a module that exists but does not import: a bug, named, an incident (review N6)
         rel, exc = LOAD_FAILURE
         print(f"error: the tool at {TOOL_HOME} failed to load {rel} ({type(exc).__name__}: {exc})", file=sys.stderr)

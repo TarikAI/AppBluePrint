@@ -73,6 +73,71 @@ def norm(p):
     return p
 
 
+def path_key(rel):
+    """The form to compare two repo-relative paths with: os.path.normcase (lower case on Windows) and forward
+    slashes. refuse hooks compare paths with it, as guard and hook pre do (contract 1.4)."""
+    return os.path.normcase(str(rel)).replace("\\", "/")
+
+
+def _strip_long_prefix(raw):
+    r"""Drop a leading \\?\ (and turn \\?\UNC\server\share into \\server\share)."""
+    s = str(raw)
+    if s[:8].upper() == "\\\\?\\UNC\\":
+        return "\\\\" + s[8:]
+    if s.startswith("\\\\?\\"):
+        return s[4:]
+    return s
+
+
+def project_path(root, raw):
+    r"""The repo-relative path guard and hook pre decide on (one function, so they cannot drift), or None when it is
+    outside the project.
+
+    raw is taken against the project root (an absolute path as it is); \\?\ prefixes are dropped; '.', '..',
+    repeated separators, symlinks and junctions are resolved, and case and separators come from the disk for the part
+    that exists. When the drive spellings differ (an admin share \\host\C$, subst, a mapped drive), the resolved
+    path's existing ancestors are compared with the root by os.path.samefile. On Windows the part that does not exist
+    yet loses the trailing dots and spaces of each segment, as Windows drops them when it creates the file. Forward
+    slashes; compare results with path_key."""
+    p = Path(_strip_long_prefix(raw))
+    if not p.is_absolute():
+        p = Path(root) / p
+    root_r = Path(root).resolve()
+    try:
+        full = p.resolve()
+    except (OSError, ValueError):
+        return None
+    rel = None
+    try:
+        r = os.path.relpath(full, root_r)
+        if not (r == ".." or r.startswith(".." + os.sep) or os.path.isabs(r)):
+            rel = r
+    except ValueError:  # another drive spelling
+        pass
+    if rel is None:
+        for anc in [full] + list(full.parents):
+            try:
+                if anc.exists() and os.path.samefile(anc, root_r):
+                    rel = str(full.relative_to(anc)) or "."
+                    break
+            except (OSError, ValueError):
+                continue
+    if rel is None:
+        return None
+    parts = [x for x in norm(rel).split("/") if x not in ("", ".")]
+    if os.name == "nt":  # the part that does not exist yet: Windows drops trailing dots and spaces on create
+        base, out = root_r, []
+        for i, seg in enumerate(parts):
+            if (base / seg).exists():
+                base = base / seg
+                out.append(seg)
+                continue
+            out += [s.rstrip(" .") or s for s in parts[i:]]
+            break
+        parts = out
+    return "/".join(parts) if parts else "."
+
+
 def file_sha(path):
     h = hashlib.sha1()
     with path.open("rb") as f:
