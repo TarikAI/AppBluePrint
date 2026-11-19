@@ -646,14 +646,16 @@ class ManifestTest(CopyTestBase):
         """registry: absent from the skill = not built (optional); listed in the copy's MANIFEST and absent = an
         incomplete copy, even if the start-up check were bypassed."""
         from bp import install, registry
-        self.assertIsNone(registry.load("records"))  # the skill folder has no MANIFEST: not built
-        self.assertFalse(registry.exists("records"))
-        with mock.patch.object(install, "listed_missing", lambda name, home=None: name == "records"):
-            with self.assertRaisesRegex(ImportError, "listed in this copy's MANIFEST"):
-                registry.load("records")
-            with self.assertRaisesRegex(ImportError, "listed in this copy's MANIFEST"):
-                registry.exists("records")
-            self.assertIsNone(registry.load("roadmap"))
+        from test_validate import extension  # hermetic: holds whichever later modules the real skill has (W0-A2)
+        with extension({}):
+            self.assertIsNone(registry.load("records"))  # the skill folder has no MANIFEST: not built
+            self.assertFalse(registry.exists("records"))
+            with mock.patch.object(install, "listed_missing", lambda name, home=None: name == "records"):
+                with self.assertRaisesRegex(ImportError, "listed in this copy's MANIFEST"):
+                    registry.load("records")
+                with self.assertRaisesRegex(ImportError, "listed in this copy's MANIFEST"):
+                    registry.exists("records")
+                self.assertIsNone(registry.load("roadmap"))
 
     def test_required_modules_rule(self):
         from bp import install

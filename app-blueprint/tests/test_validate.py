@@ -6,12 +6,15 @@ Run: python -m unittest discover -s app-blueprint/tests
 import contextlib
 import copy
 import hashlib
+import importlib
 import io
 import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
+import textwrap
 import time
 import unittest
 from pathlib import Path
@@ -19,9 +22,111 @@ from unittest import mock
 
 import support as S
 
-from bp import core, migrate, plan as bplan, version
+import bp
+import bp.cli  # noqa: F401 - its start-up check runs on the real tree, before any hermetic package
+import bp.commands
+import bp.views
+from bp import core, migrate, plan as bplan, registry, version
 
 frozen = S.load_frozen("blueprint_frozen_for_validate")
+
+# The W0 foundations: the modules every build has. Everything else under bp/ (the wave 1 to 3 domain, view and command
+# modules, signals, study/*) belongs to a later workstream and may or may not be present in the tree under test.
+CORE_MODULES = frozenset("bp." + m for m in (
+    "version", "core", "globs", "learn", "migrate", "plan", "rules", "data", "status", "verify", "registry", "validate",
+    "views", "views.context", "views.structure", "views.roster", "views.render", "export", "install", "api", "cli",
+    "commands", "commands.plan", "commands.progress", "commands.data", "commands.learn")) | {"bp"}
+
+
+def later_modules():
+    """Every non-core module name the tests must control: those the registry names, and those present on disk."""
+    from bp import install
+    named = {"bp." + n for n in registry.DOMAIN + registry.VIEWS} | {"bp." + m for m in registry.COMMAND_TABLE.values()}
+    named |= {"bp.signals", "bp.evidence", "bp.study"}
+    return sorted((named | set(install.package_modules())) - CORE_MODULES)
+
+
+@contextlib.contextmanager
+def extension(files):
+    """A hermetic package for the duration: every later workstream's module is hidden (sys.modules[name] = None, so it
+    reads as not built), except the stand-ins given as "rel/path.py": source, which are written to a temp folder put
+    FIRST on the package path, so a stand-in shadows a real module of the same name. Everything is restored after,
+    so no stand-in or hidden module leaks into another test (test_extension_is_hermetic_and_restored)."""
+    tmp = Path(tempfile.mkdtemp(prefix="bp-ext-"))
+    names, added = set(), []
+    hidden = later_modules()
+    saved = {n: sys.modules[n] for n in list(sys.modules) if n in hidden or n.startswith("bp.study.")}
+    try:
+        for rel, src in files.items():
+            p = tmp / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(textwrap.dedent(src), encoding="utf-8")
+            names.add("bp." + ".".join(Path(rel).with_suffix("").parts))
+        for n in hidden:
+            sys.modules.pop(n, None)
+            if n not in names:
+                sys.modules[n] = None  # not built in this hermetic package
+        for n in names:
+            sys.modules.pop(n, None)
+        for pkg, folder in ((bp, tmp), (bp.views, tmp / "views"), (bp.commands, tmp / "commands")):
+            if folder.is_dir():
+                pkg.__path__.insert(0, str(folder))
+                added.append((pkg, str(folder)))
+        importlib.invalidate_caches()
+        yield tmp
+    finally:
+        for pkg, folder in added:
+            pkg.__path__.remove(folder)
+        for n in set(hidden) | names:
+            sys.modules.pop(n, None)
+        sys.modules.update(saved)
+        importlib.invalidate_caches()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def hermetic_skill(dest):
+    """A copy of the skill (scripts and assets) holding only the core: every later workstream's module file and tab
+    script is removed. Subprocess tests that assert "not built" or empty results run the launcher from here, so they
+    hold whatever modules the real skill has."""
+    shutil.copytree(S.SCRIPTS, dest / "scripts", ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copytree(S.SKILL / "assets", dest / "assets")
+    pkg = dest / "scripts" / "bp"
+    for p in sorted(pkg.rglob("*.py"), reverse=True):
+        rel = p.relative_to(pkg).with_suffix("").parts
+        name = ".".join(("bp",) + (rel[:-1] if rel[-1] == "__init__" else rel))
+        if name not in CORE_MODULES:
+            p.unlink()
+    for folder in sorted((d for d in pkg.rglob("*") if d.is_dir() and d.name != "__pycache__"), reverse=True):
+        if not any(folder.rglob("*.py")):
+            shutil.rmtree(folder, ignore_errors=True)
+    for tab in (dest / "assets").glob("tab-*.js"):
+        tab.unlink()
+    return dest / "scripts" / "blueprint.py"
+
+
+
+class Hermetic:
+    """Mixin: every test runs in a hermetic package (extension({})) and, through the CLI, from a hermetic copy of the
+    skill, so what it asserts does not depend on which later workstreams' modules exist. A test that is about the
+    real tree says so and does not use this mixin."""
+
+    def setUp(self):
+        super().setUp()
+        ctx = extension({})
+        ctx.__enter__()
+        self.addCleanup(ctx.__exit__, None, None, None)
+
+
+_HERMETIC = {}
+
+
+def hermetic_launcher():
+    """The launcher of a hermetic skill copy, made once per test process."""
+    if "launcher" not in _HERMETIC:
+        base = Path(tempfile.mkdtemp(prefix="bp-hermetic-skill-"))
+        _HERMETIC["launcher"] = hermetic_skill(base / "skill")
+    return _HERMETIC["launcher"]
+
 
 # Contract 2.10, verbatim: the smallest plan that uses all four new sections. Other 2.0 tests import it from here.
 V2_EXAMPLE = r'''
@@ -103,8 +208,9 @@ def quiet(fn, *args, **kw):
         return fn(*args, **kw), err.getvalue()
 
 
-class TempRoot(unittest.TestCase):
+class TempRoot(Hermetic, unittest.TestCase):
     def setUp(self):
+        super().setUp()
         self.root = Path(tempfile.mkdtemp(prefix="bp v2 "))
         (self.root / ".blueprint").mkdir()
 
@@ -126,7 +232,7 @@ class TempRoot(unittest.TestCase):
     def cli(self, *args, stdin=None, **env):
         """Run the launcher on this project; --root is added to every command but hook (which reads cwd)."""
         argv = list(args) if args[0] == "hook" else list(args) + ["--root", self.root]
-        return S.run_script(S.LAUNCHER, argv, self.root, stdin=stdin, env=S.tool_env(**env))
+        return S.run_script(hermetic_launcher(), argv, self.root, stdin=stdin, env=S.tool_env(**env))
 
     def load_exit(self, plan):
         """load_plan on plan: (exit code or None, stderr)."""
@@ -473,9 +579,9 @@ class InitTest(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.base, ignore_errors=True)
 
-    def init(self, root, script=S.LAUNCHER):
+    def init(self, root, script=None):
         root.mkdir(parents=True, exist_ok=True)
-        r = S.run_script(script, ["init", "--name", "New", "--root", root], self.base, env=self.env)
+        r = S.run_script(script or hermetic_launcher(), ["init", "--name", "New", "--root", root], self.base, env=self.env)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         return r
 
@@ -488,7 +594,7 @@ class InitTest(unittest.TestCase):
         self.assertEqual(keys[keys.index("ignore") + 1:], list(NEW))
         state = json.loads((root / ".blueprint" / "state.json").read_text(encoding="utf-8"))
         self.assertEqual((state["stateVersion"], state["tasks"]), (2, {}))
-        r = S.run_script(S.LAUNCHER, ["status", "--root", root], self.base, env=self.env)
+        r = S.run_script(hermetic_launcher(), ["status", "--root", root], self.base, env=self.env)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("Schema version", r.stdout)
 
@@ -505,25 +611,25 @@ class InitTest(unittest.TestCase):
         root = self.base / "old"
         self.init(root)
         (root / ".blueprint" / "blueprint.json").write_text(json.dumps(v1_plan()), encoding="utf-8")
-        r = S.run_script(S.LAUNCHER, ["init", "--refresh-tool", "--root", root], self.base, env=self.env)
+        r = S.run_script(hermetic_launcher(), ["init", "--refresh-tool", "--root", root], self.base, env=self.env)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("Your blueprint is schema version 1. It keeps working.", r.stdout)
-        self.assertEqual("migrate" in r.stdout, (S.PACKAGE / "commands" / "migrate.py").is_file())  # the hint appears once bp/commands/migrate.py exists (W0-B)
-        r = S.run_script(S.LAUNCHER, ["status", "--root", root], self.base, env=self.env)
+        self.assertNotIn("migrate", r.stdout)  # the core-only tree has no migrate command: no hint (test_migrate has the rest)
+        r = S.run_script(hermetic_launcher(), ["status", "--root", root], self.base, env=self.env)
         self.assertEqual(r.returncode, 0, r.stderr)
         last = r.stdout.rstrip().splitlines()[-1]
         self.assertTrue(last.startswith("Schema version 1"), last)
-        self.assertEqual("migrate" in last, (S.PACKAGE / "commands" / "migrate.py").is_file())
+        self.assertNotIn("migrate", last)
 
     def test_doctor_compares_the_copy_with_min_schema2_tool(self):
         root = self.base / "doc"
         self.init(root)
         (root / ".blueprint" / "bin" / "VERSION").write_text("1.9.0\n", encoding="utf-8")
-        r = S.run_script(S.LAUNCHER, ["doctor", "--root", root], self.base, env=self.env)
+        r = S.run_script(hermetic_launcher(), ["doctor", "--root", root], self.base, env=self.env)
         self.assertIn("blueprint.json schema: 2", r.stdout)
         self.assertIn(f"older than {version.MIN_SCHEMA2_TOOL} and cannot read schema version 2", r.stdout)
         (root / ".blueprint" / "bin" / "VERSION").write_text(version.TOOL_VERSION + "\n", encoding="utf-8")
-        r = S.run_script(S.LAUNCHER, ["doctor", "--strict", "--root", root], self.base, env=self.env)
+        r = S.run_script(hermetic_launcher(), ["doctor", "--strict", "--root", root], self.base, env=self.env)
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertNotIn("cannot read schema version 2", r.stdout)
 
@@ -883,7 +989,7 @@ class FindingsTest(TempRoot):
                 first = found[0]
                 self.assertEqual((first["level"], first["code"], first["entry"]), ("warning", "schema-v1", "blueprint.json"))
                 self.assertTrue(first["message"].startswith("blueprint.json is schema version 1; it still works"))
-                self.assertEqual("migrate" in first["message"], (S.PACKAGE / "commands" / "migrate.py").is_file())  # only once bp/commands/migrate.py exists (1.5 row d)
+                self.assertEqual("migrate" in first["message"], registry.command_built("migrate"))  # 1.5 row d (hermetic: no)
                 self.assertEqual([f for f in found if f["level"] == "error"], [])
         self.assertEqual(self.v.validate_findings(v2_plan()), [])
         self.assertEqual(self.v.validate_findings(self.load(v2_plan())), [])
@@ -899,6 +1005,21 @@ class FindingsTest(TempRoot):
                 raw["version"] = bad
                 errs = [f for f in self.v.validate_findings(raw) if f["level"] == "error"]
                 self.assertEqual((errs[0]["message"], errs[0]["code"]), ("version must be 1 or 2", "version"))
+
+    def test_bad_id_is_registered_once_in_the_core(self):
+        """Contract 7.4: bad-id is a cross-section code; the core registers it, domain modules only emit it."""
+        self.assertIn((r"^[a-z ]+ id '.*' has the wrong form", "bad-id"), self.v.CODES)
+        self.assertIn("bad-id", self.v.CODE_EXAMPLES)
+        for msg in ("milestone id 'beta' has the wrong form; use M then 1 to 3 digits",
+                    "feature id 'Inbox' has the wrong form; use F- then lowercase letters",
+                    "criterion id 'F-x/c1' has the wrong form; use C then 1 to 3 digits"):
+            self.assertEqual(self.v.classify_error(msg), "bad-id")
+        from test_registry_hooks import extension as ext
+        with ext({"roadmap.py": "CODES = [(r'^[a-z ]+ id .* has the wrong form', 'bad-id')]\n"}):
+            with self.assertRaisesRegex(RuntimeError, "bad-id.*roadmap.*validate|bad-id.*validate.*roadmap"):
+                self.v.codes()
+            with self.assertRaises(RuntimeError):
+                self.v.classify_error("task id 'x' has the wrong form")
 
     def test_codes_lists(self):
         from bp import data, rules
