@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import sys
 import tempfile
 import types
@@ -199,6 +200,18 @@ class LauncherTest(unittest.TestCase):
             S.load_module(broken / "blueprint.py", "blueprint_broken")
 
 
+def make_writable(folder):
+    for p in Path(folder).rglob("*"):
+        try:
+            os.chmod(p, os.stat(p).st_mode | stat.S_IWRITE)
+        except OSError:
+            pass
+
+
+def make_read_only(path):
+    os.chmod(path, stat.S_IREAD | (os.stat(path).st_mode & 0o555))
+
+
 class CopyTestBase(unittest.TestCase):
     """Projects in a folder whose name has a space."""
 
@@ -215,6 +228,7 @@ class CopyTestBase(unittest.TestCase):
         self.env = S.tool_env(HOME=str(home), USERPROFILE=str(home))
 
     def tearDown(self):
+        make_writable(self.base)
         shutil.rmtree(self.base, ignore_errors=True)
 
     def init_package_copy(self):
@@ -407,6 +421,183 @@ class InterruptedRefreshTest(CopyTestBase):
 
     def test_from_19_stopped_after_step_4(self):
         self.check(self.from_19, 4, "works")
+
+
+REAL_RMTREE, REAL_RENAME, REAL_REPLACE = shutil.rmtree, os.rename, os.replace
+
+
+def locked(names, real):
+    """A stand-in for a remove or rename primitive that raises PermissionError for folders with these names."""
+    def fake(path, *args, **kw):
+        if Path(path).name in names:
+            raise PermissionError(13, "simulated: in use by another process", str(path))
+        return real(path, *args, **kw)
+    return fake
+
+
+class RefreshRobustnessTest(CopyTestBase):
+    """Review of PR #2: read-only files and locked leftovers never break a refresh for good (contract 1.7)."""
+
+    def make_skill(self, version, read_only):
+        """A copy of the skill's scripts and assets at another version, optionally with every file read-only."""
+        skill = self.base / f"skill {version}"
+        shutil.copytree(S.SCRIPTS, skill / "scripts", ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copytree(S.SKILL / "assets", skill / "assets")
+        for f in (skill / "scripts" / "blueprint.py", skill / "scripts" / "bp" / "version.py"):
+            f.write_text(VERSION_LINE.sub(f'TOOL_VERSION = "{version}"', f.read_text(encoding="utf-8")),
+                         encoding="utf-8")
+        if read_only:
+            for f in skill.rglob("*"):
+                if f.is_file():
+                    make_read_only(f)
+        return skill / "scripts" / "blueprint.py"
+
+    def refresh_with(self, launcher):
+        return S.run_script(launcher, ["init", "--refresh-tool", "--root", self.root], self.elsewhere, env=self.env)
+
+    def in_process(self, stop=None):
+        """copy_tool in this process; returns (exit code or None, stderr)."""
+        from bp import install
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                install.copy_tool(self.root, _stop_after=stop)
+        except SystemExit as e:
+            return e.code, err.getvalue()
+        return None, err.getvalue()
+
+    def assert_complete(self, version):
+        self.assertEqual((self.bin / "VERSION").read_text(encoding="utf-8"), version + "\n")
+        self.assertEqual(VERSION_LINE.search(self.copy.read_text(encoding="utf-8")).group(1), version)
+        self.assertEqual(VERSION_LINE.search((self.bin / "bp" / "version.py").read_text(encoding="utf-8")).group(1),
+                         version)
+        self.assert_guards_work()
+
+    def assert_no_leftovers(self):
+        self.assertEqual(sorted(p.name for p in self.bin.iterdir() if p.name.startswith("bp.")), [])
+
+    def test_read_only_skill_files(self):
+        r = S.run_script(self.make_skill("1.9.0", True), ["init", "--name", "RO", "--root", self.root],
+                         self.elsewhere, env=self.env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.write_example_plan()
+        unwritable = [str(p) for p in self.bin.rglob("*") if p.is_file() and not os.access(p, os.W_OK)]
+        self.assertEqual(unwritable, [], "files in .blueprint/bin must not be read-only")
+        newer = self.make_skill("1.9.1", True)
+        for attempt in (1, 2):
+            r = self.refresh_with(newer)
+            self.assertEqual(r.returncode, 0, f"refresh {attempt}: {r.stdout}{r.stderr}")
+            self.assert_complete("1.9.1")
+            self.assert_no_leftovers()
+
+    def test_copy_made_read_only_by_an_older_tool(self):
+        """A copy whose files are read-only (as 1.9.0 copy2 left them) still refreshes."""
+        self.init_package_copy()
+        for f in self.bin.rglob("*"):
+            if f.is_file():
+                make_read_only(f)
+        self.refresh()
+        self.assert_complete(bp.TOOL_VERSION)
+        self.assert_no_leftovers()
+
+    def test_leftover_bp_old_with_a_read_only_file(self):
+        self.init_package_copy()
+        (self.bin / "bp.old").mkdir()
+        (self.bin / "bp.old" / "x.py").write_text("x = 1\n", encoding="utf-8")
+        make_read_only(self.bin / "bp.old" / "x.py")
+        self.refresh()
+        self.assert_complete(bp.TOOL_VERSION)
+        self.assert_no_leftovers()
+
+    def test_leftover_bp_new_is_removed_first(self):
+        """A stale module in a leftover bp.new must not end up in bp/."""
+        self.init_package_copy()
+        (self.bin / "bp.new").mkdir()
+        (self.bin / "bp.new" / "stale_module.py").write_text("raise RuntimeError('stale')\n", encoding="utf-8")
+        make_read_only(self.bin / "bp.new" / "stale_module.py")
+        self.refresh()
+        self.assertFalse((self.bin / "bp" / "stale_module.py").exists())
+        self.assert_complete(bp.TOOL_VERSION)
+        self.assert_no_leftovers()
+
+    def test_locked_leftover_bp_old_is_moved_aside(self):
+        self.init_package_copy()
+        self.age_package_copy()
+        (self.bin / "bp.old").mkdir()
+        (self.bin / "bp.old" / "x.py").write_text("x = 1\n", encoding="utf-8")
+        with mock.patch("shutil.rmtree", side_effect=locked({"bp.old"}, REAL_RMTREE)):
+            code, err = self.in_process()  # bp.old can be neither deleted before nor after the swap
+        self.assertIsNone(code, err)
+        self.assert_complete(bp.TOOL_VERSION)
+        self.refresh()  # nothing is locked any more: the second refresh cleans up
+        self.assert_complete(bp.TOOL_VERSION)
+        self.assert_no_leftovers()
+
+    def test_locked_leftover_that_cannot_be_moved_exits_1(self):
+        self.init_package_copy()
+        self.age_package_copy()
+        (self.bin / "bp.old").mkdir()
+        with mock.patch("shutil.rmtree", side_effect=locked({"bp.old"}, REAL_RMTREE)), \
+                mock.patch("os.rename", side_effect=locked({"bp.old"}, REAL_RENAME)):
+            code, err = self.in_process()
+        self.assertEqual(code, 1, err)
+        self.assertIn(str(self.bin / "bp.old"), err)
+        self.assertIn("init --refresh-tool", err)
+        self.assert_complete("1.8.9")  # untouched: the old copy still works
+        self.refresh()
+        self.assert_complete(bp.TOOL_VERSION)
+        self.assert_no_leftovers()
+
+    def test_locked_bp_names_bp(self):
+        self.init_package_copy()
+        self.age_package_copy()
+        with mock.patch("os.replace", side_effect=locked({"bp"}, REAL_REPLACE)):
+            code, err = self.in_process()
+        self.assertEqual(code, 1, err)
+        self.assertIn(f"{self.bin / 'bp'}:", err)
+        self.assertNotIn("bp.old", err)
+        self.assert_complete("1.8.9")  # untouched: the old copy still works
+        self.refresh()
+        self.assert_complete(bp.TOOL_VERSION)
+        self.assert_no_leftovers()
+
+    def test_single_file_upgrade_interrupted_after_step_2_still_says_upgraded(self):
+        self.init_single_file_copy()
+        self.in_process(stop=2)
+        r = self.refresh()
+        self.assertIn(f"Upgraded .blueprint/bin from the single-file tool 1.3.0 to the package tool {bp.TOOL_VERSION}.",
+                      r.stdout)
+        self.assert_complete(bp.TOOL_VERSION)
+
+
+class PackageCompletenessTest(CopyTestBase):
+    """Review of PR #2: a copy missing any module of the package fails closed at start, never with an incident."""
+
+    def test_every_module_is_checked_at_start(self):
+        from bp import cli
+        expected = []
+        for p in S.PACKAGE.rglob("*.py"):
+            parts = ("bp",) + p.relative_to(S.PACKAGE).with_suffix("").parts
+            expected.append(".".join(parts[:-1] if parts[-1] == "__init__" else parts))
+        # the launcher imports bp.api and bp.cli itself; cli checks every other module
+        self.assertEqual(sorted(cli.PACKAGE_MODULES + ("bp.api", "bp.cli")), sorted(expected))
+
+    def test_missing_module_fails_closed(self):
+        self.init_package_copy()
+        files = sorted(p.relative_to(self.bin / "bp") for p in (self.bin / "bp").rglob("*.py"))
+        self.assertGreater(len(files), 20)
+        for rel in files:
+            with self.subTest(module=rel.as_posix()):
+                f = self.bin / "bp" / rel
+                f.unlink()
+                try:
+                    for r, code in ((self.copy_run("guard", "Cargo.toml"), 2), (self.hook_pre("Cargo.toml"), 2),
+                                    (self.copy_run("verify", "--run"), 1)):
+                        self.assertEqual(r.returncode, code, r.stdout + r.stderr)
+                        self.assertIn("is incomplete", r.stderr)
+                finally:
+                    shutil.copyfile(S.PACKAGE / rel, f)
+        self.assert_guards_work()
 
 
 class DoctorTest(CopyTestBase):
