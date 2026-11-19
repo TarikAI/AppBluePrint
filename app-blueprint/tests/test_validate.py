@@ -662,6 +662,9 @@ class ProofTest(TempRoot):
         self.assertEqual(list(self.status.proof_inputs(self.root, self.plan, ["a.py"])), ["a.py", "b.py", "c.py"])
         self.assertEqual(list(self.status.proof_inputs(self.root, self.plan, ["x/inst.ts", "d.py"])), ["d.py", "x/inst.ts"])
         self.assertEqual(self.status.proof_inputs(self.root, self.plan, ["/etc/passwd", "../x", "C:/x"]), {})
+        self.touch("app/[id]/page.tsx", "p\n")  # review B1: bracket names are real files
+        plan = {"files": [{"path": "app/[id]/page.tsx", "dependsOn": ["src/*.ts", "web-screen"]}]}
+        self.assertEqual(list(self.status.proof_inputs(self.root, plan, ["app/[id]/page.tsx"])), ["app/[id]/page.tsx"])
 
     def test_proof_current(self):
         st = self.status
@@ -761,6 +764,35 @@ class VerifyProofTest(TempRoot):
         self.assertFalse(any(x["stale"] for x in self.rows().values()))
         r = self.cli("verify", "--stale")
         self.assertIn("No verify commands in scope.", r.stdout)
+
+    def test_route_style_file_names_are_verified(self):
+        """Review B1: a real file whose name has [ ] ( ) * or ? is an input of its own proof and of its dependents'."""
+        names = ["app/[id]/page.tsx", "app/[...slug]/page.tsx", "app/(group)/layout.tsx"]
+        if os.name != "nt":  # Windows forbids * and ? in file names
+            names += ["lib/a*b.ts", "lib/what?.ts"]
+        for version in (1, 2):
+            with self.subTest(version=version):
+                plan = v1_plan() if version == 1 else v2_plan()
+                plan["modules"] = [{"id": "app", "path": "app", "purpose": "routes", "verify": OK_CMD}]
+                plan["files"] = [{"path": n, "action": "create", "module": "app", "phase": "P1", "purpose": "route",
+                                  "dependsOn": [names[0]] if i else [], **({"infrastructure": True} if version == 2 else {})}
+                                 for i, n in enumerate(names)]
+                plan["patterns"], plan["owners"] = [], [{"pattern": "*", "owner": plan["roster"][0]["id"]}]
+                plan["stores"], plan["resources"] = [], []
+                self.write_plan(plan)
+                for n in names:
+                    self.touch(n, n + "\n")
+                r = self.cli("verify", "--run")
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                rows = self.rows()
+                self.assertEqual({n: (rows[n]["status"], rows[n]["stale"]) for n in names},
+                                 {n: ("verified", False) for n in names})
+                state = json.loads((self.root / ".blueprint" / "state.json").read_text(encoding="utf-8"))
+                self.assertEqual(list(state["files"][names[1]]["verified"]["inputs"]), sorted([names[0], names[1]]))
+                self.touch(names[0], "changed\n")
+                rows = self.rows()
+                self.assertTrue(rows[names[1]]["stale"], "a dependency with brackets is an input")
+                (self.root / ".blueprint" / "state.json").unlink()
 
     def test_a_failing_command_records_its_result(self):
         self.write_plan(self.plan(FAIL_CMD))
