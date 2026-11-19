@@ -28,13 +28,23 @@ ARRIVES = {"migrate": "W0-B", "task": "W1-R", "accept": "W3-V", "evidence": "W2-
            "unknowns": "W1-U", "records": "W3-V", "features": "W1-F", "roadmap": "W1-R", "signals": "W3-L"}
 
 
+def _not_built_here(name):
+    """None when bp.<name> may be absent ("not built": the SKILL this tool came from lacks it). In a project copy whose
+    MANIFEST lists it, a missing module is a damaged copy, never "not built": ImportError."""
+    if importlib.import_module("bp.install").listed_missing(name):
+        raise ImportError(f"bp/{name.replace('.', '/')}.py is listed in this copy's MANIFEST but missing: the copy is "
+                          "incomplete. Run: python <skill>/scripts/blueprint.py init --refresh-tool")
+
+
 def load(name):
-    """bp.<name>, or None when that module does not exist. Any other import error propagates (a bug)."""
+    """bp.<name>, or None when that module is not built. Any other import error propagates (a bug), and so does a
+    module this copy's MANIFEST lists (an incomplete copy)."""
     full = "bp." + name
     try:
         return importlib.import_module(full)
     except ModuleNotFoundError as e:
         if e.name == full:
+            _not_built_here(name)
             return None
         raise
 
@@ -98,9 +108,12 @@ def signal(root, signal, code):
 def exists(name):
     """True when the module bp.<name> is present in this build (it is not imported)."""
     try:
-        return importlib.util.find_spec("bp." + name) is not None
+        found = importlib.util.find_spec("bp." + name) is not None
     except ModuleNotFoundError:  # a missing parent package
-        return False
+        found = False
+    if not found:
+        _not_built_here(name)
+    return found
 
 
 def command_built(command):

@@ -64,7 +64,9 @@ def cmd_validate(args):
         counts = {"files": len(plan["files"]), "patterns": len(plan["patterns"]), "modules": len(plan["modules"]),
                   "phases": len(plan["phases"]), "owners": len(plan["roster"]), "resources": len(plan["resources"])}
         counts.update({k: len(plan.get(k) or []) for k in SECTIONS_V2})
-        emit(args, "validate", {"errors": errors, "warnings": warnings, "counts": counts}, [])
+        # 7.1: "ok" is true because the command ran (a failure envelope carries a 7.3 error); "valid" says whether the
+        # plan has no errors, and the exit status is 1 when it has
+        emit(args, "validate", {"valid": not errors, "errors": errors, "warnings": warnings, "counts": counts}, [])
         sys.exit(1 if errors else 0)
     for w in warnings:
         print("warning:", w["message"])

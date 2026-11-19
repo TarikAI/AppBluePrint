@@ -6,7 +6,6 @@ naming the workstream it arrives with). A BlueprintError is printed as `error:` 
 --json) and exits with its code; any other exception is an incident (exit 70), as in 1.x.
 """
 import argparse
-import importlib
 import json
 import os
 import sys
@@ -14,28 +13,14 @@ import sys
 from bp.version import TOOL_VERSION
 from bp import registry
 from bp.core import BlueprintError
+from bp.install import check_package
 from bp.learn import record_incident
 
-# Every module of the package except bp.api and bp.cli, which the launcher imports itself. Importing them all when
-# the tool starts makes a copy missing any one of them fail closed in the launcher (exit 2 for guard and hook pre,
-# 1 otherwise) instead of failing later inside a command. All but bp.verify are imported at start anyway, so this
-# costs one small module. test_package keeps the list equal to the files of the package.
-PACKAGE_MODULES = (
-    "bp", "bp.version", "bp.core", "bp.globs", "bp.learn", "bp.migrate", "bp.plan", "bp.rules", "bp.data", "bp.status",
-    "bp.verify", "bp.registry", "bp.validate", "bp.views", "bp.views.context", "bp.views.structure", "bp.views.roster",
-    "bp.views.render", "bp.export", "bp.install", "bp.commands", "bp.commands.plan", "bp.commands.progress",
-    "bp.commands.data", "bp.commands.learn",
-)
-
-
-def _check_complete():
-    for name in PACKAGE_MODULES:
-        mod = importlib.import_module(name)
-        if not getattr(mod, "__file__", None):  # a folder without __init__.py imports as a namespace package
-            raise ImportError(f"{name.replace('.', '/')}/__init__.py is missing")
-
-
-_check_complete()
+# The start-up completeness check (install.check_package): in a project copy every module its MANIFEST lists must
+# exist, and every module present must import; otherwise the launcher fails closed (exit 2 for guard and hook pre, 1
+# otherwise) instead of a command failing later. Nothing is listed by hand: a later module is covered by its file
+# alone. PACKAGE_MODULES is what was checked (every module on disk), kept for tests and doctor-style inspection.
+PACKAGE_MODULES = tuple(check_package())
 
 # Help for every subcommand of 2.0 (contract 1.4: a static dict in cli, so an unbuilt command still has its line).
 HELP = {

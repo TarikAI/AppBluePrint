@@ -5,6 +5,7 @@ module's context hook adds its keys in DOMAIN order (unknowns before records bef
 hook reads what the earlier ones added and a key whose module is not built yet reads as empty:
 
     unknowns  []                    blocked  {"phases": set(), "milestones": set(), "features": set(), "by": {}}
+                                    (by: {"phase:P2" | "milestone:M1" | "feature:F-x": [unknown ids]})
     checks    {fid: {...}} (1.4)    features []    milestones []    tasks []    studies []
 """
 from bp import registry
@@ -47,6 +48,7 @@ def status_json(ctx, base):
 
 
 def blocked_by(ctx, kind, target):
-    """The unknown ids blocking a phase, milestone or feature, from ctx["blocked"]["by"] (keyed "phase:P2" or "P2")."""
+    """The unknown ids blocking a phase, milestone or feature: ctx["blocked"]["by"] is keyed "phase:P2", "milestone:M1"
+    or "feature:F-x" (one format, decided for wave 1)."""
     by = (ctx.get("blocked") or {}).get("by") or {}
-    return list(by.get(f"{kind}:{target}") or by.get(target) or [])
+    return list(by.get(f"{kind}:{target}") or [])
