@@ -50,6 +50,13 @@ class HermeticTest(unittest.TestCase):
         real = (S.PACKAGE / "features.py").exists()
         self.assertEqual(registry.exists("features"), real, "outside, the real tree decides")
 
+    def test_non_hermetic_stand_ins_only_fill_gaps(self):
+        real = (S.PACKAGE / "features.py").exists()
+        with extension({"features.py": "STAND_IN = True\n"}, hermetic=False):
+            mod = importlib.import_module("bp.features")
+            self.assertEqual(hasattr(mod, "STAND_IN"), not real, "a real module wins over a stand-in")
+        self.assertEqual(registry.exists("features"), real)
+
     def test_hermetic_skill_has_only_the_core(self):
         base = Path(tempfile.mkdtemp(prefix="bp-hermetic-"))
         self.addCleanup(shutil.rmtree, base, True)

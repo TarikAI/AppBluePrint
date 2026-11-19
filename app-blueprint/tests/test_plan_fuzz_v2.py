@@ -209,7 +209,7 @@ class PlanFuzzV2Test(unittest.TestCase):
         started = time.time()
         paths = mutation_paths(self.base)
         crashes, count = {}, 0
-        with extension(stubs()), mock.patch("subprocess.run", side_effect=OSError("no git in the fuzz test")):
+        with extension(stubs(), hermetic=False), mock.patch("subprocess.run", side_effect=OSError("no git in the fuzz test")):
             self.assertTrue(all(registry.exists(n) for n in registry.DOMAIN + registry.VIEWS))
             for path in paths:
                 for value, delete in [(v, False) for v in VALUES] + [(None, True)]:
@@ -238,7 +238,7 @@ class PlanFuzzV2Test(unittest.TestCase):
 
     def test_stubs_cover_every_hook_and_the_cli_builds(self):
         from bp import cli
-        with extension(stubs()):
+        with extension(stubs(), hermetic=False):
             self.assertTrue(all(registry.exists(n) for n in registry.DOMAIN + registry.VIEWS))
             mods = registry.modules("DOMAIN") + registry.modules("VIEWS")
             for hook in ("validate", "context", "file_tags", "roster_sections", "map_payload", "status_lines",

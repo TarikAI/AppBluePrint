@@ -47,14 +47,16 @@ def later_modules():
 
 
 @contextlib.contextmanager
-def extension(files):
+def extension(files, hermetic=True):
     """A hermetic package for the duration: every later workstream's module is hidden (sys.modules[name] = None, so it
     reads as not built), except the stand-ins given as "rel/path.py": source, which are written to a temp folder put
     FIRST on the package path, so a stand-in shadows a real module of the same name. Everything is restored after,
-    so no stand-in or hidden module leaks into another test (test_extension_is_hermetic_and_restored)."""
+    so no stand-in or hidden module leaks into another test (test_extension_is_hermetic_and_restored). With
+    hermetic=False (tests about the real tree, like test_plan_fuzz_v2) nothing is hidden and the stand-ins go LAST on
+    the package path, so a real module always wins over a stand-in."""
     tmp = Path(tempfile.mkdtemp(prefix="bp-ext-"))
     names, added = set(), []
-    hidden = later_modules()
+    hidden = later_modules() if hermetic else []  # not hermetic: real modules win, stand-ins only fill the gaps
     saved = {n: sys.modules[n] for n in list(sys.modules) if n in hidden or n.startswith("bp.study.")}
     try:
         for rel, src in files.items():
@@ -70,7 +72,7 @@ def extension(files):
             sys.modules.pop(n, None)
         for pkg, folder in ((bp, tmp), (bp.views, tmp / "views"), (bp.commands, tmp / "commands")):
             if folder.is_dir():
-                pkg.__path__.insert(0, str(folder))
+                pkg.__path__.insert(0 if hermetic else len(pkg.__path__), str(folder))
                 added.append((pkg, str(folder)))
         importlib.invalidate_caches()
         yield tmp
