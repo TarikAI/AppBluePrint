@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -186,7 +187,7 @@ class LearningTest(Base):
         rec = inc[0]
         self.assertEqual(rec["command"], "validate")
         self.assertEqual(rec["error"], "RuntimeError")
-        self.assertTrue(all(f.startswith("blueprint.py:") for f in rec["frames"]))
+        self.assertTrue(all(re.match(r"^[\w.]+\.py:\d+:[\w<>]+$", f) for f in rec["frames"]), rec["frames"])
         self.assertNotIn(str(self.dir), json.dumps(rec))
         self.assertEqual(rec["project"], self.dir.name)
         r = self.run_bp("report")
