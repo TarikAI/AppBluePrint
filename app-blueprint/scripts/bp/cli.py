@@ -1,5 +1,6 @@
-"""cli: moved from blueprint.py 1.3.0 (contract 1.5)."""
+"""cli: main(), moved from blueprint.py 1.3.0 (contract 1.5), and the package completeness check."""
 import argparse
+import importlib
 import os
 import sys
 
@@ -9,6 +10,26 @@ from bp.commands.plan import cmd_contracts, cmd_export, cmd_init, cmd_render, cm
 from bp.commands.progress import cmd_claim, cmd_guard, cmd_hook, cmd_mark, cmd_owner, cmd_status, cmd_sync, cmd_verify
 from bp.commands.data import cmd_db_check
 from bp.commands.learn import cmd_doctor, cmd_feedback, cmd_report
+
+# Every module of the package except bp.api and bp.cli, which the launcher imports itself. Importing them all when
+# the tool starts makes a copy missing any one of them fail closed in the launcher (exit 2 for guard and hook pre,
+# 1 otherwise) instead of failing later inside a command. All but bp.verify are imported at start anyway, so this
+# costs one small module. test_package keeps the list equal to the files of the package.
+PACKAGE_MODULES = (
+    "bp", "bp.version", "bp.core", "bp.globs", "bp.learn", "bp.plan", "bp.rules", "bp.data", "bp.status", "bp.verify",
+    "bp.validate", "bp.views", "bp.views.structure", "bp.views.roster", "bp.views.render", "bp.export", "bp.install",
+    "bp.commands", "bp.commands.plan", "bp.commands.progress", "bp.commands.data", "bp.commands.learn",
+)
+
+
+def _check_complete():
+    for name in PACKAGE_MODULES:
+        mod = importlib.import_module(name)
+        if not getattr(mod, "__file__", None):  # a folder without __init__.py imports as a namespace package
+            raise ImportError(f"{name.replace('.', '/')}/__init__.py is missing")
+
+
+_check_complete()
 
 
 def main(argv=None):
