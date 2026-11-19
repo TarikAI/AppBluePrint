@@ -59,11 +59,14 @@ def sec_kinds(texts):
     return out
 
 
-def shape(v):
+def shape(v, level=1, depth=4):
+    """json_shape (6.3): the given value is level 1; a value at level depth + 1 is "..."."""
+    if level > depth:
+        return "..."
     if isinstance(v, dict):
-        return {k: shape(v[k]) for k in sorted(v)[:50]}
+        return {k: shape(v[k], level + 1) for k in sorted(v)[:50]}
     if isinstance(v, list):
-        return [shape(v[0])] if v else []
+        return [shape(v[0], level + 1)] if v else []
     if isinstance(v, bool):
         return "boolean"
     if isinstance(v, (int, float)):
@@ -124,9 +127,13 @@ def har_derive(entries):
         for direction, mt, text in bodies:
             m = mime(mt) if mt else ""
             if (m == "application/json" or m.endswith("+json")) and text:
-                if direction == "response" and content.get("encoding") == "base64":
-                    text = base64.b64decode(text).decode("utf-8")
-                shapes.setdefault("%s %s" % (k, direction), {"shape": shape(json.loads(text))})
+                try:                                  # 6.2 rule 4: a piece that fails is dropped on its own
+                    if direction == "response" and content.get("encoding") == "base64":
+                        text = base64.b64decode(text, validate=True).decode("utf-8")
+                    value = json.loads(text)
+                except (ValueError, RecursionError):
+                    continue
+                shapes.setdefault("%s %s" % (k, direction), {"shape": shape(value)})
         path = urlsplit(req["url"]).path
         if re.search(r"login|logout|auth|token|session|oauth|signin|signup|sso|2fa|otp", path):
             h = {x["name"].lower(): x["value"] for x in req["headers"]}
@@ -185,12 +192,38 @@ def har_leaks(entries):
         if c.get("text") and "json" in c["mimeType"]:
             if c.get("encoding") == "base64":
                 out.add(c["text"])
-            t = base64.b64decode(c["text"]).decode() if c.get("encoding") == "base64" else c["text"]
-            leaves(json.loads(t))
+            try:
+                t = base64.b64decode(c["text"], validate=True).decode() if c.get("encoding") == "base64" else c["text"]
+                leaves(json.loads(t))
+            except (ValueError, RecursionError):
+                pass
     return out
 
 
-def scan_js(text, kinds=None):
+def expected_never(leaks):
+    """What `never_stored` must hold for a set of leaked values: the values, the JSON-escaped form of each value that
+    JSON escapes, and the body of the fake private key (contract 10.1)."""
+    out = set(leaks)
+    for v in leaks:
+        out.add(json.dumps(v)[1:-1])
+        if F.PEM_BODY in v:
+            out.add(F.PEM_BODY)
+    return out
+
+
+READ_EXT = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".rs", ".go", ".rb", ".php", ".java", ".kt", ".cs", ".sql",
+            ".prisma", ".vue", ".svelte", ".swift", ".dart", ".ex", ".exs", ".scala", ".json", ".toml", ".yaml", ".yml",
+            ".gradle", ".kts", ".xml", ".html", ".md"}      # contract 6.4: SCAN_EXT plus the listed extras
+
+
+def is_read(rel):
+    """Files the source lane reads as text: the extension list and the manifests of the `source.framework` row."""
+    name = posixpath.basename(rel)
+    return (posixpath.splitext(rel)[1] in READ_EXT or name in ("Gemfile", "go.mod", "pubspec.yaml")
+            or re.match(r"requirements.*\.txt$", name) is not None or name.startswith("build.gradle"))
+
+
+def scan_js(text, kinds=None, src="bundle"):
     """The jsscan rows of 6.5 over one text (bounded string classes, never `.*?`). Adds to ``kinds`` when given."""
     k = kinds if kinds is not None else {}
     for name in ("web.route", "web.api-call", "web.flag", "web.i18n-key", "web.framework"):
@@ -231,7 +264,7 @@ def scan_js(text, kinds=None):
     for marker, fw in (("__NEXT_DATA__", "next"), ("__NUXT__", "nuxt"), ("ng-version", "angular"),
                        ("data-reactroot", "react"), ("__SVELTEKIT", "sveltekit")):
         if marker in text:
-            k["web.framework"][fw] = {"from": "bundle"}
+            k["web.framework"][fw] = {"from": src}
     return k
 
 
@@ -372,7 +405,7 @@ class TestSecrets(Base):
         for name, rx in SEC.items():
             with self.subTest(name):
                 self.assertIsNone(re.search(rx, src), "a whole %s value appears in fixtures_text.py" % name)
-        self.assertNotIn("scan-private: allow", src)
+        self.assertNotIn("scan-private" + ": allow", src)
         self.assertNotRegex(src, r"[\w.%+-]+@[\w-]+\.[a-z]{2,}")      # no email-like text in the source
 
     def test_no_fixture_output_carries_a_scan_marker(self):
@@ -522,11 +555,13 @@ class TestHar(Base):
     def test_never_stored_is_complete_and_every_value_is_in_the_file(self):
         path, facts = F.make_har(self.p("a.har"))
         entries = jload(path)["log"]["entries"]
-        self.assertEqual(set(facts["never_stored"]), har_leaks(entries))
+        self.assertEqual(set(facts["never_stored"]), expected_never(har_leaks(entries)))
         text = path.read_text(encoding="utf-8")
         for value in facts["never_stored"]:
             once = json.dumps(value)[1:-1]
             self.assertTrue(once in text or json.dumps(once)[1:-1] in text, value[:30])
+        self.assertIn(F.PEM_BODY, facts["never_stored"])
+        self.assertIn(json.dumps(F.SECRETS["private-key"])[1:-1], facts["never_stored"])   # the JSON-escaped form
         for want in (F.SECRETS["google-api-key"], F.SECRETS["jwt"], F.SECRETS["stripe-live"], F.PASSWORD, F.COOKIE,
                      F.URL_PASSWORD, F.BASIC, F.TOKEN, F.PEM_BODY):
             self.assertTrue(any(want in v for v in facts["never_stored"]), want)
@@ -537,6 +572,9 @@ class TestHar(Base):
         for raw in ("/items/123", "/items/124", "3f2b8c1e-5a4d", "0123456789abcdef", "Zm9vYmFyYmF6cXV4MTIzNA", ":8443/"):
             self.assertIn(raw, urls)
         self.assertIn("API.example.test", urls)                       # host lower-cased by the lane
+        self.assertEqual(F.HAR_SHAPES["GET app.example.test/api/tree response"], {"a": {"b": {"c": {"d": "..."}}}})
+        tree_body = json.loads(next(e for e in entries if e["request"]["url"].endswith("/api/tree"))["response"]["content"]["text"])
+        self.assertEqual(shape(tree_body), {"a": {"b": {"c": {"d": "..."}}}})      # six levels deep, cut at level 5
         self.assertTrue(any(F.URL_PASSWORD in e["request"]["url"] for e in entries))
         self.assertTrue(any("; charset=" in e["response"]["content"]["mimeType"] for e in entries))
         self.assertTrue(any(e["response"]["content"].get("encoding") == "base64" for e in entries))
@@ -651,21 +689,43 @@ class TestSourcemapAndBundle(Base):
         self.assertEqual(facts["limitations"], ["Hermes bytecode present; not decoded (tier C: study import --from rea)"])
         self.assertIn(b"\x00", path.read_bytes()[:8192])
 
-    def test_site_folder(self):
+    def test_site_folder_records_by_path(self):
         root, facts = F.make_site(self.p("site"))
         files = tree(root)
         self.assertEqual(sorted(files), facts["files"])
-        merged = {}
+        per = {}
         for rel, data in files.items():
-            scan_js(dec(data), merged)
-        for kind in JS_KINDS:
-            self.assertEqual(facts["kinds"][kind], merged[kind], kind)
-        self.assertIn("/blog/{slug}", merged["web.route"])
-        self.assertIn("/about", merged["web.route"])
+            k = scan_js(dec(data), None, "html" if rel.endswith(".html") else "bundle")
+            k = {n: v for n, v in k.items() if v}
+            sec = sec_kinds({rel: dec(data)})
+            if sec:
+                k["secret.embedded"] = sec
+            if k:
+                per[rel] = k
+        self.assertEqual(facts["records_by_path"], per)
+        seen = {}
+        for rel, ks in per.items():
+            for kind, keys in ks.items():
+                for key in keys:
+                    seen.setdefault((kind, key), []).append(rel)
+        unique = {}
+        for rel, ks in per.items():
+            for kind, keys in ks.items():
+                for key, data in keys.items():
+                    if len(seen[(kind, key)]) == 1:
+                        unique.setdefault(kind, {})[key] = data
+        self.assertEqual(facts["kinds"], unique)
+        # the collisions the contract asks records_by_path for
+        self.assertEqual(sorted(seen[("web.route", "/")]), ["_next/static/abc/_buildManifest.js", "static/main.js"])
+        self.assertEqual(per["static/main.js"]["web.route"]["/"], {"relative": True})
+        self.assertEqual(per["_next/static/abc/_buildManifest.js"]["web.route"]["/"], {})
+        self.assertNotIn("/", facts["kinds"]["web.route"])
+        self.assertEqual(per["index.html"]["web.framework"], {"next": {"from": "html"}})
+        self.assertEqual(per["static/main.js"]["web.framework"]["next"], {"from": "bundle"})
         self.assertEqual(facts["kinds"]["secret.embedded"], sec_kinds({k: dec(v) for k, v in files.items()}))
         _, empty = F.make_site(self.p("empty"), "empty")
         self.assertEqual(tree(self.p("empty")), {})
-        self.assertEqual(empty["kinds"], {})
+        self.assertEqual(empty["records_by_path"], {})
 
 
 class TestSqlite(Base):
@@ -887,7 +947,7 @@ class TestRepo(Base):
         for m in re.finditer(r'@app\.route\("([^"]+)"(?:, methods=\[([^\]]+)\])?', t):
             for meth in (m.group(2).replace('"', "").replace(" ", "").split(",") if m.group(2) else ["GET"]):
                 out.append("%s %s" % (meth, canon(m.group(1))))
-        for m in re.finditer(r'(?<![\w])path\("([^"]+)"', t):
+        for m in re.finditer(r'(?<![\w])path\("([^"]*)"', t):
             out.append("ANY " + canon("/" + m.group(1)))
         for m in re.finditer(r'\.route\("([^"]+)", get\(', t):
             out.append("GET " + canon(m.group(1)))
@@ -1015,9 +1075,40 @@ class TestRepo(Base):
             if names:
                 got[rel] = names
         self.assertEqual(got, self.facts["env_by_file"])
-        self.assertEqual({k for v in got.values() for k in v}, set(self.facts["kinds"]["source.env"]))
+        everywhere = {k for v in got.values() for k in v}
+        self.assertEqual(everywhere, {k for ks in self.facts["records_by_path"].values() for k in ks.get("source.env", {})})
+        # DATABASE_URL is read in two files, so it is only in records_by_path; the unique keys stay in kinds
+        self.assertEqual(set(self.facts["kinds"]["source.env"]), everywhere - {"DATABASE_URL"})
         self.assertIn("process.env.lowercase_var", self.text["src/config.js"])
         self.assertNotIn("lowercase_var", self.facts["kinds"]["source.env"])
+
+    def test_records_by_path_and_the_unique_keys_of_kinds(self):
+        per = {}
+        for rel in sorted(self.text):
+            if Path(rel).suffix in (".js", ".ts", ".tsx", ".py", ".rs", ".rb") and rel not in self.facts["graph"]["tests"]:
+                for k in self.routes_in(rel):
+                    per.setdefault(rel, {}).setdefault("source.route", {})[k] = {}
+        for rel, keys in self.facts["env_by_file"].items():
+            for k in keys:
+                per.setdefault(rel, {}).setdefault("source.env", {})[k] = {}
+        for r in self.facts["table_records"]:
+            per.setdefault(r["path"], {}).setdefault("source.table", {})[r["key"]] = {"access": r["access"]}
+        for t in self.facts["graph"]["tests"]:
+            per.setdefault(t, {}).setdefault("source.test", {})[t] = {"imports": self.facts["graph"]["imports"].get(t, [])}
+        for key, via in F.REPO_ENTRIES.items():
+            per.setdefault(key.split("#")[0], {}).setdefault("source.entry", {})[key] = {"via": via}
+        for key, data in sec_kinds({k: v for k, v in self.text.items() if is_read(k)}).items():
+            per.setdefault(key.split("@", 1)[1], {}).setdefault("secret.embedded", {})[key] = data
+        self.assertEqual(self.facts["records_by_path"], per)
+        seen = {}
+        for rel, ks in per.items():
+            for kind, keys in ks.items():
+                for key in keys:
+                    seen[(kind, key)] = seen.get((kind, key), 0) + 1
+        for (kind, key), n in seen.items():
+            self.assertEqual(key in self.facts["kinds"].get(kind, {}), n == 1, (kind, key))
+        self.assertEqual(seen[("source.env", "DATABASE_URL")], 2)
+        self.assertEqual(seen[("source.table", "items")], 2)
 
     def test_tests_by_basename_and_folder_patterns(self):
         def is_test(p):
@@ -1046,7 +1137,8 @@ class TestRepo(Base):
                         recs.append({"key": table, "path": rel, "access": "read"})
         key = lambda r: (r["key"], r["path"])
         self.assertEqual(sorted(recs, key=key), sorted(self.facts["table_records"], key=key))
-        self.assertEqual(set(schema), set(self.facts["kinds"]["source.table"]))
+        self.assertEqual(set(self.facts["kinds"]["source.table"]), {"notes"})      # the other keys have several records
+        self.assertEqual({k for ks in self.facts["records_by_path"].values() for k in ks.get("source.table", {})}, set(schema))
 
     def test_languages_with_bytes_frameworks_and_entries(self):
         langs = {}
@@ -1098,7 +1190,7 @@ class TestRepo(Base):
         self.assertEqual(json.loads(self.text["tsconfig.json"])["compilerOptions"]["paths"], {"@/*": ["src/*"]})
 
     def test_secrets_are_where_the_facts_say(self):
-        texts = {k: v for k, v in self.text.items() if Path(k).suffix in F._SCAN_EXT}
+        texts = {k: v for k, v in self.text.items() if is_read(k)}
         got = sec_kinds(texts)
         self.assertEqual(self.facts["kinds"]["secret.embedded"], got)
         files = {}
@@ -1107,7 +1199,8 @@ class TestRepo(Base):
             files.setdefault(rel, []).append(pat)
         self.assertEqual({k: sorted(v) for k, v in files.items()}, F.REPO_SECRETS)
         for value in self.facts["never_stored"]:
-            self.assertTrue(any(value in t for t in self.text.values()), value)
+            escaped_secret = any(value == json.dumps(s)[1:-1] for s in F.SECRETS.values())     # the JSON-escaped listing
+            self.assertTrue(escaped_secret or any(value in t for t in self.text.values()), value)
         self.assertEqual(self.facts["secret_patterns"], sorted({k.split("@")[0] for k in got}))
         self.assertIn("\n", F.SECRETS["private-key"])
 
@@ -1202,44 +1295,71 @@ class TestRepo(Base):
 
 
 class TestVersionPairs(Base):
+    def per_path(self, root, single):
+        """{(kind, key, path): data} for one side, read independently: a single file or a folder of scripts."""
+        out = {}
+        if single:
+            return out
+        for rel, data in tree(root).items():
+            for kind, keys in scan_js(dec(data)).items():
+                for key, d in keys.items():
+                    out[(kind, key, rel)] = d
+        return out
+
+    def check(self, fa, fb, facts):
+        key = lambda x: (x["kind"], x["key"], x["path"])
+        self.assertEqual(sorted(k for k in fb if k not in fa), sorted(key(x) for x in facts["added"]))
+        self.assertEqual(sorted(k for k in fa if k not in fb), sorted(key(x) for x in facts["removed"]))
+        self.assertEqual(sorted(k for k in fa if k in fb and fa[k] != fb[k]), sorted(key(x) for x in facts["changed"]))
+        for c in facts["changed"]:
+            self.assertEqual(fa[key(c)], c["before"])
+            self.assertEqual(fb[key(c)], c["after"])
+        for u in facts["unchanged"]:
+            self.assertEqual(fa[key(u)], fb[key(u)])
+
+    def never_present(self, facts, *paths):
+        texts = [dec(Path(p).read_bytes()) for p in paths]
+        for value in facts["never_stored"]:
+            self.assertTrue(any(value in t or json.dumps(value)[1:-1] in t or json.dumps(json.dumps(value)[1:-1])[1:-1] in t
+                                for t in texts), value[:30])
+
     def test_openapi_pair_differs_exactly_as_listed(self):
         a, b, facts = F.make_version_pair(self.p("p"), "openapi")
         self.assertEqual((a.parent.name, b.parent.name, a.name), ("v1", "v2", b.name))
-        da, db = jload(a), jload(b)
         t = TestOpenApi("derive")
-        fa, fb = t.derive(da), t.derive(db)
-        sa = {("secret.embedded", k): v for k, v in sec_kinds({".": dec(a.read_bytes())}).items()}
-        sb = {("secret.embedded", k): v for k, v in sec_kinds({".": dec(b.read_bytes())}).items()}
-        flat = lambda d, extra: {**{(k, key): v for k, keys in d.items() for key, v in keys.items()}, **extra}
-        fa, fb = flat(fa, sa), flat(fb, sb)
-        self.assertEqual(sorted(k for k in fb if k not in fa), sorted((x["kind"], x["key"]) for x in facts["added"]))
-        self.assertEqual(sorted(k for k in fa if k not in fb), sorted((x["kind"], x["key"]) for x in facts["removed"]))
-        self.assertEqual(sorted(k for k in fa if k in fb and fa[k] != fb[k]), sorted((x["kind"], x["key"]) for x in facts["changed"]))
-        for c in facts["changed"]:
-            self.assertEqual(fa[(c["kind"], c["key"])], c["before"])
-            self.assertEqual(fb[(c["kind"], c["key"])], c["after"])
-        for u in facts["unchanged"]:
-            self.assertEqual(fa[(u["kind"], u["key"])], fb[(u["kind"], u["key"])])
+        sides = []
+        for p in (a, b):
+            d = {}
+            for kind, keys in t.derive(jload(p)).items():
+                d.update({(kind, k, "."): v for k, v in keys.items()})
+            d.update({("secret.embedded", k, "."): v for k, v in sec_kinds({".": dec(p.read_bytes())}).items()})
+            sides.append(d)
+        self.check(sides[0], sides[1], facts)
         self.assertTrue(any(u["kind"] == "secret.embedded" for u in facts["unchanged"]))
         self.assertTrue(facts["added"] and facts["removed"] and facts["changed"])
+        self.never_present(facts, a, b)
 
     def test_har_pair_differs_exactly_as_listed(self):
         a, b, facts = F.make_version_pair(self.p("p"), "har")
         self.assertEqual((a.parent.name, b.parent.name, a.name), ("v1", "v2", b.name))
-        ra, rb = har_derive(jload(a)["log"]["entries"]), har_derive(jload(b)["log"]["entries"])
-        sa = {("secret.embedded", k): v for k, v in sec_kinds({".": dec(a.read_bytes())}).items()}
-        sb = {("secret.embedded", k): v for k, v in sec_kinds({".": dec(b.read_bytes())}).items()}
-        flat = lambda d, extra: {**{(k, key): v for k, keys in d.items() for key, v in keys.items()}, **extra}
-        fa, fb = flat(ra, sa), flat(rb, sb)
-        self.assertEqual(sorted(k for k in fb if k not in fa), sorted((x["kind"], x["key"]) for x in facts["added"]))
-        self.assertEqual(sorted(k for k in fa if k not in fb), sorted((x["kind"], x["key"]) for x in facts["removed"]))
-        self.assertEqual(sorted(k for k in fa if k in fb and fa[k] != fb[k]), sorted((x["kind"], x["key"]) for x in facts["changed"]))
-        for c in facts["changed"]:
-            self.assertEqual(fa[(c["kind"], c["key"])], c["before"])
-            self.assertEqual(fb[(c["kind"], c["key"])], c["after"])
-        for u in facts["unchanged"]:
-            self.assertEqual(fa[(u["kind"], u["key"])], fb[(u["kind"], u["key"])])
+        sides = []
+        for p in (a, b):
+            d = {}
+            for kind, keys in har_derive(jload(p)["log"]["entries"]).items():
+                d.update({(kind, k, "."): v for k, v in keys.items()})
+            d.update({("secret.embedded", k, "."): v for k, v in sec_kinds({".": dec(p.read_bytes())}).items()})
+            sides.append(d)
+        self.check(sides[0], sides[1], facts)
         self.assertTrue(any(u["kind"] == "secret.embedded" for u in facts["unchanged"]))
+        self.never_present(facts, a, b)
+
+    def test_a_moved_fact_is_removed_at_the_old_path_and_added_at_the_new_one(self):
+        a, b, facts = F.make_version_pair(self.p("p"), "folder")
+        sides = [self.per_path(r, False) for r in (a, b)]
+        self.check(sides[0], sides[1], facts)
+        self.assertEqual([x["path"] for x in facts["removed"]], ["a.js"])
+        self.assertEqual([x["path"] for x in facts["added"]], ["b.js"])
+        self.assertEqual(facts["removed"][0]["key"], facts["added"][0]["key"])
 
     def test_unknown_pair_kind(self):
         with self.assertRaises(ValueError):
@@ -1248,7 +1368,8 @@ class TestVersionPairs(Base):
 
 class TestTierB(Base):
     def capture_expect(self, doc):
-        steps = [s for s in doc["steps"] if isinstance(s, dict) and "n" in s and "action" in s]
+        actions = ("navigate", "click", "type", "select", "submit", "wait", "observe")
+        steps = [s for s in doc["steps"] if isinstance(s, dict) and "n" in s and s.get("action") in actions]
         kinds = {"flow.step": {}, "flow.screen": {}, "web.endpoint": {}, "web.payload-shape": {}}
         for i, s in enumerate(steps):
             u = urlsplit(s["url"]) if s["action"] == "navigate" else None
@@ -1304,7 +1425,11 @@ class TestTierB(Base):
         self.assertFalse(any("navigate" in k for k in facts["kinds"]["flow.step"]))
         doc, facts = make("bad_action")
         self.assertEqual(doc["steps"][1]["action"], "teleport")
-        self.assertIn("steps[1]", facts["ambiguous"][next(iter(facts["ambiguous"]))])
+        self.assertEqual(facts["malformed_paths"], ["steps[1]"])
+        self.assertEqual(facts["expect"], {"skip": ["malformed"]})
+        self.assertEqual(facts["kinds"], self.capture_expect(doc))
+        self.assertEqual(facts["kinds"]["flow.step"]["1 navigate app.example.test/login"]["next"], 3)    # the next kept step
+        self.assertNotIn("ambiguous", facts)
         doc, facts = make("empty")
         self.assertEqual(doc["steps"], [])
         self.assertEqual(facts["kinds"], {"flow.step": {}, "flow.screen": {}, "web.endpoint": {}, "web.payload-shape": {}})
@@ -1362,6 +1487,7 @@ class TestTierB(Base):
 
 class TestAndroidFolders(Base):
     NS = "{http://schemas.android.com/apk/res/android}"
+    WHOLE = r'^(https?://[^"\s]{1,2048}|/(?:api|v[0-9])/[^"\s]{0,2048})$'
     SDKS = ("com/google/firebase", "com/facebook", "io/sentry", "com/stripe", "okhttp3", "retrofit2", "com/onesignal", "io/branch")
 
     def manifest_kinds(self, path):
@@ -1370,8 +1496,9 @@ class TestAndroidFolders(Base):
         a = lambda e, n: e.get(self.NS + n)
         full = lambda n: pkg + n if n.startswith(".") else n
         sdk = m.find("uses-sdk")
-        kinds = {"mobile.package": {pkg: {"versionName": a(m, "versionName"), "versionCode": a(m, "versionCode"),
-                                          "minSdk": a(sdk, "minSdkVersion"), "targetSdk": a(sdk, "targetSdkVersion")}},
+        num = lambda v: int(v) if v is not None and v.isdigit() else v          # 6.7 value types: digits are integers
+        kinds = {"mobile.package": {pkg: {"versionName": a(m, "versionName"), "versionCode": num(a(m, "versionCode")),
+                                          "minSdk": num(a(sdk, "minSdkVersion")), "targetSdk": num(a(sdk, "targetSdkVersion"))}},
                  "mobile.permission": {a(e, "name"): {} for e in m.iter("uses-permission")},
                  "mobile.screen": {}, "mobile.service": {}, "mobile.deeplink": {}, "mobile.setting": {}}
         for e in m.iter("activity"):
@@ -1409,8 +1536,9 @@ class TestAndroidFolders(Base):
                         mm = re.search(r"^package ([\w.]+)", text, re.M)
                         hist[mm.group(1).replace(".", "/")] = hist.get(mm.group(1).replace(".", "/"), 0) + 1
                         for i, line in enumerate(text.split("\n"), 1):
-                            for lit in re.findall(r'"(https?://[^"\s]{1,2048}|/(?:api|v[0-9])/[^"\s]{0,2048})"', line):
-                                endpoints.setdefault(lit, {"path": rel, "line": i})
+                            for lit in re.findall(r'"([^"\\\n]{0,2048})"', line):       # whole literals only (5.8)
+                                if re.match(self.WHOLE, lit):
+                                    endpoints.setdefault(lit, {"path": rel, "line": i})
                 self.assertEqual(facts["kinds"]["mobile.sdk"], self.sdk_kinds(hist))
                 self.assertEqual(facts["kinds"]["mobile.endpoint"], {k: {"from": "source"} for k in endpoints})
                 self.assertEqual(facts["locations"], endpoints)
@@ -1442,6 +1570,12 @@ class TestAndroidFolders(Base):
         self.assertEqual(facts["missing"], [])
         self.assertNotIn("mobile.package", facts["kinds"])
         self.assertIn("mobile.endpoint", facts["kinds"])
+        root, facts = F.make_jadx_dir(self.p("um"), "unsupported_manifest")
+        data = tree(root)["resources/AndroidManifest.xml"]
+        self.assertNotIn(b"\x00", data[:8192])
+        self.assertFalse(data.startswith((b"<?xml", b"<manifest")))
+        self.assertEqual(facts["skips"], {"resources/AndroidManifest.xml": "unsupported"})
+        self.assertEqual(facts["missing"], [])
         root, facts = F.make_jadx_dir(self.p("bm"), "bad_manifest")
         with self.assertRaises(ET.ParseError):
             ET.fromstring(tree(root)["resources/AndroidManifest.xml"])
@@ -1458,7 +1592,13 @@ class TestAndroidFolders(Base):
         root, facts = F.make_apktool_dir(self.p("a"))
         files = tree(root)
         yml = files["apktool.yml"].decode("utf-8")
-        self.assertEqual({k: re.search(r"^\s*%s: '?([^'\n]+)'?$" % k, yml, re.M).group(1) for k in facts["yml"]}, facts["yml"])
+        num = lambda v: int(v) if v.isdigit() else v
+        self.assertEqual({k: num(re.search(r"^\s*%s: '?([^'\n]+)'?$" % k, yml, re.M).group(1)) for k in facts["yml"]}, facts["yml"])
+        self.assertTrue(all(isinstance(facts["yml"][k], int) for k in ("minSdkVersion", "targetSdkVersion", "versionCode")))
+        self.assertIsInstance(facts["yml"]["versionName"], str)
+        for value in facts["kinds"]["mobile.setting"].values():
+            self.assertIsInstance(value["value"], str)
+        self.assertEqual(facts["missing"], [])
         want = self.manifest_kinds(root / "AndroidManifest.xml")
         for kind, got in want.items():
             self.assertEqual(facts["kinds"][kind], got, kind)
@@ -1476,8 +1616,8 @@ class TestAndroidFolders(Base):
                 pk = cls.rsplit("/", 1)[0]
                 hist[pk] = hist.get(pk, 0) + 1
                 for i, line in enumerate(text.split("\n"), 1):
-                    m = re.search(r'const-string v\d+, "(https?://[^"\s]{1,2048}|/(?:api|v[0-9])/[^"\s]{0,2048})"', line)
-                    if m:
+                    m = re.search(r'const-string v\d+, "([^"\\\n]{0,2048})"', line)
+                    if m and re.match(self.WHOLE, m.group(1)):
                         endpoints.setdefault(m.group(1), {"path": rel, "line": i})
         self.assertEqual(facts["kinds"]["mobile.sdk"], self.sdk_kinds(hist))
         self.assertEqual(facts["locations"], endpoints)
@@ -1490,7 +1630,8 @@ class TestAndroidFolders(Base):
                          sec_kinds({k: dec(v) for k, v in files.items() if Path(k).suffix in (".smali", ".xml", ".yml")}))
 
     def test_apktool_variants(self):
-        for variant in ("empty", "no_manifest", "binary_manifest", "no_smali", "doctype", "bad_yml", "unquoted"):
+        for variant in ("empty", "no_manifest", "binary_manifest", "no_smali", "doctype", "bad_yml", "unquoted",
+                        "unsupported_manifest"):
             with self.subTest(variant):
                 root, facts = F.make_apktool_dir(self.p(variant), variant)
                 files = tree(root)
@@ -1500,6 +1641,11 @@ class TestAndroidFolders(Base):
                     self.assertEqual(facts["missing"], ["smali/"])
                 if variant == "no_manifest":
                     self.assertNotIn("AndroidManifest.xml", files)
+                    self.assertNotIn("mobile.package", facts["kinds"])           # apktool.yml alone gives no record
+                    self.assertEqual(facts["missing"], ["AndroidManifest.xml"])
+                if variant == "unsupported_manifest":
+                    self.assertEqual(facts["skips"], {"AndroidManifest.xml": "unsupported"})
+                    self.assertFalse(files["AndroidManifest.xml"].startswith((b"<?xml", b"<manifest")))
                     self.assertNotIn("mobile.package", facts["kinds"])
                 if variant == "binary_manifest":
                     self.assertIn(b"\x00", files["AndroidManifest.xml"][:8192])
@@ -1516,6 +1662,8 @@ class TestAndroidFolders(Base):
                     self.assertNotIn(b"minSdkVersion", files["apktool.yml"])
                 if variant == "empty":
                     self.assertEqual(list(files), ["apktool.yml"])
+                    self.assertEqual(facts["missing"], ["AndroidManifest.xml", "smali/", "res/values/strings.xml"])
+                    self.assertNotIn("apktool.yml", facts["missing"])
         with self.assertRaises(KeyError):
             F.make_apktool_dir(self.p("x"), "nope")
 
@@ -1554,9 +1702,13 @@ class TestVariants(Base):
                     self.assertTrue("skip" in facts.get("expect", {}) or "error" in facts.get("expect", {}) or name in ("tolerant",))
                     size = Path(path).stat().st_size
                     if name == "too_large":
-                        self.assertEqual(size, CAP + 1)
+                        cap = F.CAPS.get(kind, CAP)                  # 5 MiB; a rea bundle: 64 MiB (6.2)
+                        self.assertEqual(size, cap + 1)
                         self.assertEqual(facts["kinds"], {})
-                        self.assertEqual(facts["expect"]["skip"], ["too-large"])
+                        want = {"error": self.IMPORTS[kind]} if kind in self.IMPORTS else {"skip": ["too-large"]}
+                        self.assertEqual(facts["expect"], want)
+                    elif name == "oversized":
+                        self.assertGreater(size, CAP)                # SQLite has no read cap
                     else:
                         self.assertLessEqual(size, CAP)
                     Path(path).unlink()
@@ -1566,8 +1718,7 @@ class TestVariants(Base):
             F.make_variant(self.p("x"), "har", "nope")
         with self.assertRaises(KeyError):
             F.make_variant(self.p("x"), "sqlite", "too_large")
-        with self.assertRaises(KeyError):
-            F.make_variant(self.p("x"), "capture", "too_large")
+        self.assertEqual(F.CAPS, {"capture": CAP, "rea_bundle": 64 * 1024 * 1024})
 
     def test_zero_bytes_follow_the_62_table(self):
         want = {"har": ["malformed"], "sourcemap": ["malformed"], "openapi_json": ["malformed"], "bundle": [None],
@@ -1725,6 +1876,15 @@ class TestVariants(Base):
         with self.assertRaises(RecursionError):
             json.loads(entry["response"]["content"]["text"])
         self.assertEqual(list(facts["kinds"]["web.endpoint"]), [har_key(entry["request"]["method"], entry["request"]["url"])])
+        derived = har_derive([entry])                                  # the piece is dropped, the entry stays (6.2 rule 4)
+        self.assertEqual(derived["web.endpoint"], facts["kinds"]["web.endpoint"])
+        self.assertEqual(derived["web.payload-shape"], {})
+        self.assertNotIn("web.payload-shape", facts["kinds"])
+        lim = ["body nested deeper than the parser allows; not shaped"]
+        self.assertEqual(facts["limitations"], lim)
+        self.assertEqual(facts["record_limitations"], {"web.endpoint " + next(iter(facts["kinds"]["web.endpoint"])): lim})
+        self.assertEqual(facts["expect"], {"skip": [None]})
+        self.assertNotIn("ambiguous", facts)
         path, facts = self.build("har", "huge_body")
         entries = jload(path)["log"]["entries"]
         self.assertGreaterEqual(len(entries[0]["response"]["content"]["text"]), 3_000_000)
@@ -1732,6 +1892,43 @@ class TestVariants(Base):
         self.assertEqual(derived["web.payload-shape"], facts["kinds"]["web.payload-shape"])
         self.assertEqual(derived["web.endpoint"], facts["kinds"]["web.endpoint"])
         self.assertLess(path.stat().st_size, CAP)
+
+    def test_bad_json_and_bad_base64_bodies_are_dropped_on_their_own(self):
+        for name, limitation in (("bad_json_body", "body not parseable as JSON; not shaped"),
+                                 ("bad_base64_body", "body not valid base64; not shaped")):
+            with self.subTest(name):
+                path, facts = self.build("har", name)
+                entries = jload(path)["log"]["entries"]
+                derived = har_derive(entries)
+                self.assertEqual(derived["web.endpoint"], facts["kinds"]["web.endpoint"])
+                self.assertEqual(derived["web.payload-shape"], facts["kinds"]["web.payload-shape"])
+                self.assertEqual(list(facts["kinds"]["web.payload-shape"]), ["GET app.example.test/api/items response"])
+                self.assertEqual(facts["limitations"], [limitation])
+                self.assertEqual(facts["record_limitations"], {"web.endpoint GET app.example.test/api/broken": [limitation]})
+                self.assertEqual(set(facts["never_stored"]), expected_never(har_leaks(entries)))
+                self.check_secrets(path, facts)
+        entries = jload(self.build("har", "bad_base64_body")[0])["log"]["entries"]
+        with self.assertRaises(ValueError):
+            base64.b64decode(entries[1]["response"]["content"]["text"], validate=True)
+        with self.assertRaises(ValueError):
+            json.loads(jload(self.build("har", "bad_json_body")[0])["log"]["entries"][1]["response"]["content"]["text"])
+
+    def test_oversized_sqlite_is_read(self):
+        path, facts = self.build("sqlite", "oversized")
+        self.assertGreater(path.stat().st_size, CAP)
+        self.assertEqual(F.sqlite_schema_facts(path), facts["kinds"])
+        self.assertIn("padding", facts["kinds"]["data.table"])
+        self.assertEqual(facts["expect"], {"skip": [None]})
+
+    def test_pathological_fragment_keeps_its_shape(self):
+        """The part that makes a lazy-dot pattern slow: `fetch("` followed by 300+ characters with no quote, repeated."""
+        data = F.make_pathological_line(self.p("p.js"), 200000)[0].read_text(encoding="ascii")
+        opens = data.count('fetch("')
+        self.assertGreater(opens, 100)
+        self.assertGreaterEqual(len(re.findall(r'fetch\("[^"]{300}', data)), opens - 1)
+        self.assertGreater(len(re.findall(r"fetch\(\s{500}", data)), 100)         # whitespace runs after `fetch(`
+        self.assertIn('"' * 100, data)
+        self.assertNotIn("\n", data)
 
     def test_bad_har_entries(self):
         path, facts = self.build("har", "bad_entries")
@@ -1744,7 +1941,7 @@ class TestVariants(Base):
         self.assertEqual(derived["web.endpoint"], facts["kinds"]["web.endpoint"])
         self.assertEqual(derived["web.payload-shape"], facts["kinds"]["web.payload-shape"])
         self.assertTrue(any(not isinstance(e, dict) for e in entries))
-        self.assertEqual(set(facts["never_stored"]), har_leaks(valid))
+        self.assertEqual(set(facts["never_stored"]), expected_never(har_leaks(valid)))
         self.check_secrets(path, facts)
 
     def test_sourcemap_variants(self):
@@ -1859,9 +2056,11 @@ class TestCompleteness(Base):
     def test_dropping_a_value_from_never_stored_is_noticed(self):
         path, facts = F.make_har(self.p("a.har"))
         entries = jload(path)["log"]["entries"]
-        self.assertEqual(har_leaks(entries), set(facts["never_stored"]))
+        self.assertEqual(expected_never(har_leaks(entries)), set(facts["never_stored"]))
         short = [v for v in facts["never_stored"] if F.SECRETS["google-api-key"] != v]
-        self.assertNotEqual(har_leaks(entries), set(short))
+        self.assertNotEqual(expected_never(har_leaks(entries)), set(short))
+        without_pem = [v for v in facts["never_stored"] if v != F.PEM_BODY]
+        self.assertNotEqual(expected_never(har_leaks(entries)), set(without_pem))
         self.assertIn(F.SECRETS["google-api-key"], har_leaks(entries))     # the query value
 
     def test_other_unlisted_facts_are_noticed(self):

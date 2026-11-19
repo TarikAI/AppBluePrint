@@ -167,10 +167,41 @@ def _secret_kinds(texts):
     return out
 
 
+def escaped_forms(values):
+    """``values`` plus, for every value that JSON escapes (a newline, a quote, a backslash, non-ASCII), its JSON-escaped
+    form `json.dumps(v)[1:-1]` (stored records are JSON), plus the body of the fake private key when its value is
+    listed (contract 10.1 privacy check)."""
+    out = list(dict.fromkeys(values))
+    for v in list(out):
+        for extra in (json.dumps(v)[1:-1], PEM_BODY if PEM_BODY in v else None):
+            if extra and extra not in out:
+                out.append(extra)
+    return out
+
+
 def _facts(kinds=None, **extra):
     f = {"kinds": {k: dict(v) for k, v in (kinds or {}).items()}}
     f.update(extra)
+    if "never_stored" in f:
+        f["never_stored"] = escaped_forms(f["never_stored"])
     return f
+
+
+def _split_records(path_records, other=None):
+    """Folder fixtures (contract 10.2): ``path_records`` is `{path: {kind: {key: data}}}`; returns the `kinds` dict
+    holding ``other`` (records without a file) and only the keys that have a record in exactly one file."""
+    seen = {}
+    for path, kinds in path_records.items():
+        for kind, keys in kinds.items():
+            for key in keys:
+                seen.setdefault((kind, key), []).append(path)
+    out = {k: dict(v) for k, v in (other or {}).items()}
+    for path, kinds in sorted(path_records.items()):
+        for kind, keys in kinds.items():
+            for key, data in keys.items():
+                if len(seen[(kind, key)]) == 1:
+                    out.setdefault(kind, {})[key] = data
+    return out
 
 
 def _with_secrets(facts, texts):
@@ -237,6 +268,7 @@ _ORIGIN = "https://app.example.test"
 _ITEM = {"id": "i-1", "title": "Cracked-tile-fixture-value", "done": False, "tagCount": 1}
 _JSON = "application/json"
 _JSON_UTF8 = "application/json; charset=utf-8"
+_TREE = {"a": {"b": {"c": {"d": {"e": {"f": "tree-leaf-fixture-value"}}}}}}      # 6 levels: `"..."` from level 5 (6.3)
 
 
 def default_har_entries():
@@ -281,6 +313,7 @@ def default_har_entries():
         har_entry("GET", _ORIGIN + "/api/session/logout", 200, t=14, req_headers=both,
                   resp_headers=[("Set-Cookie", "session=; Max-Age=0; Path=/")], resp_mime=_JSON,
                   resp_body={"ok": True}, resp_b64=True),
+        har_entry("GET", _ORIGIN + "/api/tree", 200, t=15, req_headers=both, resp_mime=_JSON, resp_body=_TREE),
     ]
 
 
@@ -307,6 +340,7 @@ HAR_ENDPOINTS = {
     _STATUS_EP: _ep([200], [], [_JSON]),
     "GET " + _APP + "/settings": _ep([200], [], ["text/html"]),
     "GET " + _API + "/session/logout": _ep([200], [], [_JSON]),
+    "GET " + _API + "/tree": _ep([200], [], [_JSON]),
 }
 _ITEM_SHAPE = {"id": "string", "title": "string", "done": "boolean", "tagCount": "number"}
 HAR_SHAPES = {   # "<endpoint key> request|response" -> shape
@@ -321,6 +355,7 @@ HAR_SHAPES = {   # "<endpoint key> request|response" -> shape
     "POST " + _API + "/auth/token response": {"access_token": "string", "token_type": "string"},
     _STATUS_EP + " response": {"ok": "boolean", "version": "string"},
     "GET " + _API + "/session/logout response": {"ok": "boolean"},
+    "GET " + _API + "/tree response": {"a": {"b": {"c": {"d": "..."}}}},
 }
 HAR_AUTH_STEPS = {
     "POST " + _API + "/session/login": {"order": 1, "sets-cookie": True, "auth-scheme": None},
@@ -373,7 +408,10 @@ def har_never_stored(entries):
         if text:
             if content.get("encoding") == "base64":
                 out.add(text)
-                text = base64.b64decode(text).decode("utf-8")
+                try:
+                    text = base64.b64decode(text).decode("utf-8")
+                except ValueError:
+                    text = ""
             if "json" in content.get("mimeType", ""):
                 try:
                     leaves(json.loads(text))
@@ -549,13 +587,15 @@ def write_bundle(path, text="", style="spaced"):
 def make_bundle_edge(path):
     """Edge cases of 6.5 in one file: the framework markers `__NUXT__`, `ng-version` and `__SVELTEKIT`; the bundler
     markers `__vite__` and `webpackChunk` (no framework); `flags.x` without a flag-library import (not a flag);
-    `split("a.b")` and `cat("x.y")` (not i18n keys); one real axios call."""
+    `split("a.b")` and `cat("x.y")` (not i18n keys); empty literals in a flag, an i18n key, a `fetch` and an axios call
+    (ignored: 6.2 rule 7); one real axios call."""
     js = _lines(
         "/*! edge cases */",
         'window.__NUXT__ = {}; document.body.setAttribute("ng-version", "17"); var s = "__SVELTEKIT";',
         'window.__vite__ = 1; (self["webpackChunkfixture"] = self["webpackChunkfixture"] || []);',
         "if (flags.notAFlag) { run(); }",
         'cat("x.y"); str.split("a.b");',
+        'isEnabled(""); t(""); fetch(""); axios.get("");',
         'axios.get("/api/edge");')
     p = _write(path, js)
     kinds = {"web.framework": {k: {"from": "bundle"} for k in ("angular", "nuxt", "sveltekit")},
@@ -579,11 +619,13 @@ def make_hermes_bundle(path):
 
 def make_site(root, variant="normal"):
     """A saved Next.js site: index.html with `__NEXT_DATA__`, `_next/static/abc/_buildManifest.js` and a bundle.
-    Variants: normal, empty (an empty folder)."""
+    Variants: normal, empty (an empty folder). Keys with records in several files (`web.route "/"`: the bundle's
+    Angular `path: ''` with `{"relative": true}` and the manifest with `{}`; `web.route "/blog/{slug}"`; the `next`
+    framework from `html` and from `bundle`) are only in ``records_by_path``; ``kinds`` holds the unique keys."""
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     if variant == "empty":
-        return root, _facts(variant="empty")
+        return root, _facts(records_by_path={}, variant="empty")
     html = _lines(
         "<!doctype html>", "<html><head><title>Snag</title></head><body>",
         '<div id="__next"></div>',
@@ -595,11 +637,18 @@ def make_site(root, variant="normal"):
     _write(root / "index.html", html)
     _write(root / "_next" / "static" / "abc" / "_buildManifest.js", manifest)
     _write(root / "static" / "main.js", js)
-    kinds = {k: dict(v) for k, v in bundle_facts["kinds"].items() if k != "secret.embedded"}
-    kinds["web.route"]["/about"] = {}
-    facts = _facts(kinds, files=["_next/static/abc/_buildManifest.js", "index.html", "static/main.js"],
-                   never_stored=BUNDLE_NEVER, variant="normal")
-    return root, _with_secrets(facts, {"static/main.js": js})
+    per_file = {
+        "index.html": {"web.route": {"/blog/{slug}": {}}, "web.framework": {"next": {"from": "html"}}},
+        "_next/static/abc/_buildManifest.js": {"web.route": {"/": {}, "/about": {}, "/blog/{slug}": {}}},
+        "static/main.js": {k: dict(v) for k, v in bundle_facts["kinds"].items() if k != "secret.embedded"},
+    }
+    sec = _secret_kinds({"static/main.js": js})
+    if sec:
+        per_file["static/main.js"]["secret.embedded"] = sec
+    facts = _facts(_split_records(per_file), records_by_path=per_file,
+                   files=["_next/static/abc/_buildManifest.js", "index.html", "static/main.js"],
+                   never_stored=BUNDLE_NEVER, secret_patterns=sorted({k.split("@")[0] for k in sec}), variant="normal")
+    return root, facts
 
 
 # ----------------------------------------------------------------------------- SQLite
@@ -691,7 +740,8 @@ def make_sqlite(path, ddl=None):
         con.close()
     if ddl is None:
         return p, _facts(SQLITE_KINDS, row_counts=SQLITE_ROWS, never_stored=SQLITE_NEVER, secret_patterns=[],
-                         must_not={"secret.embedded": ["aws-key@."], "data.table": SQLITE_INTERNAL},
+                         must_not={"secret.embedded": ["aws-key@."], "data.index": ["sqlite_autoindex_users_1"],
+                                  "data.table": ["sqlite_sequence"]},
                          variant="normal")
     return p, _facts(sqlite_schema_facts(p), secret_patterns=[], variant="custom")
 
@@ -1120,7 +1170,7 @@ def _repo_files():
     f["config/settings.json"] = _dump({"slackToken": SECRETS["slack"], "region": "test-1"}).decode("ascii")
     f["pylib/__init__.py"] = ""
     f["pylib/mod.py"] = "def helper():\n    return 1\n"
-    f["services/py/requirements.txt"] = "fastapi==0.110.0\nflask>=3.0\nuvicorn\n"
+    f["services/py/requirements.txt"] = "# index token %s\nfastapi==0.110.0\nflask>=3.0\nuvicorn\n" % SECRETS["stripe-live"]
     f["services/py/pyproject.toml"] = _lines("[project]", 'name = "snag-fixture-py"', 'dependencies = ["django>=4.2"]')
     f["services/py/api/__init__.py"] = ""
     f["services/py/api/models.py"] = "class Widget:\n    name: str\n"
@@ -1188,6 +1238,7 @@ def _repo_files():
         "from .views import detail, index, results",
         "",
         "urlpatterns = [",
+        '    path("", index),',
         '    path("polls/", index),',
         '    path("polls/<int:poll_id>/", detail),',
         '    path("polls/<slug:name>/results/", results),',
@@ -1214,14 +1265,14 @@ def _repo_files():
         "}")
     f["services/rust/src/handlers.rs"] = "pub async fn health() {}\npub async fn user() {}\npub async fn create() {}\n"
     f["services/rust/src/nested/mod.rs"] = "pub fn nested() {}\n"
-    f["services/rails/Gemfile"] = 'source "https://rubygems.org"\ngem "rails", "~> 7.1"\n'
+    f["services/rails/Gemfile"] = '# deploy key %s\nsource "https://rubygems.org"\ngem "rails", "~> 7.1"\n' % SECRETS["aws-key"]
     f["services/rails/config/routes.rb"] = _lines(
         "Rails.application.routes.draw do",
         '  get "/rails/widgets", to: "widgets#index"',
         '  get "/rails/widgets/:id", to: "widgets#show"',
         "end")
     f["services/rails/config/application.rb"] = 'SECRET = ENV["RAILS_MASTER_FIXTURE"]\n'
-    f["services/go/go.mod"] = _lines("module example.test/svc", "", "go 1.21", "", "require (",
+    f["services/go/go.mod"] = _lines("// notify " + SECRETS["slack"], "module example.test/svc", "", "go 1.21", "", "require (",
                                      "\tgithub.com/gin-gonic/gin v1.9.1", "\tgithub.com/labstack/echo/v4 v4.11.0",
                                      "\tgithub.com/go-chi/chi/v5 v5.0.10", ")")
     f["services/go/main.go"] = _lines(
@@ -1268,7 +1319,7 @@ REPO_ROUTES_BY_FILE = {
     "services/py/api/main.py": ["GET /widgets", "POST /widgets", "GET /widgets/{widget_id}"],
     "services/py/flask_app.py": ["GET /flask/ping", "POST /flask/ping", "DELETE /flask/items/{item_id}",
                                  "GET /flask/files/{path}", "GET /flask/hello"],
-    "services/py/polls/urls.py": ["ANY /polls", "ANY /polls/{poll_id}", "ANY /polls/{name}/results"],
+    "services/py/polls/urls.py": ["ANY /", "ANY /polls", "ANY /polls/{poll_id}", "ANY /polls/{name}/results"],
     "services/rust/src/main.rs": ["GET /rust/health", "GET /rust/users/{id}", "GET /rust/users"],
     "services/rails/config/routes.rb": ["GET /rails/widgets", "GET /rails/widgets/{id}"],
 }
@@ -1317,7 +1368,8 @@ REPO_TESTS = ["__tests__/page.test.tsx", "services/go/internal/util/util_test.go
               "src/routes/items.spec.js", "tests/health.test.js", "tests/items.test.js"]
 REPO_SECRETS = {"src/config.js": ["aws-key", "private-key", "stripe-live"], "src/api-client.ts": ["bearer"],
                 "app/page.tsx": ["google-api-key"], "services/py/settings.py": ["github-token"],
-                "config/settings.json": ["slack"]}
+                "config/settings.json": ["slack"], "services/rails/Gemfile": ["aws-key"],
+                "services/py/requirements.txt": ["stripe-live"], "services/go/go.mod": ["slack"]}
 REPO_FRAMEWORKS = {
     "express": ["package.json"], "fastify": ["package.json"], "next": ["package.json"], "react": ["package.json"],
     "vue": ["apps/vue/package.json"], "nuxt": ["apps/vue/package.json"], "svelte": ["apps/svelte/package.json"],
@@ -1356,7 +1408,8 @@ REPO_SEED_FILES = {"route": ["src/routes/items.js"], "path": ["src/routes/items.
                    "symbol": ["src/lib/validate.js"], "literal": ["src/routes/items.js"], "missing": []}
 
 
-def _repo_kinds(files):
+def _repo_records(files):
+    """``(other, per_path)``: records without a file (language, framework) and records per file."""
     langs = {}
     for p in sorted(files):
         lang = _LANG_BY_EXT.get(Path(p).suffix)
@@ -1364,16 +1417,34 @@ def _repo_kinds(files):
             d = langs.setdefault(lang, {"files": 0, "bytes": 0})
             d["files"] += 1
             d["bytes"] += len(files[p].encode("utf-8"))
-    imports_of = {t: REPO_IMPORTS.get(t, []) for t in REPO_TESTS}
-    return {
-        "source.language": langs,
-        "source.framework": {k: {"from": v} for k, v in REPO_FRAMEWORKS.items()},
-        "source.entry": {k: {"via": v} for k, v in REPO_ENTRIES.items()},
-        "source.route": {k: {} for keys in REPO_ROUTES_BY_FILE.values() for k in keys},
-        "source.env": {k: {} for keys in REPO_ENV_BY_FILE.values() for k in keys},
-        "source.table": {r["key"]: {"access": r["access"]} for r in REPO_TABLE_RECORDS if r["access"] is None},
-        "source.test": {t: {"imports": imports_of[t]} for t in REPO_TESTS},
-    }
+    other = {"source.language": langs, "source.framework": {k: {"from": v} for k, v in REPO_FRAMEWORKS.items()}}
+    per = {}
+
+    def add(path, kind, key, data):
+        per.setdefault(path, {}).setdefault(kind, {})[key] = data
+    for rel, keys in REPO_ROUTES_BY_FILE.items():
+        for k in keys:
+            add(rel, "source.route", k, {})
+    for rel, keys in REPO_ENV_BY_FILE.items():
+        for k in keys:
+            add(rel, "source.env", k, {})
+    for r in REPO_TABLE_RECORDS:
+        add(r["path"], "source.table", r["key"], {"access": r["access"]})
+    for t in REPO_TESTS:
+        add(t, "source.test", t, {"imports": REPO_IMPORTS.get(t, [])})
+    for key, via in REPO_ENTRIES.items():
+        add(key.split("#")[0], "source.entry", key, {"via": via})
+    return other, per
+
+
+_MANIFEST_NAMES = ("Gemfile", "go.mod", "pubspec.yaml")
+
+
+def _scanned(rel):
+    """Files the source lane reads as text (6.4): the extension list plus the manifests named by `source.framework`."""
+    name = rel.rsplit("/", 1)[-1]
+    return (Path(rel).suffix in _SCAN_EXT or name in _MANIFEST_NAMES or bool(re.match(r"requirements.*\.txt$", name))
+            or name.startswith("build.gradle"))
 
 
 def make_repo(path, variant="normal"):
@@ -1381,8 +1452,10 @@ def make_repo(path, variant="normal"):
     ``malformed`` (truncated package.json and tsconfig, invalid UTF-8 and binary source, a one-line 1 MB script with a
     route at each end, a self-import).
 
-    Facts of ``normal``: ``kinds`` (all the 6.4 kinds; `source.table` holds the schema-file records, the code-reference
-    records with their `read`/`write` access are in ``table_records``), ``graph`` (`imports`, `unresolved`, `routes`,
+    Facts of ``normal``: ``records_by_path`` (`{path: {kind: {key: data}}}`, every record that has a file),
+    ``kinds`` (the records without a file, and only the keys that have a record in exactly one file: `source.env
+    DATABASE_URL` and the `source.table` keys are in several, so they are only in ``records_by_path``;
+    ``table_records`` lists the table records flat), ``graph`` (`imports`, `unresolved`, `routes`,
     `tests` as in graph.json; only entries with something to list), ``env_by_file``, ``trace`` (expected `study trace
     "GET /items"`), ``seeds`` and ``seed_files`` (one seed of each form, 6.4 step 1), ``no_route_files`` (files that look
     like Next.js routes and are not), ``files`` (every path), ``binary`` (counted, not read).
@@ -1402,12 +1475,16 @@ def make_repo(path, variant="normal"):
     for rel in sorted(REPO_BINARY):
         _write(root / rel, REPO_BINARY[rel])
     graph = {"imports": REPO_IMPORTS, "unresolved": REPO_UNRESOLVED, "routes": REPO_ROUTES_BY_FILE, "tests": REPO_TESTS}
-    never = [SECRETS[k] for k in ("aws-key", "stripe-live", "google-api-key", "github-token", "slack")] + [TOKEN, PEM_BODY]
-    facts = _facts(_repo_kinds(files), graph=graph, env_by_file=REPO_ENV_BY_FILE, table_records=REPO_TABLE_RECORDS,
-                   never_stored=never, trace=REPO_TRACE, seeds=REPO_SEEDS, seed_files=REPO_SEED_FILES,
-                   no_route_files=REPO_NO_ROUTE_FILES, files=sorted(list(files) + list(REPO_BINARY)),
-                   binary=sorted(REPO_BINARY), must_not={"source.env": ["lowercase_var"]}, variant="normal")
-    texts = {k: v for k, v in files.items() if Path(k).suffix in _SCAN_EXT}
+    never = [SECRETS[k] for k in ("aws-key", "stripe-live", "google-api-key", "github-token", "slack", "private-key")] + [TOKEN]
+    other, per = _repo_records(files)
+    texts = {k: v for k, v in files.items() if _scanned(k)}
+    for key, data in _secret_kinds(texts).items():
+        per.setdefault(key.split("@", 1)[1], {}).setdefault("secret.embedded", {})[key] = data
+    facts = _facts(_split_records(per, other), records_by_path=per, graph=graph, env_by_file=REPO_ENV_BY_FILE,
+                   table_records=REPO_TABLE_RECORDS, never_stored=never, trace=REPO_TRACE, seeds=REPO_SEEDS,
+                   seed_files=REPO_SEED_FILES, no_route_files=REPO_NO_ROUTE_FILES,
+                   files=sorted(list(files) + list(REPO_BINARY)), binary=sorted(REPO_BINARY),
+                   must_not={"source.env": ["lowercase_var"]}, variant="normal")
     return root, _with_secrets(facts, texts)
 
 
@@ -1443,6 +1520,30 @@ def _make_repo_malformed(root):
 # ----------------------------------------------------------------------------- compare pair
 
 
+def _at_dot(facts):
+    """Compare is per ``(kind, key, path)`` (6.9): single-file targets use the path `.`."""
+    for field in ("added", "removed", "changed", "unchanged"):
+        for item in facts[field]:
+            item.setdefault("path", ".")
+    return facts
+
+
+def _folder_pair(root):
+    """Two folders: v1 has `a.js` (moved fact) and `keep.js`; v2 moved the axios call to `b.js`. The moved fact is
+    `removed` at `a.js` and `added` at `b.js`; the rest is unchanged."""
+    call = 'axios.get("/api/moved");\n'
+    keep = 'axios.get("/api/keep");\nt("keep.title");\n'
+    for v, files in (("v1", {"a.js": call, "keep.js": keep}), ("v2", {"b.js": call, "keep.js": keep})):
+        for rel, text in files.items():
+            _write(root / v / rel, text)
+    moved = {"kind": "web.api-call", "key": "GET /api/moved"}
+    facts = _facts(added=[dict(moved, path="b.js")], removed=[dict(moved, path="a.js")], changed=[],
+                   unchanged=[{"kind": "web.api-call", "key": "GET /api/keep", "path": "keep.js"},
+                              {"kind": "web.i18n-key", "key": "keep.title", "path": "keep.js"}],
+                   artifact_kind="folder", variant="pair")
+    return root / "v1", root / "v2", facts
+
+
 def make_version_pair(root, kind="openapi"):
     """Two versions of one artifact for the compare lane: returns ``(path_v1, path_v2, facts)``.
 
@@ -1450,7 +1551,9 @@ def make_version_pair(root, kind="openapi"):
     `secret.embedded` (`<pattern>@.`) are equal on both sides. ``facts`` lists, by ``(kind, key)`` as in 6.9: ``added``
     (v2 only), ``removed`` (v1 only), ``changed`` (both, data differs; with ``before`` and ``after``) and ``unchanged``
     (a few facts present and equal in both, `secret.embedded` included). The two versions differ in nothing else that
-    produces a fact, so a compare study has exactly these changes. Kinds: ``openapi`` (data lane) and ``har`` (web).
+    produces a fact, so a compare study has exactly these changes. Kinds: ``openapi`` (data lane), ``har`` (web) and ``folder`` (two script folders; returns the two folders; a fact
+    that moved to another file is removed at the old path and added at the new one). Every listed item carries its
+    ``path`` (`.` for a single file). Both versions' ``never_stored`` values are in ``facts["never_stored"]``.
     """
     root = Path(root)
     if kind == "openapi":
@@ -1475,8 +1578,8 @@ def make_version_pair(root, kind="openapi"):
                       "after": {"operationId": "listAllItems", "tags": ["items", "v2"]}}],
             unchanged=[{"kind": "data.endpoint", "key": "POST /items"}, {"kind": "data.schema-type", "key": "Item"},
                        {"kind": "data.security", "key": "bearerAuth"}] + sec,
-            artifact_kind="openapi", variant="pair")
-        return a, b, facts
+            artifact_kind="openapi", variant="pair", never_stored=OPENAPI_NEVER)
+        return a, b, _at_dot(facts)
     if kind == "har":
         both = {"Cookie": "session=" + COOKIE, "Authorization": SECRETS["bearer"]}
         e1 = default_har_entries()
@@ -1495,15 +1598,18 @@ def make_version_pair(root, kind="openapi"):
             changed=[{"kind": "web.endpoint", "key": "GET " + _API + "/items", "before": before, "after": after}],
             unchanged=[{"kind": "web.endpoint", "key": "POST " + _API + "/session/login"},
                        {"kind": "web.host", "key": "analytics.vendor.test"}] + sec,
-            artifact_kind="har", variant="pair",
+            artifact_kind="har", variant="pair", never_stored=sorted(set(fa["never_stored"]) | set(fb["never_stored"])),
             note="the new reports response is CSV and the 500 has no body, so neither adds a payload shape; the "
                  "Authorization header moves from the removed blobs entry to the added reports entry, so secret counts stay equal")
-        return a, b, facts
+        return a, b, _at_dot(facts)
+    if kind == "folder":
+        return _folder_pair(root)
     raise ValueError("unknown pair kind: %r" % kind)
 
 
 # ----------------------------------------------------------------------------- tier B: capture
 
+CAPTURE_ACTIONS = ("navigate", "click", "type", "select", "submit", "wait", "observe")
 CAPTURE_TYPED = ["tester-one-fixture-value", PASSWORD, "Option-fixture-value"]
 
 
@@ -1538,8 +1644,9 @@ def _url_key(method, url):
 
 
 def _capture_kinds(doc):
-    """Expected facts of a capture document: steps that are objects with `n` and `action` count, others are skipped."""
-    steps = [s for s in doc["steps"] if isinstance(s, dict) and "n" in s and "action" in s]
+    """Expected facts of a capture document: steps that are objects with `n` and a known `action` count, the others are
+    `malformed` skips (6.10) and `next` points to the next kept step."""
+    steps = [s for s in doc["steps"] if isinstance(s, dict) and "n" in s and s.get("action") in CAPTURE_ACTIONS]
     kinds = {"flow.step": {}, "flow.screen": {}, "web.endpoint": {}, "web.payload-shape": {}}
     replaced = {}
     for i, s in enumerate(steps):
@@ -1752,7 +1859,7 @@ def _svc(kind, exported):
 
 
 MANIFEST_KINDS = {
-    "mobile.package": {"com.example.snag": {"versionName": "1.4.2", "versionCode": "12", "minSdk": "24", "targetSdk": "34"}},
+    "mobile.package": {"com.example.snag": {"versionName": "1.4.2", "versionCode": 12, "minSdk": 24, "targetSdk": 34}},
     "mobile.permission": {"android.permission.CAMERA": {}, "android.permission.INTERNET": {}},
     "mobile.screen": {"com.example.snag.DetailActivity": {"exported": False, "launcher": False},
                       "com.example.snag.LinkActivity": {"exported": True, "launcher": False},
@@ -1768,8 +1875,6 @@ MANIFEST_KINDS = {
 ENDPOINT_LITERALS = ["https://api.example.test/v1/items", "/api/v2/ping", "https://example.test/docs/privacy",
                      "https://api.example.test/v1/session", "/v1/health"]
 SDK_KINDS = {"com/google/firebase": {"classes": 1}, "io/sentry": {"classes": 1}}      # known SDK prefixes only
-_ENDPOINT_AMBIGUOUS = {"mobile.package data value types for a text manifest (strings here, integers for AXML)": ["12", "24", "34"],
-                       "mobile.endpoint data.from for text sources and smali": ["source"]}
 
 
 def _java_files(prefix):
@@ -1781,6 +1886,7 @@ def _java_files(prefix):
             '    static final String BASE = "https://api.example.test/v1/items";',
             '    static final String PING = "/api/v2/ping";',
             '    static final String DOCS = "https://example.test/docs/privacy";',
+            '    static final String NOTE = "see https://api.example.test/v1/note for details";',   # not a whole literal
             '    static final String KEY = "%s";' % SECRETS["aws-key"], "}"),
         p + "com/example/snag/net/ApiClient.java": _lines(
             "package com.example.snag.net;", "", "public class ApiClient {",
@@ -1814,7 +1920,6 @@ def _android_facts(files, kinds, sources, **extra):
         facts["kinds"]["mobile.sdk"] = {k: dict(v) for k, v in SDK_KINDS.items()}
         facts["kinds"]["mobile.endpoint"] = {e: {"from": "source"} for e in extra.get("endpoints", ENDPOINT_LITERALS)}
         facts["locations"] = _locations(files, facts["kinds"]["mobile.endpoint"])
-    facts["ambiguous"] = dict(_ENDPOINT_AMBIGUOUS)
     texts = {k: _decode(v) if isinstance(v, bytes) else v for k, v in files.items()
              if isinstance(v, str) or (isinstance(v, bytes) and b"\x00" not in v[:8192])}
     return _with_secrets(facts, texts)
@@ -1825,7 +1930,9 @@ def make_jadx_dir(root, variant="normal"):
     ``gradle`` (export-gradle layout `app/src/main/...`, same facts), ``empty`` (empty `sources/` and `resources/`),
     ``no_manifest``, ``no_sources``, ``doctype`` (manifest holds `<!DOCTYPE`/`<!ENTITY` and uses the entity: refused as
     a `malformed` skip with the note `DOCTYPE or ENTITY refused`, not listed in `missing`; sources still read),
-    ``bad_manifest`` (truncated XML: `malformed` skip), ``binary_manifest`` (NUL in the first 8 KiB: `binary` skip).
+    ``bad_manifest`` (truncated XML: `malformed` skip), ``binary_manifest`` (NUL in the first 8 KiB: `binary` skip),
+    ``unsupported_manifest`` (text that does not start with `<?xml` or `<manifest`: `unsupported` skip). `gradle`
+    expects `app/src/main/AndroidManifest.xml` and `app/src/main/java/` (scanned like `sources/`) and nothing missing.
     Facts: the `mobile.*` kinds with their 6.7 data, ``locations`` of each endpoint literal (path and line), ``skips``
     (path -> reason), ``notes``, and ``missing`` (the expected parts of 5.8 not found).
     """
@@ -1847,6 +1954,8 @@ def make_jadx_dir(root, variant="normal"):
         files[man_path] = _manifest_xml()[:300]
     elif variant == "binary_manifest":
         files[man_path] = _AXML_STUB
+    elif variant == "unsupported_manifest":
+        files[man_path] = "this is not a manifest\n"
     elif variant != "no_manifest":
         raise KeyError(variant)
     for rel in sorted(files):
@@ -1865,12 +1974,10 @@ def make_jadx_dir(root, variant="normal"):
         extra.update(skips={man_path: "malformed"})
     elif variant == "binary_manifest":
         extra.update(skips={man_path: "binary"})
+    elif variant == "unsupported_manifest":
+        extra.update(skips={man_path: "unsupported"})
     facts = _android_facts(files, kinds, variant != "no_sources", missing=missing,
                            never_stored=[SECRETS["aws-key"]], variant=variant, **extra)
-    if gradle:
-        facts["ambiguous"]["coverage.missing for the export-gradle layout (no `sources/` folder)"] = ["sources/"]
-    if variant == "binary_manifest":
-        facts["ambiguous"]["binary manifest: `binary` skip (6.2 table) or not a qualifying manifest (5.8 detection)"] = [man_path]
     return root, facts
 
 
@@ -1879,7 +1986,7 @@ APKTOOL_YML = _lines(
     "isFrameworkApk: false", "packageInfo:", "  forcedPackageId: '127'", "sdkInfo:", "  minSdkVersion: '24'",
     "  targetSdkVersion: '34'", "sharedLibrary: false", "sparseResources: false", "usesFramework:", "  ids:", "  - 1",
     "version: 2.9.3", "versionInfo:", "  versionCode: '12'", "  versionName: 1.4.2")
-APKTOOL_VALUES = {"minSdkVersion": "24", "targetSdkVersion": "34", "versionCode": "12", "versionName": "1.4.2"}
+APKTOOL_VALUES = {"minSdkVersion": 24, "targetSdkVersion": 34, "versionCode": 12, "versionName": "1.4.2"}
 STRINGS_XML = _lines('<?xml version="1.0" encoding="utf-8"?>', "<resources>",
                      '    <string name="app_name">Snag-fixture-text</string>',
                      '    <string name="welcome">Welcome-fixture-text</string>',
@@ -1905,16 +2012,19 @@ def make_apktool_dir(root, variant="normal"):
     """apktool output folder (5.8). Variants: ``normal`` (`apktool.yml`, text manifest, `res/values/strings.xml`, smali
     in two folders), ``empty`` (only an `apktool.yml` with no keys), ``no_manifest``, ``binary_manifest`` (`binary`
     skip), ``no_smali``, ``doctype`` (refused: `malformed` skip, note `DOCTYPE or ENTITY refused`, not in `missing`),
-    ``bad_yml`` (garbage instead of YAML), ``unquoted`` (versions without quotes: same values). Facts: ``yml`` (the four
-    values the line regexes find; they also fill the `mobile.package` data when there is no manifest),
+    ``bad_yml`` (garbage instead of YAML), ``unquoted`` (versions without quotes: same values),
+    ``unsupported_manifest`` (`unsupported` skip). Facts: ``yml`` (the four values the line regexes find, integers
+    where all digits; without a manifest they produce no record, because `mobile.package` needs the package name),
     ``strings_count`` (counts only, no UI text), `mobile.endpoint` with ``locations``, `mobile.sdk` from the `.class`
     lines, ``skips``, ``notes``, ``missing``."""
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     if variant == "empty":
         _write(root / "apktool.yml", "!!brut.androlib.meta.MetaInfo\n")
-        return root, _facts(yml={}, missing=["smali/"], secret_patterns=[], variant="empty")
-    if variant not in ("normal", "no_manifest", "binary_manifest", "no_smali", "doctype", "bad_yml", "unquoted"):
+        return root, _facts(yml={}, missing=["AndroidManifest.xml", "smali/", "res/values/strings.xml"], secret_patterns=[],
+                            variant="empty")
+    if variant not in ("normal", "no_manifest", "binary_manifest", "no_smali", "doctype", "bad_yml", "unquoted",
+                       "unsupported_manifest"):
         raise KeyError(variant)
     files = {"apktool.yml": APKTOOL_YML, "res/values/strings.xml": STRINGS_XML}
     if variant == "unquoted":
@@ -1925,26 +2035,28 @@ def make_apktool_dir(root, variant="normal"):
         files["AndroidManifest.xml"] = _AXML_STUB
     elif variant == "doctype":
         files["AndroidManifest.xml"] = _manifest_xml(doctype=True)
+    elif variant == "unsupported_manifest":
+        files["AndroidManifest.xml"] = "this is not a manifest\n"
     elif variant != "no_manifest":
         files["AndroidManifest.xml"] = _manifest_xml()
     if variant != "no_smali":
         files.update(_smali_files())
     for rel in sorted(files):
         _write(root / rel, files[rel])
-    good = variant not in ("no_manifest", "binary_manifest", "doctype")
+    good = variant not in ("no_manifest", "binary_manifest", "doctype", "unsupported_manifest")
     kinds = {k: dict(v) for k, v in MANIFEST_KINDS.items()} if good else {}
     extra = {}
+    if variant == "unsupported_manifest":
+        extra.update(skips={"AndroidManifest.xml": "unsupported"})
     if variant == "doctype":
         extra.update(skips={"AndroidManifest.xml": "malformed"}, notes=["DOCTYPE or ENTITY refused"])
     if variant == "binary_manifest":
         extra.update(skips={"AndroidManifest.xml": "binary"})
     facts = _android_facts(files, kinds, variant != "no_smali", endpoints=ENDPOINT_LITERALS[:2],
                            yml={} if variant == "bad_yml" else APKTOOL_VALUES, strings_count=3,
-                           missing=["smali/"] if variant == "no_smali" else [],
+                           missing=["smali/"] if variant == "no_smali" else ["AndroidManifest.xml"] if variant == "no_manifest" else [],
                            never_stored=[SECRETS["aws-key"], "Snag-fixture-text", "Welcome-fixture-text",
                                          "Nothing-here-fixture-text"], variant=variant, **extra)
-    if variant in ("no_manifest", "binary_manifest"):
-        facts["ambiguous"]["apktool: expected-parts list names no root manifest, so `missing` stays empty"] = ["AndroidManifest.xml"]
     return root, facts
 
 
@@ -1955,20 +2067,21 @@ _IMPORTS = {"capture": "bad-capture", "rea_bundle": "target-unsupported"}   # on
 _SCANNED = ("bundle", "openapi_yaml", "graphql", "proto")   # regex and line scanners: they read what they have
 _COMMON = ["zero_bytes", "empty", "truncated", "invalid_utf8", "binary", "minified_1mb", "too_large"]
 VARIANTS = {
-    "har": _COMMON + ["invalid_utf8_structure", "deep", "deep_body", "huge_body", "bad_entries"],
+    "har": _COMMON + ["invalid_utf8_structure", "deep", "deep_body", "huge_body", "bad_entries",
+                                                  "bad_json_body", "bad_base64_body"],
     "sourcemap": _COMMON + ["invalid_utf8_structure", "deep", "outside_root", "bad_version"],
     "bundle": _COMMON + ["pathological_1mb"],
-    "sqlite": ["zero_bytes", "empty", "truncated", "binary", "header_only"],
+    "sqlite": ["zero_bytes", "empty", "truncated", "binary", "header_only", "oversized"],
     "plist": ["zero_bytes", "empty", "truncated", "truncated_binary", "invalid_utf8", "invalid_utf8_structure", "binary",
               "deep", "many_keys", "minified_1mb", "too_large"],
     "openapi_json": _COMMON + ["invalid_utf8_structure", "deep"],
     "openapi_yaml": _COMMON + ["crlf"],
     "graphql": list(_COMMON),
     "proto": list(_COMMON),
-    "capture": [v for v in _COMMON if v != "too_large"] + ["deep", "wrong_format", "bad_action", "steps_not_list",
-                                                            "step_missing_n"],
-    "rea_bundle": [v for v in _COMMON if v != "too_large"] + ["deep", "tolerant", "not_rea"],
+    "capture": _COMMON + ["deep", "wrong_format", "bad_action", "steps_not_list", "step_missing_n"],
+    "rea_bundle": _COMMON + ["deep", "tolerant", "not_rea"],
 }
+CAPS = {"capture": TEXT_CAP, "rea_bundle": 64 * 1024 * 1024}      # 6.2: a capture over 5 MiB, a rea bundle over 64 MiB
 
 
 def _good(kind, path):
@@ -2152,8 +2265,16 @@ def make_variant(path, kind, name):
     if name == "too_large":
         _good(kind, path)
         data = Path(path).read_bytes()
-        _write(path, data + b" " * (TEXT_CAP + 1 - len(data)))
-        return path, _bad(name, ["too-large"], size=TEXT_CAP + 1)
+        cap = CAPS.get(kind, TEXT_CAP)
+        _write(path, data + b" " * (cap + 1 - len(data)))
+        if imp:
+            return path, _bad(name, error=imp, size=cap + 1)
+        return path, _bad(name, ["too-large"], size=cap + 1)
+    if name == "oversized":       # SQLite has no read cap (6.2): a database over 5 MiB is read like any other
+        ddl = list(DEFAULT_DDL) + ["CREATE TABLE padding (b BLOB)", "INSERT INTO padding VALUES (zeroblob(5500000))"]
+        p, facts = make_sqlite(path, ddl)
+        facts.update(variant=name, expect={"skip": [None]}, size=p.stat().st_size)
+        return p, facts
     if name in ("truncated", "truncated_binary"):
         if kind == "plist":
             make_plist(path, "binary" if name == "truncated_binary" else "xml")
@@ -2230,9 +2351,28 @@ def make_variant(path, kind, name):
     if name == "deep_body":
         e = har_entry("GET", _ORIGIN + "/api/deep", 200, t=0, resp_mime=_JSON, resp_body=_deep_json(50000))
         p = make_har(path, [e])[0]
-        return p, _text_facts(p, {"web.endpoint": {"GET " + _API + "/deep": _ep([200], [], [_JSON])}}, variant=name,
-                              entry_count=1, nesting=50000, expect={"skip": [None, "depth"]},
-                              ambiguous={"RecursionError inside one HAR body: a `depth` skip of the file or of the body only": ["deep_body"]})
+        key = "GET " + _API + "/deep"
+        lim = ["body nested deeper than the parser allows; not shaped"]
+        return p, _text_facts(p, {"web.endpoint": {key: _ep([200], [], [_JSON])}}, variant=name, entry_count=1, nesting=50000,
+                              limitations=lim, record_limitations={"web.endpoint " + key: lim}, expect={"skip": [None]},
+                              never_stored=[])
+    if name in ("bad_json_body", "bad_base64_body"):
+        good = default_har_entries()[2]
+        if name == "bad_json_body":
+            bad = har_entry("GET", _ORIGIN + "/api/broken", 200, t=1, resp_mime=_JSON, resp_body="{not json")
+            lim = ["body not parseable as JSON; not shaped"]
+        else:
+            bad = har_entry("GET", _ORIGIN + "/api/broken", 200, t=1, resp_mime=_JSON, resp_body="xx")
+            bad["response"]["content"].update(text="@@@@", encoding="base64")
+            lim = ["body not valid base64; not shaped"]
+        p = make_har(path, [good, bad])[0]
+        ik = "GET " + _API + "/items"
+        bk = "GET " + _API + "/broken"
+        kinds = {"web.endpoint": {ik: HAR_ENDPOINTS[ik], bk: _ep([200], [], [_JSON])},
+                 "web.payload-shape": {ik + " response": {"shape": HAR_SHAPES[ik + " response"]}}}
+        return p, _text_facts(p, kinds, variant=name, entry_count=2, limitations=lim,
+                              record_limitations={"web.endpoint " + bk: lim}, never_stored=har_never_stored([good, bad]),
+                              expect={"skip": [None]})
     if name == "huge_body":
         e = har_entry("GET", _ORIGIN + "/api/huge", 200, t=0, resp_mime=_JSON, resp_body='{"blob":"%s"}' % ("a" * 3_000_000))
         p = make_har(path, [e])[0]
@@ -2256,13 +2396,8 @@ def make_variant(path, kind, name):
     if name in ("bad_action", "step_missing_n"):
         doc = _capture_variant(name)
         p = _write(path, _dump(doc))
-        if name == "bad_action":    # the contract does not say what an unknown action is: see `ambiguous`
-            doc = dict(doc, steps=[s for i, s in enumerate(doc["steps"]) if i != 1])
-        facts = _capture_facts(doc, variant=name, expect={"skip": ["malformed", None]})
-        if name == "step_missing_n":
-            facts["malformed_paths"] = ["steps[0]"]
-        else:
-            facts["ambiguous"] = {"unknown step action: a `malformed` skip, or accepted as written": ["steps[1]"]}
+        facts = _capture_facts(doc, variant=name, expect={"skip": ["malformed"]})
+        facts["malformed_paths"] = ["steps[0]"] if name == "step_missing_n" else ["steps[1]"]
         return p, facts
     if name == "tolerant":
         return make_rea_bundle(path, "tolerant")
