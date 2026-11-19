@@ -561,6 +561,18 @@ class RefreshRobustnessTest(CopyTestBase):
         self.assert_complete(bp.TOOL_VERSION)
         self.assert_no_leftovers()
 
+    def test_swap_that_fails_halfway_puts_the_old_package_back(self):
+        self.init_package_copy()
+        self.age_package_copy()
+        with mock.patch("os.replace", side_effect=locked({"bp.new"}, REAL_REPLACE)):
+            code, err = self.in_process()
+        self.assertEqual(code, 1, err)
+        self.assertIn(f"{self.bin / 'bp.new'}:", err)
+        self.assert_complete("1.8.9")  # bp/ is the old package again, not missing
+        self.refresh()
+        self.assert_complete(bp.TOOL_VERSION)
+        self.assert_no_leftovers()
+
     def test_single_file_upgrade_interrupted_after_step_2_still_says_upgraded(self):
         self.init_single_file_copy()
         self.in_process(stop=2)
