@@ -21,6 +21,32 @@ from bp.export import agenticteam_tasks, shq
 from bp.install import copy_tool
 
 
+def register(name, p):
+    """Arguments of init, validate, render, contracts and export (cli.main calls this per subcommand, contract 1.4)."""
+    if name == "init":
+        p.add_argument("--name")
+        p.add_argument("--preset", help="stack preset id, e.g. rust-agent-engine")
+        p.add_argument("--refresh-tool", action="store_true", help="only re-copy the script and map template")
+        p.set_defaults(fn=cmd_init)
+    elif name == "validate":
+        p.add_argument("--team", help="AgenticTeam team.json: check owner ids and write access")
+        p.add_argument("--json", action="store_true", help="print the findings and counts as one JSON object")
+        p.set_defaults(fn=cmd_validate)
+    elif name == "render":
+        p.add_argument("--check", action="store_true", help="fail if the views are out of date")
+        p.add_argument("--force", action="store_true", help="render even if validate has errors")
+        p.set_defaults(fn=cmd_render)
+    elif name == "contracts":
+        p.add_argument("--write", action="store_true")
+        p.add_argument("--module", action="append", metavar="ID", help="only this module (repeatable); default: every module with a path")
+        p.set_defaults(fn=cmd_contracts)
+    elif name == "export":
+        p.add_argument("format", choices=["codeowners", "csv", "json", "agenticteam"])
+        p.add_argument("--team", help="AgenticTeam team.json, to check write access")
+        p.add_argument("--json", action="store_true", help="agenticteam: print task objects instead of commands")
+        p.set_defaults(fn=cmd_export)
+
+
 def cmd_validate(args):
     root = find_root(args.root)
     plan = load_plan(root)
@@ -167,10 +193,11 @@ def cmd_export(args):
         for p in comp["patterns"]:
             wr.writerow(["pattern", p["glob"], "create", p["module"], p["phase"], p["owner"], f"{len(p['instances'])} on disk", False, p["purpose"], p["verify"]])
     elif fmt == "json":
-        print(json.dumps({"app": plan["app"], "phases": plan["phases"], "roster": plan["roster"], "rows": comp["rows"],
-                          "patterns": comp["patterns"], "unplanned": state.get("unplanned", []), "syncedAt": state.get("syncedAt"),
-                          "data": data_view(plan, state), "features": [], "milestones": [], "tasks": [], "unknowns": []},
-                         indent=2, ensure_ascii=False))
+        from bp.views.context import build_context, status_json
+        base = {"app": plan["app"], "phases": plan["phases"], "roster": plan["roster"], "rows": comp["rows"],
+                "patterns": comp["patterns"], "unplanned": state.get("unplanned", []), "syncedAt": state.get("syncedAt"),
+                "data": data_view(plan, state)}
+        print(json.dumps(status_json(build_context(root, plan, state), base), indent=2, ensure_ascii=False))
     elif fmt == "agenticteam":
         team = read_json(Path(args.team)) if args.team else None
         tasks = agenticteam_tasks(plan, comp, team)

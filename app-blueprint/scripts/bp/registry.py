@@ -28,7 +28,7 @@ ARRIVES = {"migrate": "W0-B", "task": "W1-R", "accept": "W3-V", "evidence": "W2-
            "unknowns": "W1-U", "records": "W3-V", "features": "W1-F", "roadmap": "W1-R", "signals": "W3-L"}
 
 
-def _import(name):
+def load(name):
     """bp.<name>, or None when that module does not exist. Any other import error propagates (a bug)."""
     full = "bp." + name
     try:
@@ -42,7 +42,7 @@ def _import(name):
 def modules(kind):
     """The modules of DOMAIN or VIEWS that exist, in list order."""
     names = {"DOMAIN": DOMAIN, "VIEWS": VIEWS}[kind.upper()]
-    return [m for m in (_import(n) for n in names) if m is not None]
+    return [m for m in (load(n) for n in names) if m is not None]
 
 
 def _short(mod):
@@ -88,7 +88,7 @@ def signal(root, signal, code):
     """Record an automatic loop signal through bp.signals when it exists (contract 9.4). Capture never breaks a
     command: a missing module is a no-op and any error inside it is ignored."""
     try:
-        mod = _import("signals")
+        mod = load("signals")
         if mod is not None:
             mod.record(root, signal, code)
     except Exception:  # noqa: BLE001 - capture is best effort, like learn.store_append

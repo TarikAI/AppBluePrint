@@ -9,10 +9,26 @@ import sys
 
 from bp.version import MIN_SCHEMA2_TOOL, TOOL_VERSION
 from bp.core import TOOL_HOME, append_log, bp_dir, die, find_root, read_json, read_jsonl
-from bp.learn import (ISSUES_URL, NO_CAPTURE_ENV, _copy_version, _version_tuple, capture_on, copy_layout,
+from bp.learn import (FEEDBACK_KINDS, ISSUES_URL, NO_CAPTURE_ENV, _copy_version, _version_tuple, capture_on, copy_layout,
                       installed_skill_versions, project_ident, redact, store_append, store_dir)
 from bp.migrate import plan_version
 from bp.registry import command_built
+
+
+def register(name, p):
+    """Arguments of feedback, report and doctor (cli.main calls this per subcommand, contract 1.4)."""
+    if name == "feedback":
+        p.add_argument("--kind", required=True, choices=FEEDBACK_KINDS)
+        p.add_argument("--note", required=True, help="what went wrong or what the user corrected, in one or two sentences")
+        p.add_argument("--part", help="part of the skill, e.g. 'SKILL.md step 4', 'preset:nextjs-prisma', 'command:sync'")
+        p.add_argument("--by", help="who is recording it (default: $BLUEPRINT_OWNER)")
+        p.set_defaults(fn=cmd_feedback)
+    elif name == "report":
+        p.add_argument("incident", nargs="?", help="incident id (default: the latest)")
+        p.set_defaults(fn=cmd_report)
+    elif name == "doctor":
+        p.add_argument("--strict", action="store_true", help="exit 1 if this project's tool copy is out of date")
+        p.set_defaults(fn=cmd_doctor)
 
 
 def cmd_feedback(args):

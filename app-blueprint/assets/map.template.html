@@ -209,6 +209,8 @@ ul.plain { margin: 0; padding-left: 18px; display: grid; gap: 3px; font-size: 13
 </main>
 <script id="bp" type="application/json">__BLUEPRINT_DATA__</script>
 <script>/*__MINDMAP_JS__*/</script>
+<script>var BP_TABS = []; /* plug-in tabs: each tab-*.js asset calls BP_TABS.push({id, label: function (D), render: function (host, D, H)}) */</script>
+<script>/*__TABS_JS__*/</script>
 <script>
 (function () {
   var D = JSON.parse(document.getElementById('bp').textContent);
@@ -240,6 +242,20 @@ ul.plain { margin: 0; padding-left: 18px; display: grid; gap: 3px; font-size: 13
   var DATA = D.data || { stores: [], resources: [], tables: [], issues: [], observed: {}, live: null };
   var TABS = [['overview', 'Overview'], ['mindmap', 'Mind map'], ['tree', 'Tree'], ['roster', 'Roster'], ['phases', 'Phases'], ['modules', 'Modules'],
     ['data', 'Data' + (DATA.issues.length ? ' (' + DATA.issues.length + ')' : '')], ['drift', 'Drift' + (D.unplanned.length ? ' (' + D.unplanned.length + ')' : '')]];
+  // plug-in tabs (tab-*.js assets, contract 8.4): after Data, before Drift; H exposes the helpers of this template
+  var H = { el: el, $: $, glyph: glyph, stack: stack, count: count, states: S, glyphs: G, labels: L, colors: COLOR };
+  var PLUG = [];
+  (window.BP_TABS || []).forEach(function (t) {
+    if (!t || typeof t.id !== 'string' || !/^[a-z][a-z0-9-]*$/.test(t.id) || $('v-' + t.id)) return;
+    var label = t.id;
+    try { label = String(typeof t.label === 'function' ? t.label(D) : (t.label || t.id)); } catch (e) { label = t.id; }
+    var sec = el('section', { cls: 'view', id: 'v-' + t.id });
+    $('v-drift').parentNode.insertBefore(sec, $('v-drift'));
+    PLUG.push([t.id, label]);
+    try { if (typeof t.render === 'function') t.render(sec, D, H); }
+    catch (e) { sec.appendChild(el('p', { cls: 'empty', text: 'This tab could not be drawn (' + e.message + '). Run: blueprint.py init --refresh-tool, then render.' })); }
+  });
+  Array.prototype.splice.apply(TABS, [TABS.length - 1, 0].concat(PLUG));
   TABS.forEach(function (t) {
     var b = el('button', { role: 'tab', type: 'button', id: 't-' + t[0], 'aria-controls': 'v-' + t[0], text: t[1] });
     b.addEventListener('click', function () { show(t[0]); try { history.replaceState(null, '', '#' + t[0]); } catch (e) {} window.scrollTo(0, 0); });

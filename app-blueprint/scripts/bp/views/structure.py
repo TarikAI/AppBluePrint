@@ -1,7 +1,8 @@
-"""views.structure: moved from blueprint.py 1.3.0 (contract 1.5)."""
+"""views.structure: STRUCTURE.md, moved from blueprint.py 1.3.0 (contract 1.5), with the 2.0 tags of 8.3."""
 import io
 import re
 
+from bp import registry
 from bp.core import norm
 from bp.plan import GLYPH, LABEL, STATES
 from bp.data import data_view
@@ -24,7 +25,9 @@ def build_tree(rows, patterns, modules):
     return tree
 
 
-def tree_lines(tree, module_by_path, prefix="", base=""):
+def tree_lines(tree, module_by_path, prefix="", base="", tags=None):
+    """The tree as text lines. tags (2.0, from the file_tags hooks): {path or glob: [tag]}, shown as " [tag]" after
+    the file or pattern line; none given, the lines are 1.3.0's."""
     lines = []
     keys = sorted(tree, key=lambda k: (not k.endswith("/"), k.lower()))
     for i, k in enumerate(keys):
@@ -36,24 +39,44 @@ def tree_lines(tree, module_by_path, prefix="", base=""):
             mod = module_by_path.get(path.rstrip("/"))
             note = f"  # {mod['purpose']} [{mod['id']}]" if mod else ""
             lines.append(prefix + branch + k + note)
-            lines += tree_lines(v, module_by_path, prefix + ("    " if last else "│   "), path)
+            lines += tree_lines(v, module_by_path, prefix + ("    " if last else "│   "), path, tags)
         elif v.get("kind") == "pattern":
             n = len(v.get("instances") or [])
-            lines.append(f"{prefix}{branch}{k}  ⟨pattern {v['id']}: {v['purpose']}; {n} on disk⟩ ({v['owner']}, {v['phase']})")
+            lines.append(f"{prefix}{branch}{k}  ⟨pattern {v['id']}: {v['purpose']}; {n} on disk⟩ ({v['owner']}, {v['phase']})"
+                         + _tag_text(tags, v.get("glob")))
         else:
             act = "" if v["action"] == "create" else f" [{v['action']}]"
             star = " ★" if v["contract"] else ""
-            lines.append(f"{prefix}{branch}{k}{act}{star}  {GLYPH[v['status']]} {v['purpose']} ({v['owner']}, {v['phase']})")
+            lines.append(f"{prefix}{branch}{k}{act}{star}  {GLYPH[v['status']]} {v['purpose']} ({v['owner']}, {v['phase']})"
+                         + _tag_text(tags, v.get("path")))
     return lines
+
+
+def _tag_text(tags, key):
+    found = (tags or {}).get(key) or []
+    return "".join(f" [{t}]" for t in found)
+
+
+def file_tags(ctx):
+    """{path or glob: [tag]}: every file_tags hook's result, concatenated in DOMAIN order (contract 1.4, 8.3)."""
+    out = {}
+    for _, part in registry.collect("file_tags", ctx):
+        for key, tags in (part or {}).items():
+            out.setdefault(key, []).extend(str(t) for t in tags)
+    return out
 
 
 def md_cell(s):
     return str(s if s is not None else "").replace("|", "\\|").replace("\n", " ")
 
 
-def render_structure(plan, state, comp):
+def render_structure(plan, state, comp, ctx=None):
+    """STRUCTURE.md. With ctx (render_all), the file_tags hooks tag tree lines and, when the plan has features, a
+    re-verify line follows the counts (contract 8.3); a plan without features renders exactly as in 1.3.0."""
     app = plan["app"]
     rows, pats = comp["rows"], comp["patterns"]
+    tags = file_tags(ctx) if ctx is not None else None
+    n_stale = sum(1 for r in rows if r.get("stale")) if ctx is not None and plan.get("features") else 0
     module_by_path = {norm(m.get("path", "")).rstrip("/"): m for m in plan["modules"] if m.get("path")}
     out = io.StringIO()
     w = out.write
@@ -65,6 +88,8 @@ def render_structure(plan, state, comp):
     total = len(rows)
     w(f"**{total} planned files, {len(pats)} patterns.** Status: " + ", ".join(f"{GLYPH[s]} {LABEL[s]} {c[s]}" for s in STATES if c[s]) +
       f". Last sync: {state.get('syncedAt') or 'never'}" + (f" at `{state.get('head')}`" if state.get("head") else "") + ".\n\n")
+    if n_stale:
+        w(f"↻ {n_stale} file(s) need re-verifying (inputs changed): verify --stale --run\n\n")
     if plan["stack"]:
         w("## Stack\n\n| Part | Choice | Version | Docs | Checked |\n|---|---|---|---|---|\n")
         for s in plan["stack"]:
@@ -77,7 +102,7 @@ def render_structure(plan, state, comp):
             w(f"- **{k}:** {v}\n")
         w("\n")
     w("## Tree\n\n`★` shared contract · " + " · ".join(f"`{GLYPH[s]}` {LABEL[s]}" for s in STATES) + "\n\n```text\n")
-    w(".\n" + "\n".join(tree_lines(build_tree(rows, pats, plan["modules"]), module_by_path)) + "\n```\n\n")
+    w(".\n" + "\n".join(tree_lines(build_tree(rows, pats, plan["modules"]), module_by_path, tags=tags)) + "\n```\n\n")
     if plan["modules"]:
         w("## Modules\n\n```mermaid\nflowchart LR\n")
         for m in plan["modules"]:
