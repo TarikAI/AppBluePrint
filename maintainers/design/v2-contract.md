@@ -808,7 +808,9 @@ No timestamps at top level; studies, records and behaviours sorted by id, so the
 
 ### 5.8 Import mapping for foreign tools (`study import`, section 6.10)
 
-**rea bundle.** Detected by a JSON object with `records` (array) and `evidence_format` (integer). Each record (rea `src/domain/evidence.ts`) maps:
+Detection, decoding and skips follow the reading rules of 6.2: a path that fails the importer's detection is the `target-unsupported` error (no study is written); a part inside a detected target that cannot be read is a skip.
+
+**rea bundle.** Detected by a file that parses as a JSON object with `records` (array) and `evidence_format` (integer); a file that does not parse (empty, cut, binary, nested too deep) or lacks those keys cannot be detected, so it is `target-unsupported`. Each record (rea `src/domain/evidence.ts`) maps:
 
 | Ours | From rea |
 |---|---|
@@ -820,18 +822,20 @@ No timestamps at top level; studies, records and behaviours sorted by id, so the
 | `source.digest` | `"sha256:" + subject.identity.sha256` when present |
 | `source.path`, `offset` | first location of kind `artifact-path` / `file-offset`; an `address` goes into `data.address` |
 | `data` | `{"rea": {"id": evidence_id, "operation", "authority", "provider": provider.name + " " + provider.version}, "result": normalized_result}` trimmed to 4 KB |
-| `limitations` | rea `limitations` + `"imported from rea; not re-checked by app-blueprint"` |
+| `limitations` | rea `limitations`, then `"imported from rea; not re-checked by app-blueprint"`, then one entry per dropped link (next row), in that order |
 | `coverage` | `unknown` |
-| `links` | rea `evidence_links` mapped to our new ids (two passes); unmapped dropped with a limitation |
+| `links` | rea `evidence_links` mapped to our new ids (two passes). An entry may be a string (the rea id) or an object with a string `evidence_id`. A rea id not in this bundle is dropped with the limitation `link <rea id> not in this bundle; dropped`; any other entry is dropped with `link not understood; dropped` |
 | `by` | `import:rea` |
 
-rea `unknowns[]` in the bundle become evidence of kind `rea.unknown` (key = rea `unknown_id`, claim = `question`, data = `{severity, status}`), which `study adopt` may turn into our unknowns. Not verified: the exact record layout inside exported bundles beyond the fields above. Tolerance: any record lacking `operation` or `subject` is skipped (`malformed`); unknown fields are ignored; `evidence_format` other than 1 or 2 is accepted with a study note `unrecognised evidence_format N`.
+rea `unknowns[]` in the bundle become evidence of kind `rea.unknown` (key = rea `unknown_id`, claim = `question`, data = `{"severity", "status"}`), which `study adopt` may turn into our unknowns. Not verified: the exact record layout inside exported bundles beyond the fields above. Tolerance: a record that is not an object or lacks `operation` or `subject` is a `malformed` skip (counted in coverage, path `records[<index>]`); unknown fields are ignored; `evidence_format` other than 1 or 2 is accepted with a study note `unrecognised evidence_format N`.
 
-**JADX output folder.** Detected by `resources/AndroidManifest.xml` or `sources/` (also the `--export-gradle` layout `*/src/main/AndroidManifest.xml`). The text manifest is parsed with `xml.etree.ElementTree` (with entity expansion off: reject any document containing `<!DOCTYPE` or `<!ENTITY`) and run through `engine.manifest_facts` (the same rows as the mobile lane) (kinds `mobile.*`, `by: import:jadx`, basis `observed`, limitation `decompiled by JADX`). `sources/**/*.java` and `*.kt` are scanned line by line for endpoint and URL literals (kind `mobile.endpoint`) and class names (package histogram, kind `mobile.sdk`); code is never stored, only path, line and a 160-char excerpt.
+**Text manifests (JADX and apktool).** A file named `AndroidManifest.xml` whose decoded text starts (after a BOM and whitespace) with `<?xml` or `<manifest` is parsed with `xml.etree.ElementTree`. A document containing `<!DOCTYPE` or `<!ENTITY` is refused before parsing: a `malformed` skip of that path with the note `DOCTYPE or ENTITY refused`; a refused manifest is not listed in `coverage.missing`, which lists only expected parts that are absent. A manifest that does not parse is a `malformed` skip. A parsed manifest goes through `engine.manifest_facts` (the `mobile.*` rows of 6.7; `by: import:jadx` or `import:apktool`, basis `observed`, limitation `decompiled by JADX` or `decoded by apktool`).
 
-**apktool output folder.** Detected by `apktool.yml`. Reads `AndroidManifest.xml` (text, as above), `apktool.yml` (line regexes only: `minSdkVersion`, `targetSdkVersion`, `versionCode`, `versionName`; no YAML parser), `res/values/strings.xml` (counts only, no UI text stored), and `smali*/**/*.smali`: `.class L...;` lines for the package histogram and `const-string v<n>, "..."` for endpoint literals.
+**JADX output folder.** Detected by `resources/AndroidManifest.xml` or a `sources/` folder (also the `--export-gradle` layout `*/src/main/AndroidManifest.xml`). `sources/**/*.java` and `*.kt` are text-scanned (6.2): string literals matching `https?://[^"\s]{1,2048}` or `/(api|v[0-9])/[^"\s]{0,2048}` give `mobile.endpoint`; `package a.b.c;` declarations, rewritten to the slash form `a/b/c`, give the package histogram for `mobile.sdk` (6.7). Code is never stored, only path, line and a 160-char excerpt.
 
-Not verified here: JADX and apktool folder layouts and `apktool.yml` keys come from knowledge. Tolerance: the importer looks for any `AndroidManifest.xml` whose text starts with `<?xml` or `<manifest`, scans whatever source folders exist, and records in study coverage which expected parts it did not find.
+**apktool output folder.** Detected by `apktool.yml`. Reads `AndroidManifest.xml` (text, as above), `apktool.yml` (line regexes only: `minSdkVersion`, `targetSdkVersion`, `versionCode`, `versionName`, filling the `mobile.package` data of 6.7; no YAML parser), `res/values/strings.xml` (counts only, no UI text stored), and `smali*/**/*.smali`: `.class ... L<a/b/C>;` lines give the package `a/b` for the histogram, and `const-string v<n>, "<literal>"` gives `mobile.endpoint` with the literal rule above.
+
+Not verified here: JADX and apktool folder layouts and `apktool.yml` keys come from knowledge. Tolerance: the importer looks for any qualifying `AndroidManifest.xml`, scans whatever source folders exist, and lists in `coverage.missing` the expected parts it did not find (`resources/AndroidManifest.xml`, `sources/`, `apktool.yml`, `smali/`).
 
 ### 5.9 `evidence` module functions
 
@@ -874,19 +878,43 @@ Skip reasons (closed list): `too-large`, `binary`, `unsupported`, `unsafe-path`,
 | compression ratio | member skipped (`ratio`) when uncompressed > 1 MiB and > 100 × compressed | |
 | nested archive depth | 2 (XAPK/APKS → APK) | |
 | asar header JSON | 32 MiB | |
-| evidence records | 20,000 per study, 2,000 per kind (`evidence-limit`, `truncated: true`) | |
+| evidence records | 20,000 per study, 2,000 per kind (`evidence-limit`, `truncated: true`; which records are kept: 6.3) | |
 | wall time | 300 s per study, max 3,600; checked between units (files, members), each unit bounded by the size caps | `--time-limit S` |
 | excerpt | 160 chars | |
 
 Public: `LIMITS` (dict), `class Skip(Exception)` (`reason`), `class Stop(Exception)` (`stoppedBy`), `class Budget(limits, clock=time.monotonic)` (`file()`, `bytes(n)`, `check_time()`, `evidence(kind)`; raise `Stop`; the clock is injectable for tests), `scan_windows(text) -> iterator[(offset, chunk)]` (64 KiB windows with 1 KiB overlap; every regex scan of target text, secrets and lane patterns alike, runs per window, and every pattern starts with a literal or an alternation of literals (`[sr]k_live_`, `(?i)bearer`, `\b(def|function|...)` qualify), never a leading `.*` or unbounded class, so no scan is quadratic; matches found twice in the 1 KiB overlap are deduplicated by their global offset; a 5 MiB single-line pathological input must finish within 10 s in CI), `class SafeZip(path_or_bytes, budget, depth=0)` (`members() -> list[(name, size)]`, `read(name, cap) -> bytes`), `walk(root, budget) -> iterator[relpath]`, `scrub(text) -> (text, found: list[str])`, `excerpt(text, col=0) -> str`, `SECRET_PATTERNS`.
 
-`SafeZip`: `zipfile.ZipFile` only for the central directory; never `extract`/`extractall`. For each member: name normalized (`\` to `/`); absolute names, drive letters, `..` parts and NUL → `unsafe-path` (Python's `zipfile` truncates names at NUL, so the NUL rule cannot be produced with the standard library and is not tested); `flag_bits & 0x1` → `encrypted`; Unix mode `(external_attr >> 16) & 0o170000 == 0o120000` → `symlink`; ratio rule → `ratio`. `read` streams with `ZipFile.open` and counts real bytes, stopping at `cap + 1` (header sizes are not trusted) → `too-large`. `zipfile.BadZipFile`, `NotImplementedError` (unsupported compression), `zlib.error`, `EOFError` → `Skip("malformed")` for the member or the archive.
+`SafeZip`: `zipfile.ZipFile` only for the central directory; never `extract`/`extractall`. For each member: name normalized (`\` to `/`); absolute names, drive letters, `..` parts and NUL → `unsafe-path` (Python's `zipfile` cuts `filename` and `namelist()` at a NUL and keeps the full name only in `ZipInfo.orig_filename`, so `SafeZip` checks `orig_filename` for every member; the fixture `make_nul_name_zip` tests this rule); `flag_bits & 0x1` → `encrypted`; Unix mode `(external_attr >> 16) & 0o170000 == 0o120000` → `symlink`; ratio rule → `ratio`. `read` streams with `ZipFile.open` and counts real bytes, stopping at `cap + 1` (header sizes are not trusted) → `too-large`. `zipfile.BadZipFile`, `NotImplementedError` (unsupported compression), `zlib.error`, `EOFError` → `Skip("malformed")` for the member or the archive.
 
 `walk`: `os.walk(followlinks=False)`; symlinked files and folders skipped (`symlink`); any folder whose `normcase(realpath)` differs from its `normcase(abspath)` is skipped (`symlink`; this catches Windows junctions and loops); every path's real path must be inside the target's real path, else `unsafe-path`; sorted output.
 
-`scrub(text)`: replace every match of `SECRET_PATTERNS` with `<secret:NAME>` and return the names found. Patterns (minimum; extend freely): `aws-key` `AKIA[0-9A-Z]{16}`, `google-api-key` `AIza[0-9A-Za-z_\-]{35}`, `private-key` `-----BEGIN [A-Z ]*PRIVATE KEY-----`, `jwt` `eyJ[\w-]{10,}\.eyJ[\w-]{10,}\.[\w-]{10,}`, `stripe-live` `[sr]k_live_[0-9A-Za-z]{16,}`, `slack` `xox[abprs]-[0-9A-Za-z-]{10,}`, `github-token` `gh[pousr]_[0-9A-Za-z]{30,}`, `bearer` `(?i)bearer\s+[\w.\-]{16,}`. Every string a lane stores (key, claim, excerpt, data strings) passes through `scrub`, which applies `SECRET_PATTERNS` only: `learn.redact` would collapse URL keys to their host and rewrite `/var/...` routes, so it is applied only to `note` fields and the `authorization` statement. For each file with findings the lane emits one record `secret.embedded` (key `<pattern>@<path>`, claim `A credential-like string (<pattern>) is embedded in <path>.`, no value, no hash of the value) and bumps `counts.secrets`.
+`scrub(text)`: replace every match of `SECRET_PATTERNS` with `<secret:NAME>` and return the names found. Patterns (minimum; extend freely): `aws-key` `AKIA[0-9A-Z]{16}`, `google-api-key` `AIza[0-9A-Za-z_\-]{35}`, `private-key` `-----BEGIN [A-Z ]*PRIVATE KEY-----`, `jwt` `eyJ[\w-]{10,}\.eyJ[\w-]{10,}\.[\w-]{10,}`, `stripe-live` `[sr]k_live_[0-9A-Za-z]{16,}`, `slack` `xox[abprs]-[0-9A-Za-z-]{10,}`, `github-token` `gh[pousr]_[0-9A-Za-z]{30,}`, `bearer` `(?i)bearer\s+[\w.\-]{16,}`. Every string a lane stores (key, claim, excerpt, data strings) passes through `scrub`, which applies `SECRET_PATTERNS` only: `learn.redact` would collapse URL keys to their host and rewrite `/var/...` routes, so it is applied only to `note` fields and the `authorization` statement. For each file and each pattern with findings the lane emits one record `secret.embedded`: key `<pattern>@<path>` (`<path>` is `source.path`, `.` for a non-archive single-file target, 6.3), data `{"count": matches}`, claim `A credential-like string (<pattern>) is embedded in <path>.`, no value and no hash of the value; it bumps `counts.secrets`.
 
-Malformed input: every parser catches `struct.error`, `IndexError`, `ValueError`, `KeyError`, `UnicodeError`, `json.JSONDecodeError`, `plistlib.InvalidFileException`, `sqlite3.DatabaseError`, `xml.etree.ElementTree.ParseError`, `RecursionError` and turns them into `Skip("malformed")`. All offsets and counts read from a file are bounds-checked before use. No lane crashes on any input; a crash is an incident and a bug.
+Malformed input: every parser catches `struct.error`, `IndexError`, `ValueError`, `KeyError`, `UnicodeError`, `json.JSONDecodeError`, `plistlib.InvalidFileException`, `xml.parsers.expat.ExpatError` (raised by `plistlib` for XML plists), `xml.etree.ElementTree.ParseError`, `sqlite3.DatabaseError` and `RecursionError`. All offsets and counts read from a file are bounds-checked before use. No lane crashes on any input; a crash is an incident and a bug.
+
+**Reading rules (every lane and importer).**
+1. **Text.** A file a lane reads as text is binary when its first 8,192 bytes contain a NUL: skip `binary`. Otherwise a UTF-8 BOM is dropped and the bytes are decoded as UTF-8 with `errors="replace"`; when anything was replaced, every record from that file gets `coverage: partial` and the limitation `not valid UTF-8; undecodable bytes replaced`. Structured text formats (JSON, XML) are parsed after this decoding (XML re-encoded to UTF-8 for parsers that take bytes).
+2. **Partial input.** A scanning lane (regexes or line scanners: source files, bundles, HTML, YAML, GraphQL, proto, `.java`/`.kt`/`.smali`) never skips a file because it is cut short: it reports what it finds in the text it has. When it can see that the text ends inside a block (GraphQL or proto braces still open at the end) it adds the limitation `input ends inside an unclosed block`; otherwise it cannot tell, and its facts are a subset of the complete file's. Only formats that must parse as a whole (JSON, XML plist, SQLite, zip, asar, AXML, proto manifest, dex) give `malformed` when they cannot be read.
+3. **Recursion.** A parser's `RecursionError` (`json.loads`, `plistlib`) makes the file a `depth` skip. A lane's own walks stop at their stated depth (`json_shape` 4, plist key paths 6, asar folders 64, any other walk 64) and, when something was cut, add the limitation `nested deeper than N levels; deeper levels not read`.
+4. **Malformed, unsupported, target-unsupported.** A file is *selected* by extension or by a content detector (each lane's table). A selected file that cannot be parsed is a `malformed` skip. A file that a content detector examines and does not recognise (including a zero-byte file) is an `unsupported` skip. When the target itself is a single file that no detector of the lane or importer recognises, or a folder without the layout `study import` names, the command fails with `target-unsupported` (exit 1, no study written); for `study capture` the error is `bad-capture`. Files a lane never selects are counted in `filesSeen` only.
+5. **Secrets.** `scrub` and `secret.embedded` cover the decoded text of every text file a lane reads (including JSON, HAR, XML plists, YAML, manifests, `sourcesContent` in memory and text members of archives). Binary plists, SQLite files and binary archive members (dex, AXML, proto manifests, native libraries) are not scanned.
+
+Worked examples (`—` means not applicable):
+
+| Lane or importer, input | zero bytes | cut short | binary (NUL in first 8 KiB) | nested too deep |
+|---|---|---|---|---|
+| source, web bundle/HTML, GraphQL, proto (text scanned) | read, no facts, no skip | facts found in the prefix; GraphQL/proto may add the unclosed-block limitation | `binary` | — (own walks bounded) |
+| web `.har`, `.map`; data `.json` | `malformed` | `malformed` | `binary` | `depth` |
+| data OpenAPI YAML | `unsupported` (no `openapi:` line) | facts found in the prefix | `binary` | — |
+| data SQLite (content-detected) | `unsupported` (no header) | `malformed` | `unsupported` (no header) | — |
+| data plist (content-detected) | `unsupported` (no header) | `malformed` (`ExpatError` or `InvalidFileException`) | binary plists are not text: by header; garbage → `unsupported` | `depth` from the parser, else the walk limit of rule 3 |
+| desktop asar (selected by `.asar`) | `malformed` | `malformed` (header bounds) or a `malformed` skip per member past the end | `malformed` | the walk limit (64) |
+| mobile archive as the target | `target-unsupported` | `malformed` | `target-unsupported` (no zip magic) | nested archive depth > 2 → `depth` |
+| mobile archive inside a folder target | `unsupported` | `malformed` | `unsupported` | as above |
+| rea bundle (`study import --from rea`) | `target-unsupported` | `target-unsupported` | `target-unsupported` | `target-unsupported` |
+| JADX / apktool `AndroidManifest.xml` | `malformed` | `malformed` | `binary` | the walk limit (64) |
+| JADX / apktool sources (`.java`, `.kt`, `.smali`) | read, no facts | facts found in the prefix | `binary` | — |
+| capture file | `bad-capture` | `bad-capture` | `bad-capture` | `bad-capture` |
 
 ### 6.3 Lane interface (`study/engine.py`)
 
@@ -907,56 +935,70 @@ def run_study(root, kind, target_path, study_id=None, authorization=None, own=Fa
               time_limit=300, lanes=None) -> dict      # returns the study record; writes study.json, evidence.jsonl
 ```
 
-Shared helpers (lanes and importers use these, not each other). `study/keys.py` (imported by `jsscan`, `asar`, `engine` and every lane): `path_template(path) -> str`; `route_key(method, path) -> str`; `json_shape(value, depth=4, max_keys=50) -> object` (key names and JSON types, arrays reduced to their first element); `FRAMEWORKS`; `LANGUAGES`. `engine`: `manifest_facts(elements, em, *, path, digest, by, basis="observed", limitations=())` (the Android rows of 6.7 from `axml.parse`-shaped elements, also used for text manifests by the importers). Canonical keys (`keys.py`):
+Shared helpers (lanes and importers use these, not each other). `study/keys.py` (imported by `jsscan`, `asar`, `engine` and every lane): `path_template(path) -> str`; `route_key(method, path) -> str`; `json_shape(value, depth=4, max_keys=50) -> object` (key names and the types `string number boolean null`; an object becomes an object of shapes with at most 50 keys in sorted order; an array becomes `[<shape of its first element>]`, an empty array `[]`; below `depth` a value is `"..."`); `FRAMEWORKS`; `LANGUAGES`. `engine`: `manifest_facts(elements, em, *, path, digest, by, basis="observed", limitations=())` (the Android rows of 6.7 from `axml.parse`-shaped elements, also used for text manifests by the importers). Canonical keys (`keys.py`):
 
 | Thing | Rule |
 |---|---|
-| route and endpoint keys | `METHOD /path`, method upper case or `ANY`; parameters become `{name}`: `:snagId`, `<int:id>`, `<id>`, `[id]`, `{id}` → `{snagId}`/`{id}`; catch-alls `[...slug]`, `[[...slug]]`, `*` → `{slug*}` (`{rest*}` when unnamed); Next.js route groups `(group)`, parallel slots `@slot` and `_private` folders are dropped; trailing `/` removed except for `/`; HAR segments that are all digits, UUIDs, 16+ hex or 20+ base64url chars → `{id}` |
-| framework ids | `react next vue nuxt svelte sveltekit angular express fastify nestjs electron react-native expo django flask fastapi axum actix-web tauri gin echo chi rails flutter android` (the short id, never the package name) |
-| language names | by extension: TypeScript (`.ts .tsx`), JavaScript (`.js .jsx .mjs .cjs`), Python, Rust, Go, Ruby, PHP, Java, Kotlin, C#, Swift, Dart, Elixir, Scala, SQL, Prisma, Vue, Svelte |
+| route and endpoint keys | `METHOD /path`, method upper case, or `ANY` when the source gives no method. Every parameter becomes `{name}` in every lane: `:itemId`, `<int:id>`, `<id>`, `[id]`, `{id}` → `{itemId}`/`{id}`; catch-alls `[...slug]`, `[[...slug]]` → `{slug*}`, a bare `*` → `{rest*}`. Examples: bundle `path: "/items/:itemId"` → `/items/{itemId}`; Next.js page `/blog/[slug]` (from `_buildManifest.js`, `__NEXT_DATA__` or `app/blog/[slug]/page.tsx`) → `/blog/{slug}`; Flask `/files/<path>` → `/files/{path}`; Express `/static/*` → `/static/{rest*}`. Next.js route groups `(group)` and parallel slots `@slot` are dropped as segments; a folder whose name starts with `_` opts its whole subtree out of routing (no route from any file below it). Trailing `/` removed except for `/`; a missing leading `/` is added. HAR segments that are all digits, UUIDs, 16+ hex or 20+ base64url chars → `{id}` |
+| framework ids | `react next vue nuxt svelte sveltekit angular express fastify nestjs electron react-native expo hermes flutter unity xamarin capacitor cordova django flask fastapi axum actix-web tauri gin echo chi rails android` (the short id, never the package name) |
+| language names | by extension: TypeScript (`.ts .tsx`), JavaScript (`.js .jsx .mjs .cjs`), Python (`.py`), Rust (`.rs`), Go (`.go`), Ruby (`.rb`), PHP (`.php`), Java (`.java`), Kotlin (`.kt`), C# (`.cs`), Swift (`.swift`), Dart (`.dart`), Elixir (`.ex .exs`), Scala (`.scala`), SQL (`.sql`), Prisma (`.prisma`), Vue (`.vue`), Svelte (`.svelte`) |
+| paths inside keys | a key that embeds a path (`secret.embedded`, `trace.file`, `desktop.process`, `source.entry`, `source.test`) uses `source.path`; for a non-archive single-file target (a HAR, a `.js`, a `.json`) that path is `.`, so two versions of the same artifact under different file names give equal keys |
+| per-kind cap | when a kind passes 2,000 records in a study (6.2), the 2,000 with the lowest ids are kept, so the kept set does not depend on scan order |
+
+A kind's key and data are defined in exactly one place: the lane table that emits it (6.4 to 6.10), `secret.embedded` in 6.2, the `rea.*` kinds in 5.8. A kind whose Data cell is `{}` has empty data.
 
 Each lane module defines `LANE` (name), `KINDS` (kind → one-line meaning, used by docs and tests), `detect(path: Path) -> bool`, `run(target: Target, em: Emitter, opts: dict) -> None`. `run_study` builds the Target, runs the lanes, catches `Stop` (sets `stoppedBy`, `truncated`), writes records sorted by id. Lanes iterate inputs in sorted order and must produce identical output for identical bytes.
 
 ### 6.4 Lane `source`: repositories
 
-Input: a folder (the project root `.` or another checkout). For the project root it lists files with `core.git_ls_files` and the plan's ignore rules (as `repo_files`), else `safety.walk`. Text files ≤ 5 MiB with extensions in `data.SCAN_EXT` plus `.json .toml .yaml .yml .gradle .kts .xml .html .md` are read; others are counted.
+Input: a folder (the project root `.` or another checkout). For the project root it lists files with `core.git_ls_files` and the plan's ignore rules (as `repo_files`), else `safety.walk`. Text files ≤ 5 MiB with extensions in `data.SCAN_EXT` plus `.json .toml .yaml .yml .gradle .kts .xml .html .md` are read (6.2); others are counted in `filesSeen` only.
 
-| Kind | Key | Extracted from |
-|---|---|---|
-| `source.language` | language name (6.3) | extension counts (data: files, bytes) |
-| `source.framework` | framework id (6.3) | manifests: `package.json` dependencies (react, next, vue, nuxt, svelte, @angular/core, express, fastify, @nestjs/core, electron, react-native, expo), `pyproject.toml`/`requirements*.txt` (django, flask, fastapi), `Cargo.toml` (axum, actix-web, tauri), `go.mod` (gin, echo, chi), `Gemfile` (rails), `pubspec.yaml` (flutter), `build.gradle*` (com.android.application) |
-| `source.entry` | path | `package.json` `main`/`bin`/`scripts.start`; `if __name__ == "__main__"`; `fn main(`; `func main(`; Next.js `app/layout.*`; Android launcher activity in a source manifest |
-| `source.route` | `METHOD /path` (method `ANY` when unknown) | Express/Fastify `app.get('/x'`, `router.post("/x"`; Flask `@app.route("/x", methods=[...])`; FastAPI `@app.get("/x")`, `@router.post`; Django `path("x/"`; Axum `.route("/x", get(`; Rails `get "/x"`; Next.js file routes `app/**/page.*` (GET page) and `app/**/route.*` (exported `GET`/`POST` functions), `pages/**` and `pages/api/**` |
-| `source.env` | variable | `data._ENV_USE` patterns |
-| `source.table` | table | `data.code_refs` and schema files (`parse_sql_tables`, `parse_prisma_tables`) |
-| `source.test` | test path | test files: `(^|/)(tests?|__tests__|spec)/`, `\.(test|spec)\.[cm]?[jt]sx?$`, `^test_.*\.py$`, `_test\.(go|py)$`; data: files it imports |
-| `secret.embedded` | as 6.2 | |
+| Kind | Key | Data | From |
+|---|---|---|---|
+| `source.language` | language name (6.3) | `{"files": n, "bytes": n}` (count and summed raw size of the files with that language's extensions, read or not) | extensions |
+| `source.framework` | framework id (6.3) | `{"from": [manifest paths]}` | `package.json` `dependencies`/`devDependencies` names: `react`, `next`, `vue`, `nuxt`, `svelte`, `@sveltejs/kit` (sveltekit), `@angular/core` (angular), `express`, `fastify`, `@nestjs/core` (nestjs), `electron`, `react-native`, `expo`; `pyproject.toml` and `requirements*.txt` lines naming `django`, `flask`, `fastapi`; `Cargo.toml` `axum`, `actix-web`, `tauri`; `go.mod` `github.com/gin-gonic/gin` (gin), `github.com/labstack/echo` (echo), `github.com/go-chi/chi` (chi); `Gemfile` `rails`; `pubspec.yaml` `flutter`; `build.gradle*` `com.android.application` (android) |
+| `source.entry` | path, or `<manifest path>#<activity>` for Android | `{"via": "main"|"bin"|"scripts.start"|"python-main"|"rust-main"|"go-main"|"next-layout"|"android-launcher"}` | `package.json` `main`, each `bin` path, and the first token of `scripts.start` that names a file of the target (`node server.js` → `server.js`); a file containing `if __name__ == "__main__"`, `fn main(` or `func main(`; Next.js `app/layout.*`; an activity with action `MAIN` and category `LAUNCHER` in a text `AndroidManifest.xml` |
+| `source.route` | `route_key` (6.3) | `{}` | Express/Fastify `app.get('/x'`, `router.post("/x"` (method from the call; `app.all`/`app.use` → `ANY`); Flask `@app.route("/x", methods=[...])` (one record per method; no `methods` → `GET`); FastAPI `@app.get("/x")`, `@router.post`; Django `path("x/"`, `re_path` excluded (leading `/` added, method `ANY`); Axum `.route("/x", get(`; Rails `get "/x"`; Next.js `app/**/page.*` → `GET`, `app/**/route.*` → one record per exported `GET POST PUT PATCH DELETE HEAD OPTIONS` (`export function`, `export async function`, `export const`), `pages/api/**` → `ANY`, other `pages/**` → `GET` (`pages/_app`, `_document`, `_error` excluded); file routes use the path below `app/` or `pages/` without the extension, `index` removed |
+| `source.env` | variable | `{}` | `data._ENV_USE` patterns |
+| `source.table` | table | `{"access": "read"|"write"|null}` | `data.code_refs` and schema files (`parse_sql_tables`, `parse_prisma_tables`; access `null` for a schema file) |
+| `source.test` | test path | `{"imports": [resolved paths]}` | a file whose path matches `(^|/)(tests?|__tests__|spec)/`, or whose **basename** matches `\.(test|spec)\.[cm]?[jt]sx?$`, `^test_.*\.py$` or `_test\.(go|py)$` |
+| `secret.embedded` | 6.2 | 6.2 | 6.2 |
 
-Import graph (`graph.json`, not evidence): `{"files": [...], "imports": {path: [resolved paths]}, "unresolved": {path: [specifiers]}, "routes": {path: [route keys]}, "tests": [paths]}`. Resolved: JS/TS relative `import ... from "./x"`, `import("./x")`, `require("./x")` with extensions `.ts .tsx .js .jsx .mjs .cjs` and `/index.*`, plus `tsconfig.json` `compilerOptions.paths` single-star aliases; Python `from .x import`, `import pkg.mod` when `pkg/mod.py` exists in the target; Rust `mod x;` (`x.rs`, `x/mod.rs`); Go imports with the module path from `go.mod`. Everything else goes to `unresolved` (a limitation, never a guess).
+Import graph (`graph.json`, not evidence): `{"files": [...], "imports": {path: [resolved paths]}, "unresolved": {path: [specifiers]}, "routes": {path: [route keys]}, "tests": [paths]}`, lists sorted and deduplicated. Specifiers collected, as written:
+- JS/TS: `import ... from "x"`, `import type ... from "x"`, side-effect `import "x"`, `export ... from "x"`, `import("x")` and `require("x")` with a string literal.
+- Python: `import a.b` (each name), `from a.b import c` (`a.b`), relative `from .x import y` (`.x`; `from . import y` is `.`).
+- Rust: `mod x;` (recorded as `mod x`). Go: every import path.
+
+Resolution: JS/TS relative specifiers (`./`, `../`) against the importing file, trying the path as written, then the extensions `.ts .tsx .js .jsx .mjs .cjs`, then `/index` with those extensions (`require("./dir")` → `dir/index.js`); `tsconfig.json` `compilerOptions.paths` single-star aliases; Python relative imports against the package folder and absolute `a.b` when `a/b.py` or `a/b/__init__.py` exists in the target; Rust `mod x;` → `x.rs` or `x/mod.rs` beside the file; Go: an import under the module path of the nearest ancestor `go.mod` resolves to every `.go` file directly in that folder that is not `_test.go`, sorted. **Every specifier that does not resolve to a file of the target goes to `unresolved`, including bare package names and standard-library modules** (`import express from "express"` → `express`; `import os` → `os`; `"fmt"` in Go → `fmt`; `import fs from "node:fs"` → `node:fs`). No language's standard library is filtered out, so the result needs no per-version module list and is the same on every Python version.
 
 **`study trace <seed> --study S [--depth N]`** (`study/trace.py`), deterministic:
 1. Seed files: route key match in `graph.routes` (method optional, path template equality); else an exact planned path; else a symbol definition `\b(def|function|fn|class|func|const|let|var|interface|type|struct)\s+<seed>\b`; else a literal search. At most 20 seed files (more: limitation).
 2. Forward breadth-first search over `imports` to depth N (default 3, max 6); reverse search (who imports) to depth 2 over non-test files; tests = test files that import any file in the set (reverse depth ≤ 2).
 3. Data touched: `source.env` and `source.table` records of the files in the set.
-4. Writes `traces/<slug(seed)>.json` (`{"seed", "files": [{"path", "role": "seed"|"uses"|"used-by"|"test", "depth"}], "env": [...], "tables": [...], "limitations": [...]}`) and one record per file, kind `trace.file`, key `<seed> -> <path>`, basis `derived`, links to the route or definition record when there is one.
+4. Writes `traces/<slug(seed)>.json` (`{"seed", "files": [{"path", "role": "seed"|"uses"|"used-by"|"test", "depth"}], "env": [...], "tables": [...], "limitations": [...]}`) and one record per file: kind `trace.file`, key `<seed> -> <path>`, data `{"role", "depth"}`, basis `derived`, links to the route or definition record when there is one. Depth is 0 for seeds, the forward distance for `uses`, the reverse distance for `used-by`, and for a test the reverse distance to the nearest file in the set (1 = it imports such a file directly).
 
 ### 6.5 Lane `web`: HAR, source maps, bundles
 
 Input: a `.har` file, a `.map` file, a `.js`/`.mjs` file, an `.html` file, or a folder of these (a saved site or build output).
 
-HAR (1.2; `log.entries[].request.{method,url,headers,queryString,postData}`, `.response.{status,headers,content.{mimeType,size}}`, `startedDateTime`): one `web.endpoint` per `METHOD host/path-template` with the path from `engine.path_template` (6.3); data `{"statuses", "requestTypes", "responseTypes", "count", "queryParams": names only}`. `web.payload-shape` per endpoint and direction: JSON body parsed and reduced to key names and JSON types, depth ≤ 4, ≤ 50 keys per object, arrays reduced to their first element's shape; **no values**. `web.auth-step` for requests whose path matches `login|logout|auth|token|session|oauth|signin|signup|sso|2fa|otp` in timeline order: data `{"order", "sets-cookie": bool, "auth-scheme": "Bearer"|"Basic"|null}`; header values, cookies, query values and bodies are never stored. `web.host` per third-party host (host differs from the most frequent page host). `web.page` per HTML navigation.
+HAR 1.2 fields read: `log.entries[].request.{method,url,headers,queryString,postData.{mimeType,text}}`, `.response.{status,headers,content.{mimeType,text,encoding}}`, `startedDateTime`. Host = URL hostname lowercased, userinfo dropped, `:port` kept when not the scheme's default. Mime types are compared without parameters (`application/json; charset=utf-8` is `application/json`). A body with `encoding: "base64"` is decoded before it is shaped. Header values, cookies, query values and bodies are never stored.
 
-Source maps (v3 JSON: `version`, `sources`, `sourcesContent`, `names`): `web.source-module` per top two folder levels of `sources` (counts, not every path); `web.framework` from source paths (`node_modules/react`, `next/dist`, `vue`, `@angular`, `svelte`). `sourcesContent` is passed to `jsscan` in memory and **never stored**.
+| Kind | Key | Data | From |
+|---|---|---|---|
+| `web.endpoint` | `METHOD host/path-template` (6.3 templating) | `{"statuses": [sorted ints], "requestTypes": [mimes], "responseTypes": [mimes], "count": n, "queryParams": [names]}` | each HAR entry |
+| `web.payload-shape` | `<endpoint key> request` or `<endpoint key> response` | `{"shape": json_shape(body)}` (6.3) | JSON bodies (mime `application/json` or `+json`) |
+| `web.auth-step` | its endpoint key | `{"order": n (1-based in startedDateTime order among auth steps), "sets-cookie": bool, "auth-scheme": "Bearer"|"Basic"|null}` | entries whose path matches `login|logout|auth|token|session|oauth|signin|signup|sso|2fa|otp` |
+| `web.host` | host | `{"count": n}` | hosts that differ from the most frequent page host (ties: the lowest in sort order) |
+| `web.page` | `host/path-template` | `{}` | entries whose response mime is `text/html` |
+| `web.source-module` | source path with a `scheme://` prefix (`webpack:///`), a leading `/` and `./` removed, cut to its first two folder segments; a source with no folder → `(root)`; a source that is absolute, has a drive letter or escapes with `..` → `(outside)` and is never opened | `{"sources": n}` | `.map` `sources` |
+| `web.framework` | framework id (6.3) | `{"from": "source-map"|"bundle"}` | source paths (`node_modules/react` react, `next/dist` next, `node_modules/vue` vue, `@angular` angular, `node_modules/svelte` svelte); bundle markers `__NEXT_DATA__` next, `__NUXT__` nuxt, `ng-version` angular, `data-reactroot` react, `__SVELTEKIT` sveltekit (the bundler markers `__vite__` and `webpackChunk` name no framework and give no record); Hermes bytecode magic (`c6 1f bc 03 c1 03 19 1f`) hermes, with the limitation `Hermes bytecode present; not decoded (tier C: study import --from rea)` |
+| `web.route` | path with 6.3 templating, no method | `{"relative": true}` only for Angular paths, else `{}` | React Router `path: "/x"`, `<Route path="/x"`; Vue `path: '/x'`; Angular `path: 'x'` (no leading `/`: keyed `/x`; `''` is `/`); Next `_buildManifest.js` page keys and `__NEXT_DATA__` `page` |
+| `web.api-call` | `METHOD path` (6.3 templating; never the host) | `{"host": host or null}` | `fetch("/x"`, `` fetch(`/x `` (method `ANY` unless a literal `method: "X"` appears before the first `)` after the URL literal); axios `.get("/x"`, `.post(`, `.put(`, `.patch(`, `.delete(` (method from the call); `XMLHttpRequest.open("GET", "/x"`; absolute `https://` literals whose path starts `/api` or `/v[0-9]` (`ANY /v2/orders`, host in data) |
+| `web.flag` | flag name | `{}` (basis `inferred`) | `isEnabled("x")`, `useFlag("x")`, `useFeatureFlag("x")`, `getFeatureValue("x")`, `variation("x"`; `flags.x` only when the same file imports or requires a specifier containing `launchdarkly`, `unleash` or `growthbook` (case-insensitive) |
+| `web.i18n-key` | key | `{"namespace": first dot segment}` | `(?<![\w$.])t\("a.b"`, `i18n.t("a.b"`, `$t("a.b"`, `formatMessage({ id: "a.b"` (so `split("a.b")` and `axios.get("/x")` are not keys); keys only, never translations |
+| `secret.embedded` | 6.2 | 6.2 | 6.2 |
 
-Bundles and HTML go through `jsscan.analyze(text, path, digest, em)`:
-
-| Kind | Key | Patterns (literal strings only) |
-|---|---|---|
-| `web.route` | path | React Router `path: "/x"`, `<Route path="/x"`; Vue `path: '/x'`; Angular `path: 'x'`; Next `_buildManifest.js` page keys, `__NEXT_DATA__` `page` |
-| `web.api-call` | `METHOD path` | `fetch("/x"`, `fetch(\`/x`, axios `.get("/x"` / `.post(`, `XMLHttpRequest.open("GET", "/x"`, absolute `https://` literals whose path starts `/api` or `/v[0-9]` |
-| `web.flag` | flag name | `isEnabled("x")`, `useFlag("x")`, `useFeatureFlag("x")`, `getFeatureValue("x")`, `variation("x"`, `flags.x` next to `LaunchDarkly`/`unleash`/`growthbook` imports; basis `inferred` |
-| `web.i18n-key` | key | `t("a.b")`, `i18n.t("a.b")`, `$t("a.b")`, `formatMessage({ id: "a.b"` (keys only, never translations; counted per namespace, ≤ 2,000) |
-| `web.framework` | id | `__NEXT_DATA__`, `__NUXT__`, `ng-version`, `data-reactroot`, `webpackChunk`, `__vite__`, `__SVELTEKIT`, Hermes magic (reported, not decoded) |
+Bundles, HTML and `sourcesContent` (in memory, **never stored**) go through `jsscan.analyze(text, path, digest, em)`. String literals are matched with a bounded class (`"[^"\\\n]{1,2048}"` and the same for `'` and `` ` ``), never `.*?`: a lazy-dot pattern over the 5 MiB single-line fixture takes about 98 s.
 
 ### 6.6 Lane `desktop`: Electron
 
@@ -964,15 +1006,16 @@ Input: an `app.asar` file, an Electron app folder containing `resources/app.asar
 
 asar layout (verified against a real file): bytes 0..15 are four little-endian uint32: `4`, `headerSize`, `headerPayloadSize`, `jsonLength`; the header JSON is the `jsonLength` bytes at offset 16; file data starts at `8 + headerSize`. JSON: `{"files": {name: entry}}`, entry is a folder `{"files": {...}}` or a file `{"size": int, "offset": "<decimal string>", "unpacked"?: bool, "executable"?: bool, "integrity"?: {...}}` or a link `{"link": "..."}`. Reader rules: `jsonLength` ≤ 32 MiB and `16 + jsonLength ≤ file size`; offsets and sizes are checked against the file size; names containing `/`, `\`, `..` or NUL are `unsafe-path`; links are skipped (`symlink`); `unpacked` files are read from the sibling `app.asar.unpacked/` folder only if their real path stays inside it; recursion depth ≤ 64. `asar.py` public: `read_header(path_or_bytes) -> (tree, data_start)`, `iter_files(path_or_bytes, budget) -> iterator[(relpath, size, offset, unpacked)]`, `read_file(path_or_bytes, entry, cap) -> bytes`, `resolve(outer: bytes, inner_path, budget) -> bytes` (the 5.6 resolver).
 
-| Kind | Key | Extracted from |
-|---|---|---|
-| `desktop.package` | `name@version` | `package.json` in the asar: name, version, main, dependency names (no versions of private packages beyond the string) |
-| `desktop.process` | `main|preload|renderer:<path>` | main = `package.json` `main`; preload = literals in `webPreferences: { preload: ... }`; renderer = `.html` files and the scripts they load |
-| `desktop.ipc` | channel | `ipcMain.handle("x"`, `ipcMain.on("x"`, `ipcRenderer.invoke("x"`, `ipcRenderer.send("x"`, `webContents.send("x"`; data `{"side": "main"|"renderer"|"preload", "style": "handle"|"on"|"invoke"|"send"}` |
-| `desktop.exposed-api` | `world.name` | `contextBridge.exposeInMainWorld("api", { a: ..., b: ... })` top-level keys |
-| `desktop.setting` | setting | `nodeIntegration: true`, `contextIsolation: false`, `sandbox: false`, `webSecurity: false`, `allowRunningInsecureContent: true` |
-| `desktop.protocol` | scheme | `setAsDefaultProtocolClient("x")`, `protocol.registerSchemesAsPrivileged` |
-| `desktop.updater` | id | `electron-updater`, `autoUpdater.setFeedURL` |
+| Kind | Key | Data | From |
+|---|---|---|---|
+| `desktop.package` | `name@version` | `{"main": str or null, "dependencies": [names]}` | `package.json` in the asar or `resources/app/` |
+| `desktop.process` | `main:<path>`, `preload:<path>`, `renderer:<path>` | `{}` | main = `package.json` `main`; preload = literals in `webPreferences: { preload: ... }`; renderer = `.html` files and the scripts they load |
+| `desktop.ipc` | channel | `{"side": "main"|"renderer"|"preload", "style": "handle"|"on"|"invoke"|"send"}` | `ipcMain.handle("x"`, `ipcMain.on("x"`, `ipcRenderer.invoke("x"`, `ipcRenderer.send("x"`, `webContents.send("x"` |
+| `desktop.exposed-api` | `world.name` | `{}` | `contextBridge.exposeInMainWorld("api", { a: ..., b: ... })` top-level keys |
+| `desktop.setting` | setting name | `{"value": the literal as written}` | `nodeIntegration: true`, `contextIsolation: false`, `sandbox: false`, `webSecurity: false`, `allowRunningInsecureContent: true` |
+| `desktop.protocol` | scheme | `{}` | `setAsDefaultProtocolClient("x")`, `protocol.registerSchemesAsPrivileged` scheme literals |
+| `desktop.updater` | `electron-updater` or `autoUpdater` | `{}` | an `electron-updater` dependency or import; `autoUpdater.setFeedURL` |
+| `secret.embedded` | 6.2 | 6.2 | 6.2 |
 
 All JavaScript also goes through `jsscan.analyze`.
 
@@ -988,34 +1031,45 @@ Inputs and detection (zip magic `PK\x03\x04`, then by members): APK has `Android
 
 **IPA** (from knowledge): `Payload/<Name>.app/Info.plist` read with `plistlib.loads` (XML and binary); `embedded.mobileprovision` is CMS-signed: take the bytes from the first `<?xml` to the end of the first `</plist>` and `plistlib.loads` them, keep only `Entitlements` keys `com.apple.developer.associated-domains` and `aps-environment`; `main.jsbundle` and `*.jsbundle` → `jsscan` (or Hermes: reported only); `Frameworks/*.framework` names; `*.storyboardc` and `*.nib` names. Mach-O executables are not parsed (tier C).
 
-| Kind | Key | Android | iOS |
-|---|---|---|---|
-| `mobile.package` | app id | `manifest@package`, versionName, versionCode, min/targetSdk | `CFBundleIdentifier`, `CFBundleShortVersionString`, `CFBundleVersion`, `MinimumOSVersion` |
-| `mobile.permission` | name | `uses-permission@name` | `NS*UsageDescription` keys (the description text is not stored), `UIBackgroundModes` |
-| `mobile.screen` | component | `activity` and `activity-alias` (`@name` resolved against the package), data `{"exported", "launcher"}` | storyboard and nib names |
-| `mobile.service` | component | `service`, `receiver`, `provider` with `exported` | |
-| `mobile.deeplink` | `scheme://host/path` | `intent-filter` with action VIEW and category BROWSABLE: each `data` scheme × host × path/pathPrefix/pathPattern; data `{"activity", "autoVerify"}` | `CFBundleURLTypes[].CFBundleURLSchemes`; associated domains (`applinks:`) |
-| `mobile.endpoint` | URL or `/path` | dex strings matching `^https?://` or `^/(api|v[0-9])/` (≤ 300 per dex) | strings in `jsscan` bundles; `NSAppTransportSecurity` exception domains |
-| `mobile.sdk` | package prefix or framework | dex type histogram: top 30 packages by class count with known SDK names (`com/google/firebase`, `com/facebook`, `io/sentry`, `com/stripe`, `okhttp3`, `retrofit2`, `com/onesignal`, `io/branch`) | `Frameworks/*.framework` |
-| `mobile.framework` | id | `flutter` (`lib/*/libflutter.so` or `assets/flutter_assets/`), `react-native` (`assets/index.android.bundle`, `libreactnativejni.so`), `hermes` (bundle magic `c6 1f bc 03 c1 03 19 1f`), `unity` (`libunity.so`), `xamarin` (`assemblies/*.dll`), `capacitor`/`cordova` (`assets/public/`, `assets/www/`, `capacitor.config.json`) | `Flutter.framework`, `main.jsbundle`, `UnityFramework.framework` |
-| `mobile.setting` | setting | `application@usesCleartextTraffic`, `@debuggable`, `@allowBackup`, `@networkSecurityConfig` | `NSAllowsArbitraryLoads` |
+| Kind | Key | Data | Android | iOS |
+|---|---|---|---|---|
+| `mobile.package` | app id | `{"versionName", "versionCode", "minSdk", "targetSdk"}` (Android), `{"version", "build", "minimumOS"}` (iOS); absent values `null` | `manifest@package`, versionName, versionCode, `uses-sdk` min/target | `CFBundleIdentifier`, `CFBundleShortVersionString`, `CFBundleVersion`, `MinimumOSVersion` |
+| `mobile.permission` | name | `{}` | `uses-permission@name` | `NS*UsageDescription` keys (the description text is not stored), `UIBackgroundModes` values |
+| `mobile.screen` | component, fully qualified | `{"exported": bool or null, "launcher": bool}` | `activity` and `activity-alias` (`.Name` resolved against the package) | storyboard and nib names |
+| `mobile.service` | component, fully qualified | `{"type": "service"|"receiver"|"provider", "exported": bool or null}` | `service`, `receiver`, `provider` | |
+| `mobile.deeplink` | `scheme://host/path` (`scheme://host` when there is no path; `scheme://` for a bare scheme) | `{"activity": str or null, "autoVerify": bool}` | `intent-filter` with action VIEW and category BROWSABLE: each `data` scheme × host × path/pathPrefix/pathPattern | `CFBundleURLTypes[].CFBundleURLSchemes`; associated domains (`applinks:`) as `https://host` |
+| `mobile.endpoint` | the literal (URL or `/path`), scrubbed | `{"from": "dex"|"bundle"|"ats"|"source"}` | dex strings matching `^https?://` or `^/(api|v[0-9])/` (≤ 300 per dex) | strings in `jsscan` bundles; `NSAppTransportSecurity` exception domains |
+| `mobile.sdk` | package prefix in slash form for every source (dex, JADX, apktool: `com/google/firebase`), or framework name | `{"classes": n}` | the class histogram: top 30 packages by class count that start with a known SDK prefix (`com/google/firebase`, `com/facebook`, `io/sentry`, `com/stripe`, `okhttp3`, `retrofit2`, `com/onesignal`, `io/branch`) | `Frameworks/*.framework` |
+| `mobile.framework` | framework id (6.3) | `{}` | `flutter` (`lib/*/libflutter.so` or `assets/flutter_assets/`), `react-native` (`assets/index.android.bundle`, `libreactnativejni.so`), `hermes` (bundle magic `c6 1f bc 03 c1 03 19 1f`, with the 6.5 Hermes limitation), `unity` (`libunity.so`), `xamarin` (`assemblies/*.dll`), `capacitor`/`cordova` (`assets/public/`, `assets/www/`, `capacitor.config.json`) | `Flutter.framework`, `main.jsbundle`, `UnityFramework.framework` |
+| `mobile.setting` | attribute name without namespace (`usesCleartextTraffic`) or plist key | `{"value": the raw value}` | `application@usesCleartextTraffic`, `@debuggable`, `@allowBackup`, `@networkSecurityConfig` | `NSAllowsArbitraryLoads` |
+| `secret.embedded` | 6.2 | 6.2 | text members only (6.2 rule 5) | |
 
 `resources.arsc` is not decoded in 2.0: labels that are resource references stay `@0x7f...` (limitation in the study notes).
 
 ### 6.8 Lane `data`: data files
 
-| Input (detected by) | Kinds | Rules |
-|---|---|---|
-| SQLite (`SQLite format 3\0` header) | `data.table`, `data.index`, `data.trigger`, `data.view` | open with `sqlite3.connect("file:" + pathname2url(path) + "?mode=ro&immutable=1", uri=True)`, `PRAGMA query_only=1`; read **only** `sqlite_master` (type, name, tbl_name, sql); data `{"columns": [names and declared types parsed from sql]}`; never read rows; SQLite members inside archives are skipped as `unsupported` on every Python version (no temp files, deterministic) |
-| plist (XML `<?xml`/`<plist`, binary `bplist00`) | `data.plist-key` | key paths and value types, depth ≤ 6, ≤ 500 keys; values are not stored |
-| OpenAPI / Swagger JSON (`openapi` or `swagger` key) | `data.endpoint`, `data.schema-type`, `data.security` | `paths` × methods (key `METHOD /path`, data `{"operationId", "tags"}`), `components.schemas` / `definitions` names, `securitySchemes` names and types |
-| OpenAPI YAML (`openapi:` at column 0) | `data.endpoint` | no YAML parser: path keys are lines matching `^  (/\S*):\s*$`, method keys `^    (get|put|post|delete|patch|head|options):` under them; limitation `YAML read by a line scanner` |
-| GraphQL SDL (`.graphql`, `.gql`) or introspection JSON (`__schema`) | `data.schema-type`, `data.endpoint` | `type|input|enum|interface|union X`; fields of `Query`, `Mutation`, `Subscription` as keys `query x`, `mutation x` |
-| proto (`.proto`) | `data.schema-type`, `data.rpc` | `message X`, `enum X`, `service S { rpc M(A) returns (B) }` → key `S.M` |
+Selection (6.2): `.json`, `.yaml`, `.yml`, `.graphql`, `.gql` and `.proto` by extension; SQLite and plist by content (any file whose first bytes match a header below).
+
+| Input (detected by) | Kind | Key | Data | Rules |
+|---|---|---|---|---|
+| SQLite (`SQLite format 3\0` header) | `data.table` | table name | `{"columns": [{"name", "type"}]}`, `type` as declared (case kept, `""` when untyped), table-level constraints (`PRIMARY KEY (...)`, `FOREIGN KEY`, `UNIQUE`, `CHECK`, `CONSTRAINT`) are not columns | open with `sqlite3.connect("file:" + pathname2url(path) + "?mode=ro&immutable=1", uri=True)`, `PRAGMA query_only=1`; read **only** `sqlite_master` (type, name, tbl_name, sql); identifiers unquoted (`"x"`, `` `x` ``, `[x]`); `WITHOUT ROWID` ignored; objects named `sqlite_%` (autoindexes, `sqlite_sequence`) ignored; never read rows; SQLite members inside archives are skipped as `unsupported` (no temp files, deterministic) |
+| | `data.index`, `data.trigger` | name | `{"table": tbl_name}` | |
+| | `data.view` | name | `{}` | |
+| plist (binary: starts `bplist00`; XML: the first 1,024 bytes contain `<plist`) | `data.plist-key` | key path: dict keys joined by `.`, an array as the segment `[]` reduced to its first element (`UIBackgroundModes[]`) | `{"type": "string"|"integer"|"real"|"bool"|"date"|"data"|"array"|"dict"}` | depth (path segments, `[]` included) ≤ 6; the first 500 paths in sorted order are kept (more: limitation `more than 500 plist key paths; N not recorded`); values are not stored |
+| OpenAPI 3 / Swagger 2 JSON (`openapi` or `swagger` key at top level) | `data.endpoint` | `METHOD <paths key as written>` (no `servers`/`basePath` prefix; 6.3 templating) for methods `get put post delete patch head options trace` | `{"operationId": str or null, "tags": [..]}` | |
+| | `data.schema-type` | schema name | `{"kind": "schema"}` | `components.schemas`, Swagger 2 `definitions` |
+| | `data.security` | scheme name | `{"type": str}` | `components.securitySchemes`, Swagger 2 `securityDefinitions` |
+| OpenAPI YAML (`openapi:` at column 0) | `data.endpoint` | as JSON | `{"operationId": null, "tags": []}` | no YAML parser; lines are read with `\r` stripped. A path line matches `^  (/\S*):\s*$` and sets the current path; any other non-blank, non-comment line indented 0 to 2 spaces clears it; a method line `^    (get|put|post|delete|patch|head|options|trace):` under a current path emits one record. Limitation `YAML read by a line scanner` |
+| GraphQL SDL (`.graphql`, `.gql`) | `data.schema-type` | type name | `{"kind": "type"|"input"|"enum"|"interface"|"union"|"scalar"}` | `type|input|enum|interface|union|scalar X`; `extend type X` adds fields to `X` and emits no second record; comments (`#`) removed first |
+| | `data.endpoint` | `query x`, `mutation x`, `subscription x` | `{}` | the fields of `Query`, `Mutation`, `Subscription` (including `extend type`) |
+| GraphQL introspection JSON (`__schema` key, under `data` or at top level) | as SDL | as SDL | as SDL | types whose name starts with `__` and the built-in scalars `String Int Float Boolean ID` are not emitted |
+| proto (`.proto`) | `data.schema-type` | message or enum name, nested ones as `Outer.Inner` | `{"kind": "message"|"enum"}` | comments (`//` and `/* */`) removed first |
+| | `data.rpc` | `Service.Method` | `{"request": type, "response": type}` | `service S { rpc M(A) returns (B) }` (`stream` dropped) |
+| any | `secret.embedded` | 6.2 | 6.2 | 6.2 |
 
 ### 6.9 Lane `compare`
 
-`study compare <S1> <S2> [--id S]`: both studies must exist and have the same `kind` (else `compare-mismatch`). Facts are matched by `(kind, key)`. Output study of kind `compare` with records `compare.added` (in S2 only), `compare.removed` (in S1 only), `compare.changed` (both, canonical `data` differs; data `{"before", "after"}` trimmed), key = original `kind + " " + key`, basis `derived`, links to the matched records, `source` = the S2 record's source (removed: S1's). If either study is truncated, every record gets the limitation `one side was truncated; a missing fact may only be unscanned`. Behaviours with the same `trigger` in both studies' `behaviours.json` are compared the same way into `compare.behaviour-*` records.
+`study compare <S1> <S2> [--id S]`: both studies must exist and have the same `kind` (else `compare-mismatch`). Facts compared: every record of both studies except `trace.file` (it depends on which seeds were traced, not on the artifact) and superseded records (5.5). Facts are matched by `(kind, key)`; because path-bearing keys of a single-file target use `.` (6.3) and folder targets use folder-relative paths, two versions of the same artifact give equal keys wherever the facts are equal. Two matched facts are equal when their canonical `data` is equal (claim, source, excerpt and limitations are not compared). Output study of kind `compare` with records `compare.added` (in S2 only), `compare.removed` (in S1 only), `compare.changed` (both, data differs): key = original `kind + " " + key`, data `{"before": data or null, "after": data or null}` trimmed to 4 KB, basis `derived`, links to the matched records, `source` = the S2 record's source (removed: S1's). If either study is truncated, every record gets the limitation `one side was truncated; a missing fact may only be unscanned`. Behaviours with the same `trigger` in both studies' `behaviours.json` are compared the same way into `compare.behaviour-added`, `compare.behaviour-removed` and `compare.behaviour-changed` records (key = `trigger.kind + " " + trigger.key`).
 
 ### 6.10 Tier B and tier C
 
@@ -1033,9 +1087,16 @@ Inputs and detection (zip magic `PK\x03\x04`, then by members): APK has `Android
             "note": "Lands on the dashboard"}]}
 ```
 
-`action` is one of `navigate`, `click`, `type`, `select`, `submit`, `wait`, `observe`. The importer replaces every `value` with `<typed:N chars>`, keeps URL paths as templates (6.5), drops query values, keeps shapes only. Kinds: `flow.step` (key `<n> <action> <target or url>`, data `{"screen", "next"}`), `flow.screen` (key = screen name), plus `web.endpoint` and `web.payload-shape` from `requests` and from `--har`. Procedure rules (in the template): sign in only with the user's own test account typed by the user; never record passwords, payment data or personal data; never bypass a login, captcha, paywall or rate limit; stop at any step that would send, buy, post or delete.
+`action` is one of `navigate`, `click`, `type`, `select`, `submit`, `wait`, `observe`. A file that does not parse as a JSON object with `format` equal to `app-blueprint-capture/1` and a `steps` array is the `bad-capture` error (no study written); a step that is not an object or lacks `n` or `action` is a `malformed` skip (path `steps[<index>]`). The importer replaces every `value` with `<typed:N chars>`, keeps URL paths as templates (6.3), drops query values, keeps shapes only.
 
-**Tier C: `study import <path> --from rea|jadx|apktool [--id S] (--authorization TEXT | --own)`.** Mapping in 5.8. The study `kind` is `import`, `lanes` = `[<from>]`. A path that does not match the named format: `target-unsupported` with the expected layout in the message.
+| Kind | Key | Data |
+|---|---|---|
+| `flow.step` | `<n> <action> <target>`, or for `navigate` `<n> navigate <host/path-template>` (no query; host as in 6.5): `1 navigate app.acme.example/login` | `{"screen": str or null, "next": the next step's n or null}` |
+| `flow.screen` | screen name | `{}` |
+
+`requests` and `--har` add `web.endpoint` and `web.payload-shape` (6.5). Procedure rules (in the template): sign in only with the user's own test account typed by the user; never record passwords, payment data or personal data; never bypass a login, captcha, paywall or rate limit; stop at any step that would send, buy, post or delete.
+
+**Tier C: `study import <path> --from rea|jadx|apktool [--id S] (--authorization TEXT | --own)`.** Mapping in 5.8. The study `kind` is `import`, `lanes` = `[<from>]`. A path that fails the named importer's detection is `target-unsupported` with the expected layout in the message.
 
 ### 6.11 Behaviour record (`behaviours.json`)
 
@@ -1323,7 +1384,7 @@ The same `features`, `milestones`, `tasks` and `unknowns` objects are what `stat
 
 ### 10.1 Per module
 
-Each workstream writes its tests in its own files (section 11). A wrongly typed value in a new section is a load error (3.3), so the malformed column below means "exit 1 with the 1.3.0 message format, never an exception"; `test_plan_fuzz_v2` covers the same for every field. Every validation code needs a positive (a plan that triggers it), a negative (the nearest valid plan that does not) and the classify check. Every command is tested through the real CLI (subprocess), including `--json` and the exit code. Every parser has a malformed-input test that asserts no exception escapes and the study records a `malformed` skip.
+Each workstream writes its tests in its own files (section 11). A wrongly typed value in a new section is a load error (3.3), so the malformed column below means "exit 1 with the 1.3.0 message format, never an exception"; `test_plan_fuzz_v2` covers the same for every field. Every validation code needs a positive (a plan that triggers it), a negative (the nearest valid plan that does not) and the classify check. Every command is tested through the real CLI (subprocess), including `--json` and the exit code. Every parser has malformed-input tests that assert no exception escapes and the outcome is the one the 6.2 reading rules give (a skip reason, facts from the readable part with their limitation, or the target error).
 
 | Module | Positive | Negative | Malformed |
 |---|---|---|---|
@@ -1336,9 +1397,9 @@ Each workstream writes its tests in its own files (section 11). A wrongly typed 
 | records | check and evaluation records; proofs; stale after edit of an item and of a dependency; repeat; a check stops counting when the criterion's text or `verify` changes; a command without `verifyLevel` never satisfies `e2e` or `manual`; a no-verify criterion passes only through an evaluation; adding a criterion makes an evaluation not current (status back to `verified`, not `failed`); evaluator independence re-checked after an ownership change; re-accept from `accepted` and `failed` | `accept` by owner (3); accept with a file not verified (3); timeout counts as fail | malformed lines in `verification/*.jsonl` |
 | evidence | id stability (same fact, different claim or study → same id); freshness all four states; export byte-identical twice; import merge counts | import of a foreign format refused (`bad-bundle`) | truncated JSONL lines, record missing `kind`, data over 4 KB |
 | study core, safety | authorization required outside root; limits honoured; time limit stops with `truncated` | the source lane on the project root and on a tracked folder needs no flag; an APK inside the project root does | zip-slip, zip bomb, encrypted member, symlink member and folder symlink pointing outside, nested depth 3, truncated zip |
-| each lane | every kind in its table emitted from its fixture with the right key | nothing emitted from an unrelated file | truncated or garbage bytes for every format it reads |
+| each lane | every kind in its table emitted from its fixture with the key and data its table defines; every pattern the lane table names has a fixture line | nothing emitted from an unrelated file; the listed negatives (`flags.x` without a flag-library import, `split("a.b")`, bare-specifier resolution, `_` folders, Hermes not decoded) | zero-byte, cut-short, binary and too-deep variants give the 6.2 worked-example outcome; invalid UTF-8 gives the replacement limitation; the 5 MiB single line stays under the time bound |
 | trace | route, path, symbol and literal seeds | `seed-not-found` | graph.json missing or corrupt |
-| capture, importers | capture with typed values replaced; rea, JADX and apktool fixtures | wrong `--from` for a folder | capture with wrong `format`, rea record without `subject` |
+| capture, importers | capture with typed values replaced; rea, JADX and apktool fixtures; the dropped-link limitations of 5.8 | wrong `--from` for a folder (`target-unsupported`) | capture with wrong `format` (`bad-capture`); rea record without `subject` (`malformed` skip); unparseable rea file (`target-unsupported`); manifest with `<!DOCTYPE` (`malformed` skip, note `DOCTYPE or ENTITY refused`, not in `missing`) |
 | synth, adopt | candidates per trigger kind; merge keeps edits; adopt mapping rows 1 to 6; idempotent second adopt | candidate (not reviewed) skipped; non-draft existing feature skipped | behaviours.json not an object; behaviour with unknown evidence |
 | views | ROADMAP.md and FEATURES.md content; v1 golden STRUCTURE.md/ROSTER.md byte-identical to 1.3.0; payload keys present; no key collision | views absent when sections empty | — |
 | signals | rate limit; no capture env | | stamp file corrupt |
@@ -1365,6 +1426,7 @@ The archive builders (AXML, proto, dex, APK, AAB, XAPK, IPA, asar, hostile archi
 | `make_openapi_json`, `make_openapi_yaml`, `make_graphql`, `make_proto` | text fixtures |
 | `make_repo(path)` | small Express-style JS app with routes, tests and env reads; a Python FastAPI module |
 | `make_zip_slip`, `make_zip_bomb` (a 2 MiB member of zeros, about 2 KB on disk), `make_symlink_zip`, `make_encrypted_member_zip` (flag bit set by hand) | hostile archives |
+| text variants per kind: `zero_bytes`, `truncated`, `invalid_utf8`, `binary`, `deep` | expected outcomes from the 6.2 worked examples: scanned text kinds expect a subset of the good facts (cut short) or the good facts with the replacement limitation (invalid UTF-8); whole-parse formats expect the listed skip |
 | `make_rea_bundle`, `make_jadx_dir`, `make_apktool_dir`, `make_capture` | tier B and C inputs |
 
 The fixture builder is owned by a different workstream from the parsers, both working from the byte layouts in section 6, so a misreading has to be made twice in the same way to go unnoticed (see 12.1 for the remaining risk).
@@ -1436,6 +1498,13 @@ Wave 4 (not detailed here) owns `tests/test_e2e.py` and `tests/test_registry.py`
 | 10 | `TOOL_VERSION` is 1.9.N on `v2`, 2.0.0 in wave 4 | 1.6 |
 | 11 | No live guard hooks on builder agents in waves 1 to 3. Before merging, the orchestrator runs `python maintainers/check_owned.py --workstream <id> --base v2` (W0-C): it lists `git diff --name-only --diff-filter=ACMRD <base>...HEAD`, loads the dogfood blueprint through the launcher module, and exits 1 when any path is unplanned or owned by another roster id, printing each with its owner | 11 |
 | 12 | The only edit to the 1.3.0 tests: `test_crash_records_incident`'s frame assertion becomes the regex of 1.5 row a | 1.5 |
+| 13 | Study lanes: route parameters become `{name}` in every lane, with the bundle and Next.js examples of 6.3 (G4, G8); `hermes` is a framework id (G7); a `_` folder in Next.js `app/` opts its subtree out (G26) | 6.3 |
+| 14 | `unresolved` lists every specifier that resolves to no file of the target, bare package names and standard-library modules included (G11) | 6.4 |
+| 15 | Reading rules: NUL in the first 8 KiB is binary; UTF-8 with replacement plus a limitation; scanning lanes report what they read from cut input; only whole-parse formats give `malformed` (B1, G9) | 6.2 |
+| 16 | `malformed` versus `unsupported` versus `target-unsupported`/`bad-capture`, with worked examples per lane and importer (M5, G30); `RecursionError` from a parser is a `depth` skip, own walks stop at their depth limit (G2) | 6.2 |
+| 17 | rea dropped-link limitation wording; a refused DOCTYPE manifest is a `malformed` skip, not `missing` (M4, M6, G16, G20, G21) | 5.8 |
+| 18 | Compare covers every non-superseded record except `trace.file`; a single-file target's path inside keys is `.` (M7, G14) | 6.3, 6.9 |
+| 19 | Secrets are scanned in decoded text only; binary plists, SQLite and binary archive members are not scanned (G29) | 6.2 |
 
 ### 12.2 Still open
 
