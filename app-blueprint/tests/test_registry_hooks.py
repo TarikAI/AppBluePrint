@@ -483,6 +483,124 @@ class GuardRefusalTest(CliTestBase):
         self.assertEqual(self.run_("claim", "apps/web/src/offline.ts", "--by", "frontend-engineer")[0], 0)
 
 
+LOAD_ERRORS = {  # kind -> blueprint.json text that cannot load
+    "bad-json": "{",
+    "not-an-object": "[]",
+    "shape": json.dumps(dict(v1_plan(), files="x")),
+    "version-missing": json.dumps({k: v for k, v in v1_plan().items() if k != "version"}),
+    "version-string": json.dumps(dict(v1_plan(), version="1")),
+    "version-bool": json.dumps(dict(v1_plan(), version=True)),
+    "version-zero": json.dumps(dict(v1_plan(), version=0)),
+    "too-new": json.dumps(dict(v1_plan(), version=3)),
+    "mistyped-2.0-key": json.dumps(dict(v1_plan(), features="F-x")),
+}
+REPAIR = ("Writes are refused until the plan loads. Fix .blueprint/blueprint.json, then run: "
+          "python .blueprint/bin/blueprint.py validate")
+
+
+class GuardLoadFailureTest(CliTestBase):
+    """Review M1: guard and hook pre fail closed (exit 2) when a blueprint exists but cannot load, except a write to
+    .blueprint/blueprint.json itself, so the plan can be repaired."""
+
+    def hook_pre(self, rel):
+        payload = json.dumps({"cwd": str(self.root), "tool_input": {"file_path": str(self.root / rel)}})
+        return run_cli("hook", "pre", stdin=payload)
+
+    def test_every_load_error_refuses_writes_but_the_plan_itself(self):
+        for kind, text in LOAD_ERRORS.items():
+            with self.subTest(kind=kind):
+                (self.root / ".blueprint" / "blueprint.json").write_text(text, encoding="utf-8")
+                for call in (lambda p: self.run_("guard", p), self.hook_pre):
+                    code, _, err = call("random/new.txt")
+                    self.assertEqual(code, 2, err)
+                    self.assertIn(REPAIR, err)
+                    self.assertTrue(err.strip().splitlines()[0], "the load error comes first")
+                    self.assertNotIn("Traceback", err)
+                    for other in (".blueprint/state.json", ".blueprint/blueprint.json.bak", ".blueprint/bin/blueprint.py",
+                                  "blueprint.json"):
+                        self.assertEqual(call(other)[0], 2, other)
+                    self.assertEqual(call(".blueprint/blueprint.json")[0], 0, "the repair write is allowed")
+                    self.assertEqual(call(".blueprint/./blueprint.json")[0], 0)
+
+    def test_no_blueprint_behaves_as_before(self):
+        (self.root / ".blueprint" / "blueprint.json").unlink()
+        self.assertEqual(self.run_("guard", "random/new.txt")[0], 1)
+        self.assertEqual(self.hook_pre("random/new.txt")[0], 0)
+
+
+class JsonLoadFailureTest(CliTestBase):
+    """Review M2: with --json, a plan that cannot load (or no blueprint) prints one failure envelope on stdout, with
+    the same exit code as without --json; the human message stays on stderr."""
+
+    CALLS = (["validate"], ["status"], ["verify", "--feature", "F-x"], ["export", "agenticteam"])
+
+    def test_envelopes(self):
+        cases = dict(LOAD_ERRORS, **{"no-blueprint": None})
+        want = {"bad-json": "bad-json", "not-an-object": "bad-shape", "shape": "bad-shape", "version-missing": "bad-shape",
+                "version-string": "bad-shape", "version-bool": "bad-shape", "version-zero": "bad-shape",
+                "too-new": "schema-too-new", "mistyped-2.0-key": "bad-shape", "no-blueprint": "no-blueprint"}
+        for kind, text in cases.items():
+            path = self.root / ".blueprint" / "blueprint.json"
+            if text is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_text(text, encoding="utf-8")
+            for argv in self.CALLS:
+                with self.subTest(kind=kind, argv=argv):
+                    plain = self.run_(*argv)
+                    code, out, err = self.run_(*argv, "--json")
+                    self.assertEqual(code, plain[0])
+                    self.assertEqual(code, 1)
+                    env = json.loads(out)
+                    self.assertEqual((env["ok"], env["error"]["code"]), (False, want[kind]))
+                    self.assertTrue(env["error"]["message"])
+                    self.assertTrue(env["error"]["next"])
+                    self.assertTrue(err.strip(), "the human message stays on stderr")
+
+
+class GuardPathTest(CliTestBase):
+    """Review M3: guard normalises the path exactly as hook pre does, before guard_decision and the refuse hooks."""
+
+    RECORDS = '''
+        def refuse(action, root, plan, path, by):
+            if action == "write" and path == ".blueprint/state.json":
+                return f"{path} is written only by blueprint.py"
+    '''
+
+    def hook_pre(self, raw):
+        payload = json.dumps({"cwd": str(self.root), "tool_input": {"file_path": raw}})
+        return run_cli("hook", "pre", stdin=payload)
+
+    def test_every_spelling_of_a_protected_path_is_refused(self):
+        (self.root / ".blueprint" / "state.json").write_text("{}", encoding="utf-8")
+        forms = [str(self.root / ".blueprint" / "state.json"), ".blueprint//state.json", ".blueprint/./state.json",
+                 "crates/../.blueprint/state.json", ".blueprint\\state.json" if os.name == "nt" else ".blueprint/state.json"]
+        if os.name == "nt":
+            forms += [str(self.root / ".blueprint" / "state.json").replace("\\", "/"), ".BLUEPRINT/State.JSON",
+                      str(self.root).upper() + "\\.blueprint\\state.json"]
+        link = self.root / "linked"
+        try:
+            os.symlink(self.root / ".blueprint", link, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            if os.name == "nt":
+                import subprocess
+                subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(self.root / ".blueprint")], capture_output=True)
+        if link.exists():
+            forms.append("linked/state.json")
+        with extension({"records.py": self.RECORDS}):
+            for raw in forms:
+                with self.subTest(path=raw):
+                    code, _, err = self.run_("guard", raw)
+                    self.assertEqual(code, 2, err)
+                    self.assertIn("written only by blueprint.py", err)
+                    absolute = raw if os.path.isabs(raw) else str(self.root / raw)
+                    self.assertEqual(self.hook_pre(absolute)[0], 2)
+            self.assertEqual(self.run_("guard", "crates/../Cargo.toml", "--by", "cto-architect")[0], 0)
+            self.assertEqual(self.run_("guard", "./Cargo.toml", "--by", "backend-lead")[0], 2, "owner check on the normal form")
+        self.assertEqual(self.run_("guard", "../outside.txt")[0], 2, "outside the project: unplanned, as in 1.x")
+        self.assertEqual(self.hook_pre(str(self.root.parent / "outside.txt"))[0], 0, "hook pre ignores outside paths, as in 1.x")
+
+
 class VerifyFeatureAndStatusCardTest(CliTestBase):
     def test_not_built_until_the_owner_module_exists(self):
         for argv, arrives in ((["verify", "--feature", "F-inbox", "--run"], "W3-V"), (["status", "--feature", "F-inbox"], "W1-F"),
