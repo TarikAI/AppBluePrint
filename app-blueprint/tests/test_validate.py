@@ -508,12 +508,12 @@ class InitTest(unittest.TestCase):
         r = S.run_script(S.LAUNCHER, ["init", "--refresh-tool", "--root", root], self.base, env=self.env)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("Your blueprint is schema version 1. It keeps working.", r.stdout)
-        self.assertNotIn("migrate", r.stdout)  # the hint appears once bp/commands/migrate.py exists (W0-B)
+        self.assertEqual("migrate" in r.stdout, (S.PACKAGE / "commands" / "migrate.py").is_file())  # the hint appears once bp/commands/migrate.py exists (W0-B)
         r = S.run_script(S.LAUNCHER, ["status", "--root", root], self.base, env=self.env)
         self.assertEqual(r.returncode, 0, r.stderr)
         last = r.stdout.rstrip().splitlines()[-1]
         self.assertTrue(last.startswith("Schema version 1"), last)
-        self.assertNotIn("migrate", last)
+        self.assertEqual("migrate" in last, (S.PACKAGE / "commands" / "migrate.py").is_file())
 
     def test_doctor_compares_the_copy_with_min_schema2_tool(self):
         root = self.base / "doc"
@@ -883,7 +883,7 @@ class FindingsTest(TempRoot):
                 first = found[0]
                 self.assertEqual((first["level"], first["code"], first["entry"]), ("warning", "schema-v1", "blueprint.json"))
                 self.assertTrue(first["message"].startswith("blueprint.json is schema version 1; it still works"))
-                self.assertNotIn("migrate", first["message"])  # until bp/commands/migrate.py exists (1.5 row d)
+                self.assertEqual("migrate" in first["message"], (S.PACKAGE / "commands" / "migrate.py").is_file())  # only once bp/commands/migrate.py exists (1.5 row d)
                 self.assertEqual([f for f in found if f["level"] == "error"], [])
         self.assertEqual(self.v.validate_findings(v2_plan()), [])
         self.assertEqual(self.v.validate_findings(self.load(v2_plan())), [])
