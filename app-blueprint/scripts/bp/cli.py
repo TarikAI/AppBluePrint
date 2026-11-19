@@ -106,6 +106,7 @@ def main(argv=None):
     p.add_argument("--owner")
     p.add_argument("--run", action="store_true")
     p.add_argument("--timeout", type=int, default=900)
+    p.add_argument("--stale", action="store_true", help="only files whose last passing proof no longer holds")
 
     p = add("guard", cmd_guard, "exit 2 if a path is unplanned or not owned by --by (for hooks and wrappers)")
     p.add_argument("path")

@@ -136,6 +136,9 @@ def cmd_status(args):
             print(f"    {r['path']}  ({r['owner']}, {r['phase']})")
         if not ready:
             print("    nothing: everything in the current phase is claimed, built or waiting on a dependency")
+    n_stale = sum(1 for r in rows if r.get("stale"))
+    if n_stale and plan.get("_from") != 1:  # contract 4.7; a version 1 plan keeps 1.3.0's output (W0 rule)
+        print(f"\n  ↻ {n_stale} file(s) need re-verifying (inputs changed): verify --stale --run")
     if plan.get("_from") == 1:  # contract 3.3; the migrate hint only once the command exists (1.5 row d)
         print("\nSchema version 1: " + ("run migrate to use milestones, features, tasks and unknowns."
                                         if command_built("migrate") else "it keeps working."))
@@ -191,7 +194,11 @@ def cmd_verify(args):
     from bp.verify import record_file_proofs, run_check, verify_groups
     root = find_root(args.root)
     plan = load_plan(root)
-    groups = verify_groups(plan, phase=args.phase, owner=args.owner)
+    only = None
+    if getattr(args, "stale", False):  # files whose last proof passed but no longer holds (contract 4.7)
+        from bp.status import compute
+        only = {r["path"] for r in compute(root, plan, load_state(root))["rows"] if r["stale"]}
+    groups = verify_groups(plan, phase=args.phase, owner=args.owner, only=only)
     if not groups:
         print("No verify commands in scope.")
         return

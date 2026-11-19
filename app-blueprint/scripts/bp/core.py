@@ -1,11 +1,13 @@
-"""core: paths, io, time, git and errors, moved from blueprint.py 1.3.0 (contract 1.5).
+"""core: paths, io, time, git, errors, digests and ids (contract 1.3); the 1.x part moved from blueprint.py 1.3.0.
 
 TOOL_HOME is the folder holding the launcher (scripts/ in the skill, .blueprint/bin in a project); 1.x called it HERE.
 """
+import codecs
 import datetime as _dt
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -79,6 +81,99 @@ def file_sha(path):
     return h.hexdigest()
 
 
+_CHUNK = 65536
+
+
+def _file_digests(path):
+    """(sha256 digest string, sha1 hex) of a file under the proof rule (contract 4.5), in one streaming pass.
+
+    A file that decodes as UTF-8 and has no NUL byte is text: CRLF and lone CR become LF before hashing. Any other
+    file is hashed as raw bytes. Both the raw and the normalised hashes are updated per 64 KiB chunk (a CR at the end
+    of a chunk is carried to the next, so a CRLF split across chunks is one line end); the normalised pair is
+    returned only if the whole file was text. Status.Hasher caches the result per file version."""
+    raw256, raw1 = hashlib.sha256(), hashlib.sha1()
+    norm256, norm1 = hashlib.sha256(), hashlib.sha1()
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    text, carry = True, False
+    with path.open("rb") as f:
+        while True:
+            chunk = f.read(_CHUNK)
+            if not chunk:
+                break
+            raw256.update(chunk)
+            raw1.update(chunk)
+            if not text:
+                continue
+            if b"\x00" in chunk:
+                text = False
+                continue
+            try:
+                decoder.decode(chunk)
+            except UnicodeDecodeError:
+                text = False
+                continue
+            data = (b"\r" + chunk) if carry else chunk
+            carry = data.endswith(b"\r")
+            if carry:
+                data = data[:-1]
+            data = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+            norm256.update(data)
+            norm1.update(data)
+    if text:
+        try:
+            decoder.decode(b"", final=True)  # a multi-byte character cut off at the end is not text
+        except UnicodeDecodeError:
+            text = False
+    if text and carry:
+        norm256.update(b"\n")
+        norm1.update(b"\n")
+    h256, h1 = (norm256, norm1) if text else (raw256, raw1)
+    return "sha256:" + h256.hexdigest(), h1.hexdigest()
+
+
+def proof_digest(path):
+    """sha256:<hex> of a file, with text line endings normalised (contract 4.5). Streams; never reads a file whole."""
+    return _file_digests(path)[0]
+
+
+def sha256_bytes(b):
+    return "sha256:" + hashlib.sha256(b).hexdigest()
+
+
+def canonical_json(obj):
+    """The canonical JSON bytes that ids are derived from (contract conventions)."""
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def content_id(prefix, obj, n):
+    """prefix + the first n hex digits of the sha256 of obj's canonical JSON (ev-..., vr-...)."""
+    return prefix + hashlib.sha256(canonical_json(obj)).hexdigest()[:n]
+
+
+def slug(text, max_len=40):
+    """Lowercase; every run of characters outside [a-z0-9] becomes one '-'; trimmed of '-'; at most max_len; 'x' if
+    nothing is left."""
+    s = re.sub(r"[^a-z0-9]+", "-", str(text).lower()).strip("-")
+    s = s[:max_len].strip("-")
+    return s or "x"
+
+
+def append_jsonl(path, rec):
+    """Append one JSON object as a line, creating the folder (JSON Lines, contract conventions)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+
+def emit(args, command, data, human_lines):
+    """Print a command's result: the 7.1 success envelope with --json, else the human lines."""
+    if getattr(args, "json", False):
+        print(json.dumps({"ok": True, "command": command, "data": data}, indent=2, ensure_ascii=False))
+    else:
+        for line in human_lines:
+            print(line)
+
+
 def die(msg, code=1):
     print(msg, file=sys.stderr)
     sys.exit(code)
@@ -134,6 +229,19 @@ def read_text_safe(path, limit=1_000_000):
         return path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
+
+
+def git_ls_files(root):
+    """Files git sees in root (tracked, plus untracked ones not ignored), forward slashes; None when git cannot say
+    (no git, not a repository, an error)."""
+    try:
+        out = subprocess.run(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=root,
+                             capture_output=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    return sorted({norm(p) for p in out.stdout.decode("utf-8", "replace").split("\0") if p})
 
 
 def git_head(root):
