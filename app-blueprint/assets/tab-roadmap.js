@@ -16,12 +16,7 @@
   }
 
   function featureText(f) {
-    var s = str(f.status) || 'planned', n = f.awaitingEvaluation, total = arr(f.criteria).length;
-    if (s === 'verified' && typeof n === 'number' && n > 0) {
-      var verb = n === 1 ? 'criterion awaits' : 'criteria await';
-      return s + ', ' + (total && n === total && n > 1 ? n + ' of ' + total : n) + ' ' + verb + ' evaluation';
-    }
-    return s;
+    return str(f.statusText) || str(f.status) || 'planned';  // the features module words it; we print it as given
   }
 
   function passing(f) {

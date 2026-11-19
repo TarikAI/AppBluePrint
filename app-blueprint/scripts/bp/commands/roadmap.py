@@ -3,6 +3,8 @@
 The rules (who may set what, the owner-action rule, a note for blocked) are bp.roadmap.set_task; this module parses
 the arguments, loads the plan and prints the result.
 """
+import sys
+
 from bp.core import emit, find_root
 from bp.plan import load_plan
 
@@ -24,5 +26,23 @@ def cmd_task(args):
     plan = load_plan(root)
     roadmap.set_task(root, plan, args.task, args.status, args.by, getattr(args, "note", None),
                      bool(getattr(args, "force", False)))
-    emit(args, "task", {"task": args.task, "status": args.status, "by": args.by},
-         [f"{args.task}: {args.status} (by {args.by})"])
+    data = {"task": args.task, "status": args.status, "by": args.by}
+    unmet = _unmet(root, plan, args.task) if args.status == "done" else []
+    if unmet:  # allowed, but said once (no gating in 2.0)
+        text = (f"{args.task} is done, but it depends on {', '.join(unmet)}, which "
+                f"{'is' if len(unmet) == 1 else 'are'} not done or accepted yet")
+        print(f"warning: {text}", file=sys.stderr)
+        data["warnings"] = [text]
+    emit(args, "task", data, [f"{args.task}: {args.status} (by {args.by})"])
+
+
+def _unmet(root, plan, tid):
+    """Dependencies of the task that are not done (tasks) or accepted (features), from the current context."""
+    from bp import roadmap
+    from bp.plan import load_state
+    from bp.views.context import build_context
+    try:
+        ctx = build_context(root, plan, load_state(root))
+    except Exception:  # noqa: BLE001 - the task is already recorded; a context problem must not undo or fail it
+        ctx = {"tasks": roadmap.task_rows(plan, load_state(root)), "features": []}
+    return roadmap.unmet_dependencies(plan, tid, ctx.get("tasks") or [], ctx.get("features") or [])

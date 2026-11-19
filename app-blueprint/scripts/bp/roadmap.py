@@ -192,6 +192,22 @@ def validate(plan, E, W, vctx):
 
 # ---------------------------------------------------------------- the task ladder (4.2, 4.4)
 
+def unmet_dependencies(plan, tid, tasks, features):
+    """The ids a task depends on that are not done (tasks, from the ctx task rows) or accepted (features, from the ctx
+    feature rows): done is allowed anyway, the command only warns (contract ruling for 2.0: no gating)."""
+    task = section_index(plan, "tasks").get(tid) or {}
+    status = {t["id"]: t["status"] for t in tasks}
+    feat = {f["id"]: f.get("status") for f in features if isinstance(f, dict) and isinstance(f.get("id"), str)}
+    out = []
+    for d in _strings(task.get("dependsOn")):
+        if d in status:
+            if status[d] != "done":
+                out.append(d)
+        elif feat.get(d) != "accepted" and d not in out:  # a feature the features module did not report is not accepted
+            out.append(d)
+    return out
+
+
 def _task_error(error, message, tid, next, code=1):  # noqa: A002 (next is the contract's name)
     return BlueprintError(error, message, entry=f"task {tid}", next=next, code=code)
 
@@ -307,16 +323,12 @@ def context(root, plan, state, ctx):
 # ---------------------------------------------------------------- shared by the views and status
 
 def feature_status_text(f):
-    """The status of a feature as every view shows it: a verified feature that still has criteria awaiting evaluation
-    says how many (contract 4.3)."""
-    s = f.get("status") if isinstance(f.get("status"), str) and f.get("status") else "planned"
-    n = f.get("awaitingEvaluation")
-    crit = f.get("criteria")
-    total = len(crit) if isinstance(crit, list) else 0
-    if s == "verified" and type(n) is int and n > 0:
-        verb = "criterion awaits" if n == 1 else "criteria await"
-        return f"{s}, {n} of {total} {verb} evaluation" if total and n == total and n > 1 else f"{s}, {n} {verb} evaluation"
-    return s
+    """The status of a feature as every view shows it: the `statusText` the features module puts on its entry (it owns
+    the awaiting-evaluation wording), else the bare status."""
+    t = f.get("statusText")
+    if isinstance(t, str) and t:
+        return t
+    return f.get("status") if isinstance(f.get("status"), str) and f.get("status") else "planned"
 
 
 def criteria_passing(f):

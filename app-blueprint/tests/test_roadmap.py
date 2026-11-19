@@ -476,6 +476,35 @@ class TaskCliTest(TempRoot):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("blocked (waiting on the vendor)", self.cli("render").stdout + (self.root / ".blueprint" / "ROADMAP.md").read_text(encoding="utf-8"))
 
+    def test_done_with_unmet_dependencies_warns_but_succeeds(self):
+        plan = json.loads((self.root / ".blueprint" / "blueprint.json").read_text(encoding="utf-8"))
+        plan["tasks"][0]["dependsOn"] = ["T-api-keys", "F-inbox", "T-nope"]
+        self.write_plan(plan)
+        r = self.cli("task", "T-domain", "done", "--by", "owner")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, "T-domain: done (by owner)\n")
+        self.assertEqual(r.stderr.count("warning:"), 1)
+        for dep in ("T-api-keys", "F-inbox"):
+            self.assertIn(dep, r.stderr)
+        r, out = self.run_json("task", "T-domain", "done", "--by", "owner")
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(len(out["data"]["warnings"]), 1)
+        self.assertIn("T-api-keys", out["data"]["warnings"][0])
+        # a dependency that is done leaves nothing to say, and other statuses never warn
+        self.assertEqual(self.cli("task", "T-api-keys", "done", "--by", "backend-lead").stderr, "")
+        r = self.cli("task", "T-domain", "doing", "--by", "owner")
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        plan["tasks"][0]["dependsOn"] = ["T-api-keys"]
+        self.write_plan(plan)
+        r, out = self.run_json("task", "T-domain", "done", "--by", "owner")
+        self.assertNotIn("warnings", out["data"])
+        self.assertEqual(r.stderr, "")
+
+    def test_any_status_may_follow_any_status(self):
+        for s in ("done", "todo", "blocked", "done", "doing", "todo"):
+            extra = ["--note", "why"] if s == "blocked" else []
+            self.assertEqual(self.cli("task", "T-api-keys", s, "--by", "backend-lead", *extra).returncode, 0, s)
+
     def test_force_for_the_lead(self):
         self.assertEqual(self.cli("task", "T-api-keys", "doing", "--by", "owner", "--force").returncode, 0)
 
@@ -517,7 +546,8 @@ def stub_features(**status):
              "awaitingEvaluation": 0, "blockedBy": []},
             {"id": "F-inbox", "title": "Review snags in the inbox", "milestone": "M1", "owner": "frontend-engineer",
              "draft": False, "status": status.get("inbox", "verified"), "criteria": [crit("C1", "unknown")],
-             "awaitingEvaluation": 1, "blockedBy": []}]
+             "awaitingEvaluation": 1, "blockedBy": [],
+             "statusText": "verified, 1 criterion awaits evaluation" if status.get("inbox", "verified") == "verified" else status.get("inbox")}]
 
 
 class ViewTest(TempRoot):
@@ -627,7 +657,7 @@ class ViewTest(TempRoot):
 
     def test_drafts_are_not_counted_and_never_make_a_milestone_wait(self):
         feats = stub_features(inbox="accepted")
-        feats.append(dict(stub_features()[1], id="F-sketch", status="draft", draft=True))
+        feats.append(dict(stub_features()[1], id="F-sketch", status="draft", draft=True, statusText="draft"))
         ctx = self.ctx(state={"tasks": {"T-domain": {"status": "done"}}}, features=feats)
         m = ctx["milestones"][0]
         self.assertEqual(m["progress"], {"features": 2, "accepted": 2, "tasks": 1, "done": 1})
@@ -652,19 +682,29 @@ class ViewTest(TempRoot):
         done = {"syncedAt": "2027-02-01T00:00:00Z", "tasks": {"T-domain": {"status": "done"}}}
         self.assertFalse(self.ctx(state=done, features=stub_features(inbox="accepted"))["milestones"][0]["overdue"])  # done is not overdue
 
-    def test_awaiting_evaluation_wording(self):
+    def test_the_status_text_is_the_features_modules_and_printed_as_given(self):
         f = stub_features()[1]
         self.assertEqual(roadmap.feature_status_text(f), "verified, 1 criterion awaits evaluation")
-        f["criteria"] = [{"result": "pass"}, {"result": "unknown"}, {"result": "unknown"}, {"result": "unknown"}]
-        f["awaitingEvaluation"] = 3
-        self.assertEqual(roadmap.feature_status_text(f), "verified, 3 criteria await evaluation")
-        f["criteria"] = [{"result": "unknown"}] * 3
-        self.assertEqual(roadmap.feature_status_text(f), "verified, 3 of 3 criteria await evaluation")
-        f["awaitingEvaluation"] = 0
+        f["statusText"] = "verified, 2 of 3 criteria await evaluation"
+        self.assertEqual(roadmap.feature_status_text(f), "verified, 2 of 3 criteria await evaluation")
+        del f["statusText"]  # a stub or an older features module: the bare status, no wording of our own
         self.assertEqual(roadmap.feature_status_text(f), "verified")
-        f["awaitingEvaluation"], f["status"] = 2, "built"
-        self.assertEqual(roadmap.feature_status_text(f), "built")  # only a verified feature shows the count
+        for bad in (None, 5, ""):
+            self.assertEqual(roadmap.feature_status_text(dict(f, statusText=bad)), "verified")
         self.assertEqual(roadmap.criteria_passing(stub_features()[0]), (2, 2))
+
+    def test_the_message_texts_equal_the_cores_uniq(self):
+        from bp import rules
+        for section, items in (("milestone", [{"name": "x"}, {"id": "M1"}, {"id": "M1"}, {"id": ""}]),
+                               ("task", [{"title": "t"}, {"id": "T-a"}, {"id": "T-a"}])):
+            core = []
+            rules.uniq(items, "id", section, lambda m, *a, **k: core.append(m))
+            plan = {"milestones": [], "tasks": []}
+            plan[section + "s"] = [dict(i) for i in items]
+            mine_msgs = []
+            roadmap.validate(plan, lambda m, **k: mine_msgs.append(m), lambda m, **k: None, {})
+            ids = [m for m in mine_msgs if m.startswith(("duplicate ", f"{section} without id"))]
+            self.assertEqual(ids, core)
 
     def test_features_without_a_milestone_and_tasks_without_one_come_last(self):
         p = v2_plan()
