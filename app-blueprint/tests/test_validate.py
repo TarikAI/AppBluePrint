@@ -1,0 +1,502 @@
+"""W0-A2: schema version 2 and the in-memory upgrade (contract 3), state version 2 (4.1), proofs (4.5), findings and
+codes (1.4, 7.4), BlueprintError and the output envelope (7.1, 7.3).
+
+Run: python -m unittest discover -s app-blueprint/tests
+"""
+import contextlib
+import copy
+import hashlib
+import io
+import json
+import os
+import shutil
+import subprocess
+import tempfile
+import time
+import unittest
+from pathlib import Path
+from unittest import mock
+
+import support as S
+
+from bp import core, migrate, plan as bplan, version
+
+frozen = S.load_frozen("blueprint_frozen_for_validate")
+
+# Contract 2.10, verbatim: the smallest plan that uses all four new sections. Other 2.0 tests import it from here.
+V2_EXAMPLE = r'''
+{
+  "version": 2,
+  "app": {"name": "Snag Desk", "summary": "Log snags through an API and review them in an inbox.", "platforms": ["web"], "preset": "rust-agent-engine"},
+  "stack": [{"part": "HTTP API", "choice": "Axum", "version": "0.8", "docs": "https://docs.rs/axum/latest/axum/", "verified": "2026-11-18"}],
+  "approach": {"layout": "Cargo workspace plus apps/web", "notes": ""},
+  "modules": [
+    {"id": "api", "path": "crates/snag-api", "layer": "interface", "purpose": "HTTP API for snags", "dependsOn": [], "verify": "cargo test -p snag-api"},
+    {"id": "web", "path": "apps/web", "layer": "ui", "purpose": "Inbox for reviewing snags", "dependsOn": ["api"], "verify": "pnpm --dir apps/web test"},
+    {"id": "repo", "path": "", "layer": "build", "purpose": "Workspace configuration", "dependsOn": [], "verify": "cargo metadata --format-version 1"}
+  ],
+  "phases": [
+    {"id": "P1", "name": "Walking skeleton", "goal": "One snag goes in and shows in the inbox.", "exit": "Both test suites pass", "rollback": "Revert the P1 merge commit"},
+    {"id": "P2", "name": "Offline inbox", "goal": "The inbox works without signal.", "exit": "Offline tests pass"}
+  ],
+  "milestones": [{"id": "M1", "name": "Private beta", "goal": "One site team logs and reviews snags", "due": "2027-01-15", "exit": "F-log-snag and F-inbox accepted"}],
+  "features": [
+    {"id": "F-log-snag", "title": "Log a snag", "statement": "A client records a snag through the API and gets its id back.", "kind": "add",
+     "owner": "backend-lead", "milestone": "M1", "level": "integration",
+     "criteria": [
+       {"id": "C1", "scenario": "The API runs on an empty database", "action": "POST /snags with a title", "expected": "201 with the new id; GET /snags lists it",
+        "mustNot": "Create a second row when the request is retried with the same Idempotency-Key", "verify": "cargo test -p snag-api --test snags", "test": "crates/snag-api/tests/snags.rs"},
+       {"id": "C2", "scenario": "The API runs", "action": "POST /snags without a title", "expected": "422 naming the title field", "level": "unit", "verify": "cargo test -p snag-api validation"}]},
+    {"id": "F-inbox", "title": "Review snags in the inbox", "statement": "A site lead sees open snags, newest first.", "kind": "add",
+     "owner": "frontend-engineer", "milestone": "M1", "level": "e2e", "dependsOn": ["F-log-snag"],
+     "criteria": [{"id": "C1", "scenario": "Two snags exist", "action": "Open the inbox", "expected": "Both are listed, newest first", "level": "manual"}]}
+  ],
+  "tasks": [{"id": "T-domain", "title": "Register snagdesk.example and point it at the host", "owner": "owner", "milestone": "M1", "ownerAction": true, "doneWhen": "The domain serves the inbox"}],
+  "unknowns": [{"id": "U-offline", "question": "Must the inbox work offline on site?", "severity": "high", "status": "investigating", "blocks": ["P2"],
+                "evidenceFor": [], "evidenceAgainst": [],
+                "experiment": {"plan": "Ask three site leads; measure signal at two sites", "timebox": "3d", "exit": "Two of three need offline, or every site has signal", "owner": "owner"}}],
+  "files": [
+    {"path": "Cargo.toml", "action": "create", "module": "repo", "phase": "P1", "purpose": "Workspace manifest", "infrastructure": true},
+    {"path": "crates/snag-api/src/main.rs", "action": "create", "module": "api", "phase": "P1", "purpose": "POST /snags and GET /snags", "produces": ["POST /snags", "GET /snags"], "features": ["F-log-snag"]},
+    {"path": "crates/snag-api/tests/snags.rs", "action": "create", "module": "api", "phase": "P1", "purpose": "API tests for creating and listing snags", "dependsOn": ["crates/snag-api/src/main.rs"], "features": ["F-log-snag"]},
+    {"path": "apps/web/src/Inbox.tsx", "action": "create", "module": "web", "phase": "P1", "purpose": "Inbox list of open snags", "consumes": ["GET /snags"], "features": ["F-inbox"]},
+    {"path": "apps/web/src/offline.ts", "action": "create", "module": "web", "phase": "P2", "purpose": "Offline cache for the inbox", "features": ["F-inbox"]}
+  ],
+  "patterns": [],
+  "owners": [
+    {"pattern": "*", "owner": "cto-architect"},
+    {"pattern": "crates/", "owner": "backend-lead"},
+    {"pattern": "apps/web/", "owner": "frontend-engineer"}
+  ],
+  "roster": [
+    {"id": "cto-architect", "kind": "agent", "harness": "claude-code", "role": "Plan and workspace"},
+    {"id": "backend-lead", "kind": "agent", "harness": "claude-code", "role": "API"},
+    {"id": "frontend-engineer", "kind": "agent", "harness": "codex", "role": "Inbox"},
+    {"id": "evaluator", "kind": "agent", "harness": "claude-code", "role": "Accepts features; owns no files"},
+    {"id": "owner", "kind": "human", "role": "Product owner"}
+  ],
+  "decisions": [], "ignore": [], "stores": [], "resources": []
+}
+'''
+NEW = ("milestones", "features", "tasks", "unknowns")
+
+
+def v2_plan():
+    return json.loads(V2_EXAMPLE)
+
+
+def v1_plan():
+    return json.loads(S.EXAMPLE.read_text(encoding="utf-8"))
+
+
+def v1_fixtures():
+    """Every 1.x plan the tests have: the example, examples/snag-desk as 1.3.0 left it, the 1.3.0 skeleton, and a plan
+    with unknown keys in an unusual order."""
+    snag = json.loads(json.loads((S.DATA_V1 / "snag-desk-input.json").read_text(encoding="utf-8"))["blueprint"])
+    odd = {"zeta": {"keep": [1, None]}, "version": 1, "files": [{"path": "a", "custom": {"x": 1}}], "alpha": None}
+    return {"example": v1_plan(), "snag-desk": snag, "skeleton-1.3.0": copy.deepcopy(frozen.SKELETON), "odd": odd}
+
+
+def quiet(fn, *args, **kw):
+    err = io.StringIO()
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+        return fn(*args, **kw), err.getvalue()
+
+
+class TempRoot(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix="bp v2 "))
+        (self.root / ".blueprint").mkdir()
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def write_plan(self, plan):
+        (self.root / ".blueprint" / "blueprint.json").write_text(json.dumps(plan, indent=2), encoding="utf-8")
+
+    def touch(self, rel, data="x\n"):
+        p = self.root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(data, bytes):
+            p.write_bytes(data)
+        else:
+            p.write_bytes(data.encode("utf-8"))
+        return p
+
+    def cli(self, *args, stdin=None, **env):
+        """Run the launcher on this project; --root is added to every command but hook (which reads cwd)."""
+        argv = list(args) if args[0] == "hook" else list(args) + ["--root", self.root]
+        return S.run_script(S.LAUNCHER, argv, self.root, stdin=stdin, env=S.tool_env(**env))
+
+    def load_exit(self, plan):
+        """load_plan on plan: (exit code or None, stderr)."""
+        self.write_plan(plan)
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                bplan.load_plan(self.root)
+        except SystemExit as e:
+            return e.code, err.getvalue() + (getattr(e, "message", "") or "")
+        return None, err.getvalue()
+
+
+# ---------------------------------------------------------------------------------------------------- versions
+
+class VersionTest(unittest.TestCase):
+    def test_constants(self):
+        self.assertEqual(version.SCHEMA_VERSION, 2)
+        self.assertEqual(version.SUPPORTED_SCHEMAS, (1, 2))
+        self.assertEqual(version.STATE_VERSION, 2)
+        self.assertEqual(version.MIN_SCHEMA2_TOOL, "1.9.1")
+        self.assertEqual(version.TOOL_VERSION, "1.9.1")
+
+    def test_skeleton_is_version_2(self):
+        sk = bplan.SKELETON
+        self.assertEqual(sk["version"], 2)
+        keys = list(sk)
+        self.assertEqual(keys[keys.index("ignore") + 1:keys.index("ignore") + 5], list(NEW))
+        self.assertEqual([sk[k] for k in NEW], [[], [], [], []])
+        self.assertEqual(bplan.SECTIONS_V2, NEW)
+        old = copy.deepcopy(frozen.SKELETON)
+        self.assertEqual({k: v for k, v in sk.items() if k not in NEW and k != "version"},
+                         {k: v for k, v in old.items() if k != "version"})
+
+
+# ---------------------------------------------------------------------------------------------------- migrate
+
+class UpgradePlanTest(unittest.TestCase):
+    def test_v1_is_lossless_ordered_and_idempotent(self):
+        for name, raw in v1_fixtures().items():
+            with self.subTest(fixture=name):
+                before = copy.deepcopy(raw)
+                up = migrate.upgrade_plan(raw)
+                self.assertEqual(raw, before, "upgrade_plan must not change its input")
+                self.assertEqual(up["version"], 2)
+                added = [k for k in NEW if k not in raw]
+                self.assertEqual(list(up), list(raw) + added, "keys keep their order; missing sections are appended")
+                for k in added:
+                    self.assertEqual(up[k], [])
+                back = {k: v for k, v in up.items() if k not in added}
+                back["version"] = 1
+                self.assertEqual(back, raw)
+                self.assertEqual(migrate.upgrade_plan(up), up)
+                self.assertEqual(migrate.upgrade_plan(migrate.upgrade_plan(raw)), up)
+
+    def test_result_shares_nothing_with_the_input(self):
+        raw = v1_plan()
+        up = migrate.upgrade_plan(raw)
+        up["files"][0]["path"] = "changed"
+        up["app"]["name"] = "changed"
+        self.assertEqual(raw, v1_plan())
+
+    def test_existing_new_sections_are_kept(self):
+        raw = v1_plan()
+        raw["features"] = [{"id": "F-x", "custom": True}]
+        up = migrate.upgrade_plan(raw)
+        self.assertEqual(up["features"], [{"id": "F-x", "custom": True}])
+        self.assertEqual(list(up)[-3:], ["milestones", "tasks", "unknowns"])
+
+    def test_v2_is_returned_unchanged_as_a_copy(self):
+        raw = v2_plan()
+        up = migrate.upgrade_plan(raw)
+        self.assertEqual(up, raw)
+        self.assertIsNot(up, raw)
+        up["features"].clear()
+        self.assertEqual(raw, v2_plan())
+
+    def test_other_versions_are_schema_too_new(self):
+        for v in (3, 0, -1, 99):
+            with self.subTest(version=v):
+                raw = v1_plan()
+                raw["version"] = v
+                with self.assertRaises(core.BlueprintError) as cm:
+                    migrate.upgrade_plan(raw)
+                e = cm.exception
+                self.assertIsInstance(e, SystemExit)
+                self.assertEqual((e.error, e.code), ("schema-too-new", 1))
+                self.assertEqual(e.message, f"blueprint.json is schema version {v}; this tool reads 1 and 2")
+                self.assertIn("init --refresh-tool", e.next)
+
+    def test_plan_version(self):
+        for raw, want in (({"version": 1}, 1), ({"version": 2}, 2), ({"version": 7}, 7), ({}, 0),
+                          ({"version": "1"}, 0), ({"version": True}, 0), ({"version": 1.0}, 0), ([], 0)):
+            with self.subTest(raw=raw):
+                self.assertEqual(migrate.plan_version(raw), want)
+
+
+class UpgradeStateTest(unittest.TestCase):
+    V1 = {"files": {"a.rs": {"state": "built", "by": "x", "at": "t", "note": None,
+                             "verified": {"ok": True, "cmd": "c", "at": "t", "sha": "ab" * 20}}},
+          "patterns": {}, "unplanned": ["u"], "syncedAt": "t", "head": "h", "custom": [1]}
+
+    def test_v1_state_gains_version_and_tasks(self):
+        raw = copy.deepcopy(self.V1)
+        up = migrate.upgrade_state(raw)
+        self.assertEqual(raw, self.V1)
+        self.assertEqual(up["stateVersion"], 2)
+        self.assertEqual(up["tasks"], {})
+        self.assertEqual({k: v for k, v in up.items() if k not in ("stateVersion", "tasks")}, self.V1)
+        self.assertEqual(migrate.upgrade_state(up), up)
+
+    def test_v2_state_is_kept(self):
+        raw = dict(copy.deepcopy(self.V1), stateVersion=2, tasks={"T-x": {"status": "done"}})
+        self.assertEqual(migrate.upgrade_state(raw), raw)
+
+
+# ---------------------------------------------------------------------------------------------------- load_plan
+
+class LoadPlanTest(TempRoot):
+    def test_v1_file_is_upgraded_in_memory_only(self):
+        self.write_plan(v1_plan())
+        before = (self.root / ".blueprint" / "blueprint.json").read_bytes()
+        plan, _ = quiet(bplan.load_plan, self.root)
+        self.assertEqual(plan["version"], 2)
+        self.assertEqual(plan["_from"], 1)
+        for k in NEW:
+            self.assertEqual(plan[k], [])
+        self.assertEqual((self.root / ".blueprint" / "blueprint.json").read_bytes(), before)
+        self.assertEqual(bplan.load_raw_plan(self.root), v1_plan())
+
+    def test_v2_file_loads_without_from(self):
+        self.write_plan(v2_plan())
+        plan, _ = quiet(bplan.load_plan, self.root)
+        self.assertNotIn("_from", plan)
+        self.assertEqual([f["id"] for f in plan["features"]], ["F-log-snag", "F-inbox"])
+        self.assertEqual(plan["features"][0]["criteria"][1]["level"], "unit")
+
+    def test_version_is_checked_at_load(self):
+        for value, want in ((None, "blueprint.json: version is required"),
+                            (True, "blueprint.json: version must be a whole number (got boolean)"),
+                            (1.0, "blueprint.json: version must be a whole number (got number)"),
+                            ("1", "blueprint.json: version must be a whole number (got string)"),
+                            ([1], "blueprint.json: version must be a whole number (got list)")):
+            with self.subTest(version=value):
+                plan = v1_plan()
+                plan["version"] = value
+                code, err = self.load_exit(plan)
+                self.assertEqual(code, 1)
+                self.assertIn(want, err)
+                self.assertIn("Fix it, then run: python .blueprint/bin/blueprint.py validate", err)
+        plan = v1_plan()
+        del plan["version"]
+        code, err = self.load_exit(plan)
+        self.assertEqual(code, 1)
+        self.assertIn("blueprint.json: version is required", err)
+
+    def test_too_new_version_at_load(self):
+        plan = v1_plan()
+        plan["version"] = 3
+        self.write_plan(plan)
+        with self.assertRaises(core.BlueprintError) as cm:
+            quiet(bplan.load_plan, self.root)
+        self.assertEqual((cm.exception.error, cm.exception.code), ("schema-too-new", 1))
+
+    TYPE_CASES = [
+        (("features",), "F-x", "features must be a list (got string)"),
+        (("features", 0), "x", "features[0] must be an object (got string)"),
+        (("features", 0, "criteria"), "x", "features[0].criteria must be a list (got string)"),
+        (("features", 0, "criteria", 0), 5, "features[0].criteria[0] must be an object (got number)"),
+        (("features", 0, "criteria", 0, "scenario"), 5, "features[0].criteria[0].scenario must be a string (got number)"),
+        (("features", 0, "criteria", 1, "level"), ["unit"], "features[0].criteria[1].level must be a string (got list)"),
+        (("features", 0, "draft"), "yes", "features[0].draft must be a boolean (got string)"),
+        (("features", 0, "source"), "S-x", "features[0].source must be an object (got string)"),
+        (("features", 0, "source"), {"study": 5, "behaviours": "B-x"}, "features[0].source.study must be a string (got number)"),
+        (("features", 0, "source"), {"study": "S-x", "behaviours": "B-x"}, "features[0].source.behaviours must be a list (got string)"),
+        (("features", 1, "dependsOn"), [5], "features[1].dependsOn[0] must be a string (got number)"),
+        (("features", 1, "kind"), 1, "features[1].kind must be a string (got number)"),
+        (("tasks", 0, "ownerAction"), "yes", "tasks[0].ownerAction must be a boolean (got string)"),
+        (("tasks", 0, "dependsOn"), "T-x", "tasks[0].dependsOn must be a list (got string)"),
+        (("milestones", 0, "due"), 20270115, "milestones[0].due must be a string (got number)"),
+        (("milestones",), {"id": "M1"}, "milestones must be a list (got object)"),
+        (("unknowns", 0, "experiment"), "x", "unknowns[0].experiment must be an object (got string)"),
+        (("unknowns", 0, "experiment", "timebox"), 3, "unknowns[0].experiment.timebox must be a string (got number)"),
+        (("unknowns", 0, "blocks"), "P2", "unknowns[0].blocks must be a list (got string)"),
+        (("unknowns", 0, "evidenceFor"), [1], "unknowns[0].evidenceFor[0] must be a string (got number)"),
+        (("files", 1, "features"), "F-log-snag", "files[1].features must be a list (got string)"),
+        (("files", 0, "infrastructure"), "yes", "files[0].infrastructure must be a boolean (got string)"),
+        (("phases", 0, "rollback"), 1, "phases[0].rollback must be a string (got number)"),
+    ]
+
+    def test_new_sections_and_fields_are_type_checked(self):
+        for path, value, want in self.TYPE_CASES:
+            with self.subTest(path=path, value=value):
+                plan = v2_plan()
+                node = plan
+                for step in path[:-1]:
+                    node = node[step]
+                node[path[-1]] = value
+                code, err = self.load_exit(plan)
+                self.assertEqual(code, 1, err)
+                self.assertIn("blueprint.json: " + want, err)
+
+    def test_changed_1x_sections_are_type_checked(self):
+        plan = v2_plan()
+        plan["patterns"] = [{"id": "p", "glob": "a/*.rs", "features": [3], "infrastructure": 1}]
+        plan["decisions"] = [{"id": "D1", "decision": "x", "unknown": 5, "alternatives": "a", "date": 20270101}]
+        code, err = self.load_exit(plan)
+        self.assertEqual(code, 1)
+        for want in ("patterns[0].features[0] must be a string (got number)",
+                     "patterns[0].infrastructure must be a boolean (got number)",
+                     "decisions[0].unknown must be a string (got number)",
+                     "decisions[0].alternatives must be a list (got string)",
+                     "decisions[0].date must be a string (got number)"):
+            self.assertIn(want, err)
+
+    def test_every_problem_is_reported_at_once(self):
+        plan = v2_plan()
+        plan["files"][0]["path"] = 5           # a 1.3.0 problem
+        plan["tasks"][0]["ownerAction"] = "y"   # 2.0 problems
+        plan["features"][0]["criteria"] = "x"
+        code, err = self.load_exit(plan)
+        self.assertEqual(code, 1)
+        lines = [ln for ln in err.splitlines() if ln.startswith("blueprint.json: ")]
+        self.assertEqual(lines, ["blueprint.json: files[0].path must be a string (got number)",
+                                 "blueprint.json: features[0].criteria must be a list (got string)",
+                                 "blueprint.json: tasks[0].ownerAction must be a boolean (got string)"])
+
+    def test_objects_that_global_string_fields_would_reject_pass(self):
+        plan = v2_plan()
+        plan["features"][0]["source"] = {"study": "S-x", "behaviours": ["B-1"]}
+        plan["unknowns"][0]["notes"] = "n"
+        code, err = self.load_exit(plan)
+        self.assertIsNone(code, err)
+
+    def test_null_means_missing_in_new_sections(self):
+        plan = v2_plan()
+        plan["features"][0]["notes"] = None
+        plan["features"][0]["criteria"][0]["mustNot"] = None
+        plan["unknowns"][0]["experiment"]["owner"] = None
+        plan["tasks"] = None
+        plan["files"][0]["features"] = None
+        self.write_plan(plan)
+        loaded, _ = quiet(bplan.load_plan, self.root)
+        self.assertNotIn("notes", loaded["features"][0])
+        self.assertNotIn("mustNot", loaded["features"][0]["criteria"][0])
+        self.assertNotIn("owner", loaded["unknowns"][0]["experiment"])
+        self.assertNotIn("features", loaded["files"][0])
+        self.assertEqual(loaded["tasks"], [])
+
+    def test_helpers(self):
+        self.write_plan(v2_plan())
+        plan, _ = quiet(bplan.load_plan, self.root)
+        idx = bplan.section_index(plan, "features")
+        self.assertEqual(list(idx), ["F-log-snag", "F-inbox"])
+        self.assertIs(idx["F-inbox"], plan["features"][1])
+        self.assertEqual(bplan.section_index(plan, "tasks")["T-domain"]["owner"], "owner")
+        self.assertEqual(bplan.features_of(plan["files"][1]), ["F-log-snag"])
+        self.assertEqual(bplan.features_of(plan["files"][0]), [])
+        self.assertEqual(bplan.features_of({"features": "F-x"}), [])
+
+    def test_commands_exit_1_without_a_traceback(self):
+        plan = v2_plan()
+        plan["features"][0]["criteria"] = "x"
+        self.write_plan(plan)
+        for args in (["validate"], ["status"], ["render"], ["export", "json"]):
+            r = self.cli(*args)
+            self.assertEqual(r.returncode, 1, (args, r.stdout, r.stderr))
+            self.assertIn("features[0].criteria must be a list (got string)", r.stderr)
+            self.assertNotIn("Traceback", r.stderr)
+
+    def test_schema_too_new_through_the_cli(self):
+        plan = v1_plan()
+        plan["version"] = 3
+        self.write_plan(plan)
+        r = self.cli("status")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("error: blueprint.json is schema version 3; this tool reads 1 and 2", r.stderr)
+        self.assertIn("  next: update the skill, then run init --refresh-tool", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        r = self.cli("guard", "Cargo.toml")
+        self.assertEqual(r.returncode, 2, "the guard fails closed on a plan it cannot read")
+
+
+# ---------------------------------------------------------------------------------------------------- state
+
+class StateVersionTest(TempRoot):
+    def test_load_state_upgrades_and_the_next_save_writes_it(self):
+        self.write_plan(v1_plan())
+        (self.root / ".blueprint" / "state.json").write_text(json.dumps(UpgradeStateTest.V1), encoding="utf-8")
+        st = bplan.load_state(self.root)
+        self.assertEqual((st["stateVersion"], st["tasks"]), (2, {}))
+        r = self.cli("claim", "Cargo.toml", "--by", "cto-architect")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        saved = json.loads((self.root / ".blueprint" / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved["stateVersion"], 2)
+        self.assertEqual(saved["custom"], [1])
+        self.assertEqual(saved["files"]["a.rs"], UpgradeStateTest.V1["files"]["a.rs"])
+
+    def test_missing_state_is_version_2(self):
+        st = bplan.load_state(self.root)
+        self.assertEqual(st["stateVersion"], 2)
+        self.assertEqual(st["files"], {})
+
+
+# ---------------------------------------------------------------------------------------------------- init, refresh, doctor
+
+class InitTest(unittest.TestCase):
+    def setUp(self):
+        self.base = Path(tempfile.mkdtemp(prefix="bp init "))
+        home = self.base / "home"
+        home.mkdir()
+        self.env = S.tool_env(HOME=str(home), USERPROFILE=str(home))
+
+    def tearDown(self):
+        shutil.rmtree(self.base, ignore_errors=True)
+
+    def init(self, root, script=S.LAUNCHER):
+        root.mkdir(parents=True, exist_ok=True)
+        r = S.run_script(script, ["init", "--name", "New", "--root", root], self.base, env=self.env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return r
+
+    def test_init_writes_version_2(self):
+        root = self.base / "a"
+        self.init(root)
+        plan = json.loads((root / ".blueprint" / "blueprint.json").read_text(encoding="utf-8"))
+        self.assertEqual(plan["version"], 2)
+        keys = list(plan)
+        self.assertEqual(keys[keys.index("ignore") + 1:], list(NEW))
+        state = json.loads((root / ".blueprint" / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual((state["stateVersion"], state["tasks"]), (2, {}))
+        r = S.run_script(S.LAUNCHER, ["status", "--root", root], self.base, env=self.env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("Schema version", r.stdout)
+
+    def test_init_of_a_new_project_from_another_projects_copy(self):
+        first = self.base / "first"
+        self.init(first)
+        r = self.init(self.base / "second", first / ".blueprint" / "bin" / "blueprint.py")
+        self.assertIn("Created .blueprint/", r.stdout)
+        self.assertNotIn("already the project's copy", r.stdout)
+        self.assertTrue((self.base / "second" / ".blueprint" / "bin" / "bp" / "migrate.py").is_file())
+        self.assertTrue((self.base / "second" / ".blueprint" / "bin" / "map.template.html").is_file())
+
+    def test_refresh_and_status_on_a_v1_plan(self):
+        root = self.base / "old"
+        self.init(root)
+        (root / ".blueprint" / "blueprint.json").write_text(json.dumps(v1_plan()), encoding="utf-8")
+        r = S.run_script(S.LAUNCHER, ["init", "--refresh-tool", "--root", root], self.base, env=self.env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Your blueprint is schema version 1. It keeps working.", r.stdout)
+        self.assertNotIn("migrate", r.stdout)  # the hint appears once bp/commands/migrate.py exists (W0-B)
+        r = S.run_script(S.LAUNCHER, ["status", "--root", root], self.base, env=self.env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        last = r.stdout.rstrip().splitlines()[-1]
+        self.assertTrue(last.startswith("Schema version 1"), last)
+        self.assertNotIn("migrate", last)
+
+    def test_doctor_compares_the_copy_with_min_schema2_tool(self):
+        root = self.base / "doc"
+        self.init(root)
+        (root / ".blueprint" / "bin" / "VERSION").write_text("1.9.0\n", encoding="utf-8")
+        r = S.run_script(S.LAUNCHER, ["doctor", "--root", root], self.base, env=self.env)
+        self.assertIn("blueprint.json schema: 2", r.stdout)
+        self.assertIn(f"older than {version.MIN_SCHEMA2_TOOL} and cannot read schema version 2", r.stdout)
+        (root / ".blueprint" / "bin" / "VERSION").write_text(version.TOOL_VERSION + "\n", encoding="utf-8")
+        r = S.run_script(S.LAUNCHER, ["doctor", "--strict", "--root", root], self.base, env=self.env)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertNotIn("cannot read schema version 2", r.stdout)
+
+
+if __name__ == "__main__":
+    unittest.main()
