@@ -7,6 +7,7 @@ the same views, validate errors and warnings, and load-time exits.
 import ast
 import contextlib
 import copy
+import hashlib
 import io
 import json
 import os
@@ -118,10 +119,35 @@ class GoldenViewsTest(unittest.TestCase):
         want = json.loads((S.DATA_V1 / "views.json").read_text(encoding="utf-8"))
         got = goldens.example_cases(bp)
         self.assertEqual(sorted(got), sorted(want))
+        # 1.5 row h: from 2.0 on proofs hash text with normalised line endings, so the 1.3.0 proofs of the CRLF files
+        # in examples/snag-desk go stale once. Those files are no longer verified ...
+        self.assertNotEqual(got["snag-desk"]["STRUCTURE.md"], want["snag-desk"]["STRUCTURE.md"])
+        # ... and once verify has run again (the same proofs, hashed as 2.0 hashes them) the views are 1.3.0's again.
+        got["snag-desk"] = self.snag_desk_with_renewed_proofs()
         for case in want:
             for name in ("STRUCTURE.md", "ROSTER.md"):
                 with self.subTest(case=case, view=name):
                     self.assertEqual(got[case][name].encode("utf-8"), want[case][name].encode("utf-8"))
+
+    def snag_desk_with_renewed_proofs(self):
+        inp = json.loads(goldens.SNAG_DESK.read_text(encoding="utf-8"))
+        state = json.loads(inp["state"])
+        renewed = 0
+        for path, rec in state["files"].items():
+            ver, text = rec.get("verified") or {}, inp["files"].get(path)
+            if ver.get("sha") and text is not None and "\r" in text:
+                ver["sha"] = hashlib.sha1(text.replace("\r\n", "\n").encode("utf-8")).hexdigest()
+                renewed += 1
+        self.assertGreater(renewed, 0)
+        root = Path(tempfile.mkdtemp(prefix="bp-golden-renewed-"))
+        self.addCleanup(shutil.rmtree, root, True)
+        (root / ".blueprint").mkdir()
+        goldens.write_tree(root, inp["files"])
+        (root / ".blueprint" / "blueprint.json").write_text(inp["blueprint"], encoding="utf-8")
+        (root / ".blueprint" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        with mock.patch.object(bp.subprocess, "run", side_effect=OSError("no git in the golden test")):
+            s, r = goldens.render(bp, root, scan=False)
+        return {"STRUCTURE.md": s, "ROSTER.md": r}
 
     def test_fuzz_corpus_matches_1_3_0(self):
         tf = goldens.fuzz_corpus()

@@ -498,5 +498,294 @@ class InitTest(unittest.TestCase):
         self.assertNotIn("cannot read schema version 2", r.stdout)
 
 
+# ---------------------------------------------------------------------------------------------------- core helpers
+
+class CoreHelpersTest(unittest.TestCase):
+    def test_blueprint_error(self):
+        e = core.BlueprintError("unknown-feature", "no feature F-x", entry="feature F-x", next="status --features",
+                                code=3)
+        self.assertIsInstance(e, SystemExit)
+        self.assertEqual((e.code, e.error, e.message, e.entry, e.next, str(e)),
+                         (3, "unknown-feature", "no feature F-x", "feature F-x", "status --features", "no feature F-x"))
+        self.assertEqual(core.BlueprintError("x", "m").code, 1)
+
+    def test_digests_and_ids(self):
+        self.assertEqual(core.sha256_bytes(b"abc"), "sha256:" + hashlib.sha256(b"abc").hexdigest())
+        self.assertEqual(core.canonical_json({"b": 1, "a": "\u00e9", "c": [1, {"z": None}]}),
+                         '{"a":"\u00e9","b":1,"c":[1,{"z":null}]}'.encode("utf-8"))
+        obj = {"kind": "check", "feature": "F-x"}
+        self.assertEqual(core.content_id("vr-", obj, 12),
+                         "vr-" + hashlib.sha256(core.canonical_json(obj)).hexdigest()[:12])
+        self.assertEqual(core.content_id("vr-", dict(reversed(list(obj.items()))), 12), core.content_id("vr-", obj, 12))
+
+    def test_slug(self):
+        for text, kw, want in (("Hello, World!", {}, "hello-world"), ("", {}, "x"), ("--- ***", {}, "x"),
+                               ("  Log a Snag  ", {}, "log-a-snag"), ("a" * 50, {}, "a" * 40),
+                               ("ab cd", {"max_len": 3}, "ab"), ("\u00c9t\u00e9 2026", {}, "t-2026")):
+            with self.subTest(text=text):
+                self.assertEqual(core.slug(text, **kw), want)
+
+    def test_append_jsonl(self):
+        tmp = Path(tempfile.mkdtemp(prefix="bp-jsonl-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        path = tmp / "a" / "b.jsonl"
+        core.append_jsonl(path, {"id": "1", "t": "\u00e9"})
+        core.append_jsonl(path, {"id": "2"})
+        self.assertEqual(core.read_jsonl(path), [{"id": "1", "t": "\u00e9"}, {"id": "2"}])
+        self.assertEqual(path.read_text(encoding="utf-8").count("\n"), 2)
+
+    def test_emit(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            core.emit(mock.Mock(json=True), "task", {"task": "T-x"}, ["T-x: done"])
+        self.assertEqual(json.loads(out.getvalue()), {"ok": True, "command": "task", "data": {"task": "T-x"}})
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            core.emit(mock.Mock(json=False), "task", {"task": "T-x"}, ["T-x: done", "second"])
+        self.assertEqual(out.getvalue(), "T-x: done\nsecond\n")
+
+    def test_git_ls_files(self):
+        tmp = Path(tempfile.mkdtemp(prefix="bp-git-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self.assertIsNone(core.git_ls_files(tmp / "missing"))
+        try:
+            ok = subprocess.run(["git", "init", "-q", str(tmp)], capture_output=True).returncode == 0
+        except OSError:
+            ok = False
+        if not ok:
+            self.skipTest("git is not available")
+        (tmp / "sub").mkdir()
+        (tmp / "sub" / "a.txt").write_text("a", encoding="utf-8")
+        (tmp / "skip.log").write_text("x", encoding="utf-8")
+        (tmp / ".gitignore").write_text("*.log\n", encoding="utf-8")
+        self.assertEqual(sorted(core.git_ls_files(tmp)), [".gitignore", "sub/a.txt"])
+
+
+# ---------------------------------------------------------------------------------------------------- proofs
+
+CHUNK = 65536
+
+
+class ProofDigestTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="bp-proof-"))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def digest(self, data):
+        p = self.tmp / "f"
+        p.write_bytes(data)
+        return core.proof_digest(p)
+
+    @staticmethod
+    def sha(data):
+        return "sha256:" + hashlib.sha256(data).hexdigest()
+
+    def test_text_line_endings_are_normalised(self):
+        lf = "one\ntwo\n\nth\u00e9\n".encode("utf-8")
+        for variant in (lf, lf.replace(b"\n", b"\r\n"), lf.replace(b"\n", b"\r"), b"one\r\ntwo\r\r\nth\xc3\xa9\n"):
+            with self.subTest(variant=variant):
+                self.assertEqual(self.digest(variant), self.sha(lf))
+
+    def test_binary_and_nul_are_hashed_raw(self):
+        for data in (b"\xff\xfe\r\nab", b"text\x00with nul\r\n", b"ok\r\n\xc3"):  # bad utf-8, NUL, truncated char
+            with self.subTest(data=data):
+                self.assertEqual(self.digest(data), self.sha(data))
+
+    def test_chunk_boundaries(self):
+        cases = {
+            "CRLF split across chunks": (b"a" * (CHUNK - 1) + b"\r\nb\r", b"a" * (CHUNK - 1) + b"\nb\n"),
+            "lone CR at a chunk end": (b"a" * (CHUNK - 1) + b"\rb", b"a" * (CHUNK - 1) + b"\nb"),
+            "CR CR LF across chunks": (b"a" * (CHUNK - 1) + b"\r\r\n", b"a" * (CHUNK - 1) + b"\n\n"),
+            "two-byte char split": (b"a" * (CHUNK - 1) + "\u00e9\r\n".encode("utf-8"), b"a" * (CHUNK - 1) + "\u00e9\n".encode("utf-8")),
+            "NUL in the second chunk": (b"a" * CHUNK + b"\x00\r\n", None),
+            "empty": (b"", b""),
+        }
+        for name, (data, normalised) in cases.items():
+            with self.subTest(case=name):
+                self.assertEqual(self.digest(data), self.sha(data if normalised is None else normalised))
+
+    def test_streams_in_chunks(self):
+        p = self.tmp / "big"
+        p.write_bytes(b"x\r\n" * 100_000)
+        reads = []
+        real_open = Path.open
+
+        def spy(self, *a, **kw):
+            f = real_open(self, *a, **kw)
+            real_read = f.read
+            f.read = lambda n=-1: (reads.append(n), real_read(n))[1]
+            return f
+
+        with mock.patch.object(Path, "open", spy):
+            got = core.proof_digest(p)
+        self.assertEqual(got, self.sha(b"x\n" * 100_000))
+        self.assertTrue(reads and all(0 < n <= CHUNK for n in reads), reads[:5])
+
+
+class ProofTest(TempRoot):
+    """status.Hasher, proof_inputs, proof_current (contract 4.5)."""
+
+    def setUp(self):
+        super().setUp()
+        from bp import status
+        self.status = status
+        self.plan = {"files": [
+            {"path": "a.py", "action": "create", "dependsOn": ["b.py"]},
+            {"path": "b.py", "action": "create", "dependsOn": ["c.py", "a.py"]},   # a cycle a -> b -> a
+            {"path": "c.py", "action": "create", "dependsOn": ["web-screen", "src/*.ts", "../outside.py"]},
+            {"path": "d.py", "action": "create"}], "patterns": []}
+        self.touch("a.py", "a\n")
+        self.touch("b.py", "b\n")
+        self.touch("d.py", "d\n")
+        self.touch("x/inst.ts", "i\n")
+
+    def test_hasher_hashes_each_version_of_a_file_once(self):
+        h = self.status.Hasher()
+        p = self.root / "a.py"
+        with mock.patch.object(core, "_file_digests", wraps=core._file_digests) as m:
+            d1 = h.digest(p)
+            self.assertEqual(h.digest(p), d1)
+            self.assertEqual(h.sha1(p), hashlib.sha1(b"a\n").hexdigest())
+            self.assertEqual(m.call_count, 1)
+            p.write_bytes(b"changed\n")
+            self.assertNotEqual(h.digest(p), d1)
+            self.assertEqual(m.call_count, 2)
+        self.assertEqual(d1, core.proof_digest(self.touch("other", "a\r\n")))
+
+    def test_proof_inputs_closure(self):
+        got = self.status.proof_inputs(self.root, self.plan, ["a.py"])
+        self.assertEqual(list(got), ["a.py", "b.py"])  # c.py is planned but not on disk; d.py is unrelated
+        self.assertEqual(got["b.py"], core.proof_digest(self.root / "b.py"))
+        self.touch("c.py", "c\n")
+        self.assertEqual(list(self.status.proof_inputs(self.root, self.plan, ["a.py"])), ["a.py", "b.py", "c.py"])
+        self.assertEqual(list(self.status.proof_inputs(self.root, self.plan, ["x/inst.ts", "d.py"])), ["d.py", "x/inst.ts"])
+        self.assertEqual(self.status.proof_inputs(self.root, self.plan, ["/etc/passwd", "../x", "C:/x"]), {})
+
+    def test_proof_current(self):
+        st = self.status
+        proof = {"ok": True, "cmd": "c", "at": "t", "sha": "s", "inputs": st.proof_inputs(self.root, self.plan, ["a.py"])}
+        self.assertTrue(st.proof_current(self.root, self.plan, proof, paths=["a.py"]))
+        self.assertTrue(st.proof_current(self.root, self.plan, proof))  # without paths: its own closure
+        self.touch("b.py", "edited\n")
+        self.assertFalse(st.proof_current(self.root, self.plan, proof, paths=["a.py"]), "an edited dependency")
+        self.touch("b.py", "b\r\n")
+        self.assertTrue(st.proof_current(self.root, self.plan, proof, paths=["a.py"]), "CRLF of the same text")
+        plan = copy.deepcopy(self.plan)
+        plan["files"][0]["dependsOn"].append("d.py")
+        self.assertFalse(st.proof_current(self.root, plan, proof, paths=["a.py"]), "a dependency added")
+        self.assertFalse(st.proof_current(self.root, plan, proof), "a dependency added (closure)")
+        plan = copy.deepcopy(self.plan)
+        plan["files"][0]["dependsOn"] = []
+        self.assertFalse(st.proof_current(self.root, plan, proof, paths=["a.py"]), "a dependency removed")
+        (self.root / "b.py").unlink()
+        self.assertFalse(st.proof_current(self.root, self.plan, proof, paths=["a.py"]), "an input deleted")
+
+    def test_proof_current_fails_closed(self):
+        st = self.status
+        good = st.proof_inputs(self.root, self.plan, ["a.py"])
+        for proof in (None, "x", [], {"ok": False, "inputs": good}, {"ok": 1, "inputs": good}, {"ok": "true", "inputs": good},
+                      {"ok": True, "inputs": "x"}, {"ok": True, "inputs": {"a.py": 5}}, {"ok": True, "inputs": {}},
+                      {"ok": True}, {"ok": True, "sha": None}, {"ok": True, "sha": 5}):
+            with self.subTest(proof=proof):
+                self.assertFalse(st.proof_current(self.root, self.plan, proof, paths=["a.py"]))
+        self.assertTrue(st.proof_current(self.root, self.plan, {"files": good}), "a feature proof (4.5)")
+
+    def test_1x_proofs(self):
+        st = self.status
+        self.touch("a.py", "line\n")
+        sha_lf = hashlib.sha1(b"line\n").hexdigest()
+        self.assertTrue(st.proof_current(self.root, self.plan, {"ok": True, "cmd": "c", "sha": sha_lf}, paths=["a.py"]))
+        self.assertFalse(st.proof_current(self.root, self.plan, {"ok": True, "sha": sha_lf}), "needs the path")
+        self.touch("a.py", "line\r\n")
+        self.assertTrue(st.proof_current(self.root, self.plan, {"ok": True, "sha": sha_lf}, paths=["a.py"]))
+        sha_crlf = hashlib.sha1(b"line\r\n").hexdigest()  # what 1.x stored for a CRLF file: stale once (1.5 row h)
+        self.assertFalse(st.proof_current(self.root, self.plan, {"ok": True, "sha": sha_crlf}, paths=["a.py"]))
+
+
+OK_CMD = f'"{S.PY}" -c "pass"'
+FAIL_CMD = f'"{S.PY}" -c "import sys; sys.exit(3)"'
+
+
+class VerifyProofTest(TempRoot):
+    """verify --run writes 2.0 proofs; an edited dependency makes its dependents stale; verify --stale (4.5, 4.7)."""
+
+    def plan(self, cmd=OK_CMD):
+        p = v2_plan()
+        for m in p["modules"]:
+            m["verify"] = cmd
+        return p
+
+    def rows(self):
+        r = self.cli("status", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return {x["path"]: x for x in json.loads(r.stdout)["rows"]}
+
+    def test_proofs_staleness_and_verify_stale(self):
+        self.write_plan(self.plan())
+        main = self.touch("crates/snag-api/src/main.rs", "fn main() {}\r\n")
+        self.touch("crates/snag-api/tests/snags.rs", "#[test] fn t() {}\n")
+        self.touch("Cargo.toml", "[workspace]\n")
+        r = self.cli("verify", "--run")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        state = json.loads((self.root / ".blueprint" / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["stateVersion"], 2)
+        ver = state["files"]["crates/snag-api/tests/snags.rs"]["verified"]
+        self.assertEqual(set(ver), {"ok", "cmd", "at", "sha", "inputs"})
+        self.assertIs(ver["ok"], True)
+        self.assertEqual(list(ver["inputs"]), ["crates/snag-api/src/main.rs", "crates/snag-api/tests/snags.rs"])
+        self.assertEqual(ver["inputs"]["crates/snag-api/src/main.rs"], core.proof_digest(main))
+        self.assertEqual(state["files"]["crates/snag-api/src/main.rs"]["verified"]["sha"],
+                         hashlib.sha1(b"fn main() {}\n").hexdigest(), "sha is the sha1 of the normalised text")
+        rows = self.rows()
+        self.assertEqual(rows["crates/snag-api/tests/snags.rs"]["status"], "verified")
+        self.assertEqual((rows["crates/snag-api/tests/snags.rs"]["features"], rows["Cargo.toml"]["infrastructure"]),
+                         (["F-log-snag"], True))
+        self.assertEqual({p: r["stale"] for p, r in rows.items()}, {p: False for p in rows})
+
+        self.touch("crates/snag-api/src/main.rs", "fn main() { changed }\n")
+        rows = self.rows()
+        stale = sorted(p for p, r in rows.items() if r["stale"])
+        self.assertEqual(stale, ["crates/snag-api/src/main.rs", "crates/snag-api/tests/snags.rs"])
+        self.assertEqual(rows["crates/snag-api/tests/snags.rs"]["status"], "ondisk")
+        self.assertEqual(rows["Cargo.toml"]["status"], "verified")
+        r = self.cli("status")
+        self.assertIn("↻ 2 file(s) need re-verifying (inputs changed): verify --stale --run", r.stdout)
+        r = self.cli("verify", "--stale")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("# 2 file(s)", r.stdout)
+        self.assertNotIn("cargo metadata", r.stdout)
+        r = self.cli("verify", "--stale", "--run")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(any(x["stale"] for x in self.rows().values()))
+        r = self.cli("verify", "--stale")
+        self.assertIn("No verify commands in scope.", r.stdout)
+
+    def test_a_failing_command_records_its_result(self):
+        self.write_plan(self.plan(FAIL_CMD))
+        self.touch("Cargo.toml", "[workspace]\n")
+        r = self.cli("verify", "--run")
+        self.assertEqual(r.returncode, 1)
+        ver = json.loads((self.root / ".blueprint" / "state.json").read_text(encoding="utf-8"))["files"]["Cargo.toml"]["verified"]
+        self.assertEqual({k: ver[k] for k in ("ok", "sha", "result")}, {"ok": False, "sha": None, "result": "fail"})
+        self.assertNotIn("inputs", ver)
+
+    def test_v1_plan_rows_and_no_stale_line(self):
+        plan = v1_plan()
+        for m in plan["modules"]:
+            m["verify"] = OK_CMD
+        for f in plan["files"]:
+            f.pop("verify", None)
+        self.write_plan(plan)
+        self.touch("crates/snag-core/src/lib.rs", "x\n")
+        self.assertEqual(self.cli("verify", "--run", "--owner", "backend-lead").returncode, 0)
+        self.touch("crates/snag-core/src/lib.rs", "y\n")
+        rows = self.rows()
+        self.assertTrue(rows["crates/snag-core/src/lib.rs"]["stale"])
+        self.assertEqual({(tuple(r["features"]), r["infrastructure"]) for r in rows.values()}, {((), False)})
+        self.assertNotIn("↻", self.cli("status").stdout, "status output of a version 1 plan stays 1.3.0's (W0 rule)")
+
+
 if __name__ == "__main__":
     unittest.main()
