@@ -4,7 +4,7 @@
 
 The repository's own plan: who builds which file of app-blueprint 2.0, taken from section 11 of the contract.
 
-**140 planned files, 7 patterns.** Status: ○ planned 62, ◑ on disk 78. Last sync: 2026-11-19T16:20:07Z at `7cf77ef`.
+**140 planned files, 7 patterns.** Status: ○ planned 59, ◑ on disk 81. Last sync: 2026-11-19T20:44:13Z at `a474596`.
 
 ## Build approach
 
@@ -42,7 +42,7 @@ The repository's own plan: who builds which file of app-blueprint 2.0, taken fro
 │   │   ├── stacks/
 │   │   │   └── *.md  ⟨pattern stack-presets: Stack presets the tool offers at init; 4 on disk⟩ (maintainers, W0)
 │   │   ├── agent-rules.md [modify]  ◑ Rules for builder agents (W3-R1, W3)
-│   │   ├── example-blueprint-v2.json  ○ A complete version 2 plan used by the tests and the docs (W0-B, W0)
+│   │   ├── example-blueprint-v2.json  ◑ A complete version 2 plan used by the tests and the docs (W0-B, W0)
 │   │   ├── example-blueprint.json [modify]  ◑ The version 1 example plan (maintainers, W0)
 │   │   ├── hooks.md [modify]  ◑ Hook installation and protected paths (W3-R2, W3)
 │   │   ├── integrations.md [modify]  ◑ Integrations with other tools (W3-R2, W3)
@@ -55,7 +55,7 @@ The repository's own plan: who builds which file of app-blueprint 2.0, taken fro
 │   │   │   │   ├── data.py  ◑ The db-check command (W0-A1, W0)
 │   │   │   │   ├── evidence.py  ○ The evidence command (W2-E, W2)
 │   │   │   │   ├── learn.py  ◑ feedback, report and doctor commands (W0-A2, W0)
-│   │   │   │   ├── migrate.py  ○ The migrate command (W0-B, W0)
+│   │   │   │   ├── migrate.py  ◑ The migrate command (W0-B, W0)
 │   │   │   │   ├── plan.py  ◑ init, validate, render, contracts and export commands (W0-A2, W0)
 │   │   │   │   ├── progress.py  ◑ sync, status, owner, claim, mark, verify, guard and hook commands (W0-A2, W0)
 │   │   │   │   ├── records.py  ○ The accept command (W3-V, W3)
@@ -135,7 +135,7 @@ The repository's own plan: who builds which file of app-blueprint 2.0, taken fro
 │   │   ├── test_fixtures_archives.py [modify]  ◑ Structural self-checks of the archive builders (W2-FX1, W2)
 │   │   ├── test_fixtures_text.py [modify]  ◑ Self-checks of the text builders (W2-FX2, W2)
 │   │   ├── test_ignore_anchor.py  ◑ Tests of ignore rule anchoring (W0-A1, W0)
-│   │   ├── test_migrate.py  ○ Tests of the migrate command (W0-B, W0)
+│   │   ├── test_migrate.py  ◑ Tests of the migrate command (W0-B, W0)
 │   │   ├── test_owner_anchor.py  ◑ Tests of owner rule anchoring (W0-A1, W0)
 │   │   ├── test_package.py  ◑ Package layout, 1.x names, version lines and interrupted-copy tests (W0-A1, W0)
 │   │   ├── test_plan_fuzz.py  ◑ Fuzz tests of version 1 plans (W0-A1, W0)
@@ -301,9 +301,9 @@ These files are depended on by several owners. Change them only through their ow
 | `app-blueprint/tests/test_validate.py` | create | tests | W0 | W0-A2 | ◑ on disk | Tests of validation codes and findings |  |  | `python -m unittest discover -s app-blueprint/tests` |
 | `app-blueprint/tests/test_registry_hooks.py` | create | tests | W0 | W0-A2 | ◑ on disk | Tests of the registry and every hook with a stub module |  |  | `python -m unittest discover -s app-blueprint/tests` |
 | `app-blueprint/tests/test_plan_fuzz_v2.py` | create | tests | W0 | W0-A2 | ◑ on disk | Fuzz tests of version 2 plans, run with each module loaded |  |  | `python -m unittest discover -s app-blueprint/tests` |
-| `app-blueprint/scripts/bp/commands/migrate.py` | create | tool | W0 | W0-B | ○ planned | The migrate command |  |  | `python app-blueprint/scripts/blueprint.py --version` |
-| `app-blueprint/references/example-blueprint-v2.json` | create | references | W0 | W0-B | ○ planned | A complete version 2 plan used by the tests and the docs |  |  | `python app-blueprint/scripts/blueprint.py validate --root examples/snag-desk` |
-| `app-blueprint/tests/test_migrate.py` | create | tests | W0 | W0-B | ○ planned | Tests of the migrate command |  |  | `python -m unittest discover -s app-blueprint/tests` |
+| `app-blueprint/scripts/bp/commands/migrate.py` | create | tool | W0 | W0-B | ◑ on disk | The migrate command |  |  | `python app-blueprint/scripts/blueprint.py --version` |
+| `app-blueprint/references/example-blueprint-v2.json` | create | references | W0 | W0-B | ◑ on disk | A complete version 2 plan used by the tests and the docs |  |  | `python app-blueprint/scripts/blueprint.py validate --root examples/snag-desk` |
+| `app-blueprint/tests/test_migrate.py` | create | tests | W0 | W0-B | ◑ on disk | Tests of the migrate command |  |  | `python -m unittest discover -s app-blueprint/tests` |
 | `maintainers/check_owned.py` | create | maintainers | W0 | W0-C | ◑ on disk | Pull-request ownership check: changed paths against the roster |  |  | `python -m unittest discover -s maintainers/tests` |
 | `maintainers/tests/test_check_owned.py` | create | maintainers | W0 | W0-C | ◑ on disk | Tests of the ownership check on throwaway git repositories |  |  | `python -m unittest discover -s maintainers/tests` |
 | `app-blueprint/scripts/bp/roadmap.py` | create | tool | W1 | W1-R | ○ planned | Milestones and tasks: rules, ladder, owner actions |  |  | `python app-blueprint/scripts/blueprint.py --version` |

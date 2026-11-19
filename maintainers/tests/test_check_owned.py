@@ -151,7 +151,7 @@ class CheckOwnedTests(unittest.TestCase):
         return self.git("hash-object", "-w", "--stdin", input_bytes=text.encode()).strip()
 
     def cli(self, *args, cwd=None, env=None):
-        r = subprocess.run([sys.executable, str(self.script)] + list(args), capture_output=True, text=True,
+        r = subprocess.run([sys.executable, "-I", str(self.script)] + list(args), capture_output=True, text=True,
                            encoding="utf-8", cwd=str(cwd or self.tmp), env=dict(os.environ, **(env or {})))
         return r.returncode, r.stdout, r.stderr
 
@@ -440,14 +440,26 @@ class CheckOwnedTests(unittest.TestCase):
             for name in ("json.py", "tempfile.py", "subprocess.py", "argparse.py"):
                 (d / name).write_text(evil, encoding="utf-8")
         for env in ({}, {"PYTHONPATH": str(pp)}):
-            r = subprocess.run([sys.executable, str(self.script), "--workstream", "W1-R", "--head", "w1/r"],
+            r = subprocess.run([sys.executable, "-I", str(self.script), "--workstream", "W1-R", "--head", "w1/r"],
                                capture_output=True, text=True, encoding="utf-8", cwd=str(cwd),
                                env=dict(os.environ, **env))
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertIn("PASS: W1-R changed 1 path", r.stdout)
-        r = subprocess.run([sys.executable, "-I", str(self.script), "--workstream", "W1-R", "--head", "w1/r"],
-                           capture_output=True, text=True, encoding="utf-8", cwd=str(cwd))
-        self.assertIn("PASS", r.stdout)
+
+    def test_a_run_without_dash_I_is_refused_before_git_is_called(self):
+        self.branch()
+        self.write("src/roadmap.py", "mine\n")
+        self.finish()
+        empty = Path(self.tmp) / "no-git-here"
+        empty.mkdir()
+        for args in (["--workstream", "W1-R", "--head", "w1/r"], ["--workstream", "a b", "--head", "it's"]):
+            r = subprocess.run([sys.executable, str(self.script)] + args, capture_output=True, text=True,
+                               encoding="utf-8", env=dict(os.environ, PATH=str(empty)))
+            self.assertEqual(r.returncode, 64, r.stderr)
+            self.assertEqual(r.stdout, "")
+            self.assertTrue(r.stderr.startswith("error: run this check isolated\n  next: python -I "
+                                                "maintainers/check_owned.py --workstream "), r.stderr)
+        self.assertIn('"a b"' if os.name == "nt" else "'a b'", r.stderr)  # the user's own arguments, quoted
 
     def test_caller_git_variables_change_nothing(self):
         self._attack_branch()
@@ -475,6 +487,108 @@ class CheckOwnedTests(unittest.TestCase):
         self.assertEqual(self.cli("--workstream", "W1-R", "--head", "w1/r", env=env)[0], 1)
         self.assertEqual(self.cli("--workstream", "W9", "--head", "w1/r", env=env)[0], 64)
         self.assertEqual(list(tmpdir.iterdir()), [])
+
+    def test_git_replace_on_a_tree_cannot_change_the_verdict(self):
+        self._attack_branch()
+        self.git("replace", self.git("rev-parse", "w1/r^{tree}").strip(), self.git("rev-parse", "v2^{tree}").strip())
+        self.assertEqual(self.git("diff-tree", "-r", "--name-only", "v2", "w1/r").strip(), "")  # plain git is fooled
+        code, res, _ = self.check()
+        self.assertEqual((code, self.violations(res)), (1, [("src/features.py", "owned-by-other", "W1-F")]))
+
+    def test_interrupt_while_loading_the_base_tool_is_one_line_exit_130(self):
+        scratch = Path(self.tmp) / "scratch"
+        scratch.mkdir()
+        self.branch()
+        self.write("src/roadmap.py", "mine\n")
+        self.finish()
+        with open(self.root / "app-blueprint/scripts/bp/globs.py", "a", encoding="utf-8", newline="\n") as fh:
+            fh.write("\nraise KeyboardInterrupt\n")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "base tool that is interrupted while it loads")
+        env = {"TMP": str(scratch), "TEMP": str(scratch), "TMPDIR": str(scratch)}
+        code, out, err = self.cli("--workstream", "W1-R", "--head", "w1/r", env=env)
+        self.assertEqual(code, 130)
+        self.assertEqual(err.strip().splitlines(), ["interrupted: no verdict, nothing was judged"])
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(list(scratch.iterdir()), [])
+
+    # hostile entries in the base's tool tree
+    def ls_tree(self, treeish):
+        out = []
+        for rec in self.git("ls-tree", "-z", treeish).split("\0"):
+            if rec:
+                meta, name = rec.split("\t", 1)
+                out.append(tuple(meta.split()) + (name,))
+        return [(m, t, s, n) for m, t, s, n in out]
+
+    def mktree(self, entries):
+        data = b"".join(("%s %s %s\t%s" % e).encode("utf-8") + b"\0" for e in entries)
+        return self.git("mktree", "-z", "--missing", input_bytes=data).strip()
+
+    def with_entries(self, commit, parts, change):
+        """Tree of commit with the tree at parts replaced by change(entries)."""
+        def rec(prefix):
+            entries = self.ls_tree(commit + ":" + "/".join(prefix))
+            if len(prefix) == len(parts):
+                return self.mktree(change(entries))
+            nxt = parts[len(prefix)]
+            return self.mktree([(m, t, rec(prefix + [nxt]) if n == nxt else s, n) for m, t, s, n in entries])
+        return rec([])
+
+    def commit_tree(self, tree, parent, ref):
+        sha = self.git("commit-tree", tree, "-p", parent, "-m", "hostile").strip()
+        self.git("update-ref", "refs/heads/" + ref, sha)
+        return sha
+
+    def hostile_check(self, extra, scratch):
+        """A base that holds the extra entries under app-blueprint/scripts, and a builder branch on top of it."""
+        base_tree = self.with_entries("v2", ["app-blueprint", "scripts"], lambda es: es + extra)
+        self.commit_tree(base_tree, "v2", "hbase")
+        blob = self.blob("mine\n")
+
+        def edit(es):
+            return [(m, t, blob if n == "roadmap.py" else s, n) for m, t, s, n in es]
+        head_tree = self.with_entries("hbase", ["src"], edit)
+        self.commit_tree(head_tree, "hbase", "w1/r")
+        env = {"TMP": str(scratch), "TEMP": str(scratch), "TMPDIR": str(scratch)}
+        code, out, err = self.cli("--workstream", "W1-R", "--head", "refs/heads/w1/r", "--base", "refs/heads/hbase",
+                                  "--json", env=env)
+        return code, json.loads(out), err
+
+    def test_hostile_entries_in_the_base_tool_are_refused_and_write_nothing(self):
+        scratch = Path(self.tmp) / "scratch"
+        scratch.mkdir()
+        x = self.blob("x = 1\n")
+        sub = self.mktree([("100644", "blob", x, "x.py")])
+        v2 = self.git("rev-parse", "v2").strip()
+        drive = str(Path(self.tmp) / "canary" / "x.py") if os.name == "nt" else "C:\\Users\\Public\\x.py"
+        cases = {
+            "backslash": ([("100644", "blob", x, "..\\..\\..\\x.py")], "x.py"),
+            "drive letter": ([("100644", "blob", x, drive)], "x.py"),
+            "dot dot": ([("040000", "tree", sub, "..")], ".."),
+            "symlink": ([("120000", "blob", self.blob("target"), "link.py")], "link.py"),
+            "gitlink": ([("160000", "commit", v2, "sub")], "sub"),
+            "case pair": ([("100644", "blob", x, "Dup.py"), ("100644", "blob", x, "dup.py")], "differ only in case"),
+            "device name": ([("100644", "blob", x, "NUL.txt")], "NUL.txt"),
+            "trailing dot": ([("100644", "blob", x, "x.py.")], "x.py."),
+            "colon": ([("100644", "blob", x, "a:b.py")], "a:b.py"),
+        }
+        for label, (extra, needle) in cases.items():
+            with self.subTest(label):
+                try:
+                    code, res, _ = self.hostile_check(extra, scratch)
+                except AssertionError:
+                    if label == "dot dot":
+                        continue  # this git refuses to build such a tree at all
+                    raise
+                self.assertEqual(code, 64, res)
+                self.assertTrue(res["refused"])
+                self.assertIn("will not export", res["message"])
+                self.assertIn(needle, res["message"])
+                self.assertEqual(list(scratch.iterdir()), [])                    # temp folder removed
+                self.assertFalse((scratch / "x.py").exists())
+                self.assertFalse((Path(self.tmp) / "canary").exists())
+                self.assertFalse((Path(self.tmp) / "x.py").exists())
 
     # refs
     def test_tag_named_like_the_base_makes_the_base_ambiguous(self):
@@ -575,7 +689,7 @@ class CheckOwnedTests(unittest.TestCase):
         subprocess.run([GIT, "clone", "-q", "--depth", "1", "--no-single-branch", self.root.as_uri(), str(clone)],
                        check=True, capture_output=True)
         script = clone / "maintainers" / "check_owned.py"
-        r = subprocess.run([sys.executable, str(script), "--workstream", "W1-R", "--head", "origin/w1/r",
+        r = subprocess.run([sys.executable, "-I", str(script), "--workstream", "W1-R", "--head", "origin/w1/r",
                             "--base", "origin/v2", "--json"], capture_output=True, text=True, encoding="utf-8")
         res = json.loads(r.stdout)
         self.assertEqual(r.returncode, 64, r.stdout + r.stderr)

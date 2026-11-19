@@ -244,9 +244,9 @@ Ownership follows the rules below in order; **the last matching rule wins**, as 
 
 **W0 Foundations**
 
-- ○ `app-blueprint/scripts/bp/commands/migrate.py`
-- ○ `app-blueprint/references/example-blueprint-v2.json`
-- ○ `app-blueprint/tests/test_migrate.py`
+- ◑ `app-blueprint/scripts/bp/commands/migrate.py`
+- ◑ `app-blueprint/references/example-blueprint-v2.json`
+- ◑ `app-blueprint/tests/test_migrate.py`
 
 ### W0-C
 

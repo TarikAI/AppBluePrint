@@ -2,25 +2,30 @@
 """check_owned.py: did this branch touch only the files its workstream owns?
 
 The orchestrator runs it before merging a builder's branch (contract 12.1, decision 11), from the base's copy of
-this script:
+this script, ISOLATED (python -I is mandatory; without it the script refuses at once, exit 64):
 
     python -I maintainers/check_owned.py --workstream W1-R --head <full ref or sha> [--base v2] [--json]
 
-Assumption: the user account running this script and the git binary are trusted. Nothing else is: not the branch
-under judgement, not the working tree, not the caller's environment.
+Trusted: the user account, the git binary, the Python install and this script file. Not trusted: the plan, the tool
+code and the branch under judgement. (The self-bytes check below catches a wrong or stale copy of this script, not a
+deliberately altered one: take the script from the base.)
 
+  - Isolation: -I keeps PYTHONPATH, PYTHONSTARTUP, the script's folder and the current directory off the import
+    path. A start-up hook of a non-isolated interpreter cannot be undone afterwards, so there is no re-execution:
+    without -I the script refuses before it does anything else.
   - Refs: --base and --head are a full ref name (refs/heads/..., refs/remotes/..., refs/tags/...), a full 40-hex
     sha, or a short name that matches exactly one ref of refs/heads, refs/remotes and refs/tags (listed with
     `git for-each-ref`). More than one match is refused, even when they point at the same commit. Abbreviated
     shas are refused. Every outcome prints the full ref names and shas it resolved.
   - Plan and tool come from the base's committed blobs: `.blueprint/blueprint.json` and everything under
-    app-blueprint/scripts are read with `git cat-file` at the base sha, the tool is written to a fresh temporary
-    folder, loaded from there by path with bytecode writing off, and the folder is deleted afterwards. Nothing in
-    the working tree is executed or trusted (index flags, filters, .pyc files and untracked modules cannot matter),
-    so the script may run from any checkout.
+    app-blueprint/scripts are read with `git cat-file` at the base sha. Every tree entry must be a regular file
+    (mode 100644 or 100755) whose path parts match [A-Za-z0-9._-]+ and are not . or .., not a Windows device name,
+    not ending in a dot, with no two names differing only in case; any other entry is a refusal naming it. The tool
+    is written to a fresh temporary folder (each target is confirmed to lie inside it), loaded from there by path
+    with bytecode writing off, and the folder is deleted afterwards. Nothing in the working tree is executed, so
+    the script may run from any checkout.
   - The script's own bytes (CRLF read as LF) must equal maintainers/check_owned.py at the base sha, else it
-    refuses and says to run the base's copy. It re-executes itself under `python -I` when it was not started
-    isolated, so PYTHONPATH, PYTHONSTARTUP, the script's folder and the current directory are not on the import path.
+    refuses and says to run the base's copy.
   - Every git call passes --no-replace-objects and runs in a scrubbed environment (no GIT_* variable, no global or
     system config; GIT_NO_REPLACE_OBJECTS=1).
   - Changed paths come from `git diff-tree -r -z --name-only --no-renames --diff-filter=ACMRDT <merge-base> <head>`:
@@ -32,20 +37,24 @@ under judgement, not the working tree, not the caller's environment.
 The pass text ends with the head sha to merge: the orchestrator merges exactly that sha.
 
 Exit codes: 0 every changed path is the workstream's; 1 at least one is unplanned or another's; 64 a refusal to
-judge (unknown workstream, bad or ambiguous refs, shallow clone, script differs from the base, broken or missing
-base plan, nothing to check); 2 argparse argument errors (contract decision 9). With --json every 0, 1 and 64
-outcome is one JSON object on stdout. Standard library only, Python 3.10+.
+judge (not isolated, unknown workstream, bad or ambiguous refs, shallow clone, script differs from the base, broken,
+missing or hostile base, nothing to check); 2 argparse argument errors (contract decision 9); 130 interrupted. With
+--json every 0, 1 and 64 outcome (isolation aside) is one JSON object on stdout. Standard library only, Python 3.10+.
 """
 import os
 import sys
 
 if __name__ == "__main__" and not sys.flags.isolated:
-    # Before any other import: re-run isolated (-I) so nothing next to the script, in the current directory or in
-    # PYTHONPATH can shadow a standard module. os and sys are already loaded by the interpreter's start-up.
-    def _q(a):
-        return '"%s"' % a.replace('"', '\\"') if os.name == "nt" and (not a or any(c in a for c in ' \t"')) else a
-    _argv = [sys.executable, "-I", os.path.abspath(__file__)] + sys.argv[1:]
-    sys.exit(os.spawnv(os.P_WAIT, sys.executable, [_q(a) for a in _argv]))
+    # Before any other import. Display only: this text is printed, never executed.
+    def _show(a):
+        if a and all(c.isalnum() or c in "-_./:=@" for c in a):
+            return a
+        if os.name == "nt":
+            return '"%s"' % a.replace('"', '\\"')
+        return "'%s'" % a.replace("'", "'\\''")
+    sys.stderr.write("error: run this check isolated" + chr(10) + "  next: python -I maintainers/check_owned.py "
+                     + " ".join(_show(a) for a in sys.argv[1:]) + chr(10))
+    sys.exit(64)
 
 import argparse  # noqa: E402
 import importlib.util  # noqa: E402
@@ -155,25 +164,53 @@ def check_script_is_the_bases(root, base_sha):
         raise Refusal("this script is not the base's %s" % SELF_REL, RUN_NEXT)
 
 
+PART = re.compile(r"^[A-Za-z0-9._-]+$")
+DEVICE = re.compile(r"^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$", re.IGNORECASE)
+
+
+def hostile(path, why):
+    return Refusal("the base's %s holds an entry the check will not export: %r (%s)" % (TOOL_REL, path, why),
+                   "do not use this base: have the orchestrator repair it (a regular file, plain name) before judging")
+
+
+def check_entry(path, mode, typ):
+    if typ != "blob" or mode not in ("100644", "100755"):
+        raise hostile(path, "mode %s, type %s: only regular files (100644, 100755) are accepted" % (mode, typ))
+    if not path.startswith(TOOL_REL + "/"):
+        raise hostile(path, "outside %s" % TOOL_REL)
+    for part in path.split("/"):
+        if part in (".", "..") or not PART.match(part):
+            raise hostile(path, "path part %r is not made of letters, digits, '.', '_' and '-'" % part)
+        if part.endswith(".") or DEVICE.match(part.split(".")[0]):
+            raise hostile(path, "path part %r is a reserved or ambiguous name" % part)
+
+
 def export_tool(root, base_sha, dest):
-    """app-blueprint/scripts at the base sha, written from its committed blobs into dest."""
+    """app-blueprint/scripts at the base sha, written from its committed blobs into dest. Every entry is checked
+    before anything is written; an entry that is not a plain regular file is a refusal, never skipped."""
     r = git(root, "ls-tree", "-r", "-z", "--full-tree", base_sha, "--", TOOL_REL)
-    entries = []
+    entries, seen = [], {}
     for raw in r.stdout.split(b"\0") if r.returncode == 0 else []:
         if not raw:
             continue
-        meta, _, path = raw.decode("utf-8", "surrogateescape").partition("\t")
+        meta, _, path = raw.decode("utf-8", "surrogateescape").partition(chr(9))
         mode, typ, sha = meta.split()
+        check_entry(path, mode, typ)
         parts = path.split("/")
-        if typ != "blob" or mode not in ("100644", "100755") or ".." in parts or not path.startswith(TOOL_REL + "/"):
-            raise Refusal("the base's %s holds an entry the check will not export: %s" % (TOOL_REL, path),
-                          "have the orchestrator repair the base")
+        for i in range(1, len(parts) + 1):
+            prefix = "/".join(parts[:i])
+            first = seen.setdefault(prefix.lower(), prefix)
+            if first != prefix:
+                raise hostile(path, "%r and %r differ only in case" % (first, prefix))
         entries.append((path, sha))
     if not entries:
         raise Refusal("the base has no %s" % TOOL_REL, "pass a base that has the tool with --base")
+    inside = Path(dest).resolve()
     for path, sha in entries:
-        data = git(root, "cat-file", "blob", sha).stdout
         target = Path(dest).joinpath(*path.split("/"))
+        if inside not in target.resolve().parents:
+            raise hostile(path, "it would be written outside the temporary folder")
+        data = git(root, "cat-file", "blob", sha).stdout
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
     return Path(dest) / LAUNCHER_REL
@@ -323,6 +360,9 @@ def main(argv=None):
     args = ap.parse_args(argv)
     try:
         res = run(args.workstream, args.base, args.head)
+    except KeyboardInterrupt:
+        sys.stderr.write("interrupted: no verdict, nothing was judged\n")
+        return 130
     except Refusal as e:
         if args.json:
             print(json.dumps(dict(e.info, ok=False, refused=True, error="refused", message=str(e), next=e.next_step),
