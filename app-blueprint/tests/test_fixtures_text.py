@@ -576,6 +576,12 @@ class TestHar(Base):
         self.assertEqual(F.HAR_SHAPES["GET app.example.test/api/tree response"], {"a": {"b": {"c": {"d": "..."}}}})
         tree_body = json.loads(next(e for e in entries if e["request"]["url"].endswith("/api/tree"))["response"]["content"]["text"])
         self.assertEqual(shape(tree_body), {"a": {"b": {"c": {"d": "..."}}}})      # six levels deep, cut at level 5
+        facts = F.make_har(self.p("lim.har"))[1]
+        self.assertEqual(facts["record_limitations"],
+                         {"web.payload-shape GET app.example.test/api/tree response":
+                          ["nested deeper than 4 levels; deeper levels not read"]})      # 6.2 rule 3
+        cut = sorted("web.payload-shape " + k for k, v in facts["kinds"]["web.payload-shape"].items() if "..." in json.dumps(v))
+        self.assertEqual(cut, sorted(facts["record_limitations"]))       # exactly the cut shapes carry the limitation
         self.assertTrue(any(F.URL_PASSWORD in e["request"]["url"] for e in entries))
         self.assertTrue(any("; charset=" in e["response"]["content"]["mimeType"] for e in entries))
         self.assertTrue(any(e["response"]["content"].get("encoding") == "base64" for e in entries))
@@ -1910,10 +1916,20 @@ class TestVariants(Base):
                 self.assertEqual(set(facts["never_stored"]), expected_never(har_leaks(entries)))
                 self.check_secrets(path, facts)
         entries = jload(self.build("har", "bad_base64_body")[0])["log"]["entries"]
+        body = entries[1]["response"]["content"]["text"]
         with self.assertRaises(ValueError):
-            base64.b64decode(entries[1]["response"]["content"]["text"], validate=True)
+            base64.b64decode(body, validate=True)
+        with self.assertRaises(ValueError):                        # invalid in the lenient mode too
+            base64.b64decode(body)
         with self.assertRaises(ValueError):
             json.loads(jload(self.build("har", "bad_json_body")[0])["log"]["entries"][1]["response"]["content"]["text"])
+
+    def test_padding_is_real_spaces_written_in_chunks(self):
+        path, _ = F.make_variant(self.p("t.json"), "openapi_json", "too_large")
+        data = path.read_bytes()
+        good = F.make_openapi_json(self.p("g.json"))[0].read_bytes()
+        self.assertEqual(data[:len(good)], good)
+        self.assertEqual(data[len(good):], b" " * (CAP + 1 - len(good)))
 
     def test_oversized_sqlite_is_read(self):
         path, facts = self.build("sqlite", "oversized")

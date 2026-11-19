@@ -66,6 +66,7 @@ from urllib.parse import parse_qsl, urlsplit
 TEXT_CAP = 5 * 1024 * 1024          # contract 6.2: text file read size; larger is `too-large`
 ONE_MB = 1000 * 1000
 UTF8_NOTE = "not valid UTF-8; undecodable bytes replaced"
+DEEPER_NOTE = "nested deeper than 4 levels; deeper levels not read"
 UNCLOSED_NOTE = "input ends inside an unclosed block"
 DEPTH_NOTE = "nested deeper than 6 levels; deeper levels not read"
 HERMES_NOTE = "Hermes bytecode present; not decoded (tier C: study import --from rea)"
@@ -116,6 +117,20 @@ def _write(path, data):
     if isinstance(data, str):
         data = data.encode("utf-8")
     p.write_bytes(data)
+    return p
+
+
+def _write_padded(path, data, total):
+    """``data`` followed by real spaces up to ``total`` bytes, written in 1 MiB chunks (never one big string)."""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    chunk = b" " * (1024 * 1024)
+    with open(p, "wb") as fh:
+        fh.write(data)
+        left = total - len(data)
+        while left > 0:
+            fh.write(chunk[:left])
+            left -= min(left, len(chunk))
     return p
 
 
@@ -227,6 +242,9 @@ def _hdrs(h):
         return []
     pairs = h.items() if isinstance(h, dict) else h
     return [{"name": k, "value": v} for k, v in pairs]
+
+
+BAD_BASE64 = "QUJDR"      # five data characters: invalid with and without `validate=True`
 
 
 def har_entry(method, url, status=200, *, t=0, req_headers=None, req_body=None, req_mime=None, resp_headers=None,
@@ -444,6 +462,8 @@ def make_har(path, entries=None):
     p = _write(path, _dump(_har_doc(entries)))
     facts = _text_facts(p, {} if custom else _har_kinds(), entry_count=len(entries), never_stored=har_never_stored(entries),
                         variant="custom" if custom else "normal")
+    if not custom:      # 6.2 rule 3: a record whose json_shape was cut says so
+        facts["record_limitations"] = {"web.payload-shape GET " + _API + "/tree response": [DEEPER_NOTE]}
     return p, facts
 
 
@@ -2266,7 +2286,7 @@ def make_variant(path, kind, name):
         _good(kind, path)
         data = Path(path).read_bytes()
         cap = CAPS.get(kind, TEXT_CAP)
-        _write(path, data + b" " * (cap + 1 - len(data)))
+        _write_padded(path, data, cap + 1)
         if imp:
             return path, _bad(name, error=imp, size=cap + 1)
         return path, _bad(name, ["too-large"], size=cap + 1)
@@ -2363,7 +2383,7 @@ def make_variant(path, kind, name):
             lim = ["body not parseable as JSON; not shaped"]
         else:
             bad = har_entry("GET", _ORIGIN + "/api/broken", 200, t=1, resp_mime=_JSON, resp_body="xx")
-            bad["response"]["content"].update(text="@@@@", encoding="base64")
+            bad["response"]["content"].update(text=BAD_BASE64, encoding="base64")
             lim = ["body not valid base64; not shaped"]
         p = make_har(path, [good, bad])[0]
         ik = "GET " + _API + "/items"
