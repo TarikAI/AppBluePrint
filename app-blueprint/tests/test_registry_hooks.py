@@ -173,6 +173,28 @@ class ValidationRuleExtensionTest(TempRoot):
         self.assertEqual(errors, ["unknown U-a: severity must be low, medium, high or critical",
                                   "unknown U-a: needs question, severity and status"])
 
+    def test_validation_context_comes_from_hooks(self):
+        """Review M5: validate_context(root, plan) -> dict, merged into vctx; evidence supplies evidenceIds."""
+        exts = {"unknowns.py": self.UNKNOWNS,
+                "evidence.py": "def validate_context(root, plan):\n    return {'evidenceIds': {'ev-1'}, 'studyCount': 0}\n"}
+        self.write_plan(dict(v2_plan()))
+        with extension(exts):
+            code, _, err = run_cli("validate", "--root", self.root)
+            self.assertEqual(code, 0, err)
+            seen = sys.modules["bp.unknowns"].SEEN
+            self.assertEqual(seen[-1], {"team": None, "evidenceIds": {"ev-1"}, "root": self.root, "studyCount": 0})
+            run_cli("render", "--root", self.root)  # every caller of the validate hooks builds vctx the same way
+            self.assertEqual(seen[-1]["evidenceIds"], {"ev-1"})
+            found = validate.validate_findings(v2_plan(), evidence_ids={"ev-9"})
+            self.assertEqual(seen[-1]["evidenceIds"], {"ev-9"}, "an explicit argument wins")
+        for bad in ({"evidence.py": "def validate_context(root, plan):\n    return {'x': 1}\n",
+                     "records.py": "def validate_context(root, plan):\n    return {'x': 2}\n"},
+                    {"evidence.py": "def validate_context(root, plan):\n    return {'team': 1}\n"}):
+            with self.subTest(bad=sorted(bad)), extension(bad):
+                with self.assertRaises(RuntimeError):
+                    validate.validate_findings(v2_plan())
+        self.assertIsNotNone(found)
+
     def test_team_check_still_runs_last(self):
         plan = v1_plan()
         plan["unknowns"] = [{"id": "U-a", "question": "", "severity": "low", "status": "open"}]
@@ -372,8 +394,49 @@ class ViewFileTest(CliTestBase):
             self.assertIn("removed .blueprint/ROADMAP.md", out)
             self.assertFalse(roadmap.exists())
             self.assertEqual(self.run_("render", "--check")[0], 0)
-        roadmap.write_text("stale", encoding="utf-8")  # the module gone (not built): an optional view is not wanted
+            self.write_plan(v2_plan())
+            self.assertEqual(self.run_("render")[0], 0)
+            self.assertTrue(roadmap.exists())
+        # the module gone: a view it wrote is no longer wanted
         self.assertEqual(self.run_("render", "--check")[0], 1)
+        self.run_("render")
+        self.assertFalse(roadmap.exists())
+
+    def test_any_view_name_is_tracked_with_new_files_only(self):
+        """Review M4: render records the views it wrote in state.json (generatedViews); one that no module returns
+        any more is deleted, and render --check reports it. No list to edit; base views are never deleted."""
+        notes = self.root / ".blueprint" / "NOTES-2.md"
+        src = "WANT = [True]\ndef views(ctx):\n    return {'NOTES-2.md': 'n\\n'} if WANT[0] else {}\n"
+        state_path = self.root / ".blueprint" / "state.json"
+        with extension({"views/features_md.py": src}):
+            mod = importlib.import_module("bp.views.features_md")
+            self.assertEqual(self.run_("render")[0], 0)
+            self.assertTrue(notes.exists())
+            self.assertEqual(json.loads(state_path.read_text(encoding="utf-8"))["generatedViews"], ["NOTES-2.md"])
+            mod.WANT[0] = False
+            code, out, _ = self.run_("render", "--check")
+            self.assertEqual(code, 1)
+            self.assertIn("NOTES-2.md", out)
+            code, out, _ = self.run_("render")
+            self.assertIn("removed .blueprint/NOTES-2.md", out)
+            self.assertFalse(notes.exists())
+            self.assertEqual(json.loads(state_path.read_text(encoding="utf-8"))["generatedViews"], [])
+            for base in ("STRUCTURE.md", "ROSTER.md", "map.html"):
+                self.assertTrue((self.root / ".blueprint" / base).exists())
+        hand = self.root / ".blueprint" / "HAND.md"
+        hand.write_text("mine", encoding="utf-8")
+        self.assertEqual(self.run_("render", "--check")[0], 0, "a file render never wrote is not render's")
+        self.assertTrue(hand.exists())
+        self.assertFalse(hasattr(registry, "OPTIONAL_VIEWS"))
+
+    def test_a_v1_render_adds_nothing_to_state(self):
+        self.write_plan(v1_plan())
+        state_path = self.root / ".blueprint" / "state.json"
+        self.run_("sync")
+        before = state_path.read_text(encoding="utf-8")
+        self.run_("render")
+        self.assertEqual(state_path.read_text(encoding="utf-8"), before)
+        self.assertNotIn("generatedViews", json.loads(before))
 
     def test_a_view_hook_may_not_write_outside_blueprint_or_over_a_base_view(self):
         from bp.views.render import render_all
