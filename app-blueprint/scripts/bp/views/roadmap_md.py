@@ -5,11 +5,7 @@ tasks; "Not in a milestone"; "Open questions"; "Timeline". Features count only w
 `accepted` ones count as done (4.3).
 """
 from bp import roadmap
-from bp.roadmap import cell, criteria_passing, feature_status_text
-
-
-def _line(text):
-    return " ".join(str(text).split())
+from bp.roadmap import cell, criteria_passing, feature_status_text, line as _line
 
 
 def _feature_table(feats):
@@ -49,7 +45,7 @@ def views(ctx):
     for m in ms:
         mf = [f for f in feats if f.get("milestone") == m["id"]]
         mt = [t for t in ts if t["milestone"] == m["id"]]
-        head = f"## {m['id']} {_line(m['name'])}" + (f" · due {m['due']}" if m["due"] else "") + " · " + roadmap.progress_text(m)
+        head = f"## {_line(m['id'])} {_line(m['name'])}" + (f" · due {_line(m['due'])}" if m["due"] else "") + " · " + roadmap.progress_text(m)
         out += ["", head + (" · done" if m["done"] else "") + (" · overdue" if m["overdue"] else "")]
         goal = [x for x in (f"Goal: {_line(m['goal'])}" if m["goal"] else "", f"Exit: {_line(m['exit'])}" if m["exit"] else "") if x]
         if goal:
@@ -60,7 +56,7 @@ def views(ctx):
             out += [""] + _task_table(mt)
         blockers = list(dict.fromkeys(m["blockedBy"] + [u for f in mf for u in (f.get("blockedBy") or []) if isinstance(u, str)]))
         if blockers:
-            out += ["", "Blocked by: " + ", ".join(_blocker(ctx, u) for u in blockers)]
+            out += ["", "Blocked by: " + ", ".join(_line(_blocker(ctx, u)) for u in blockers)]
     known = {m["id"] for m in ms}
     loose_f = [f for f in feats if f.get("milestone") not in known]
     loose_t = [t for t in ts if t["milestone"] not in known]
@@ -84,7 +80,10 @@ def views(ctx):
                        f"| {cell(u.get('status') or '')} | {cell(blocks)} | {cell(exps)} | for {n_for} / against {n_against} |")
     dated = sorted((m for m in ms if roadmap.is_date(m["due"])), key=lambda m: m["due"])  # stable: plan order within a day
     if dated:
-        out += ["", "## Timeline", "", "| Due | Milestone | Status |", "|---|---|---|"]
+        out += ["", "## Timeline", ""]
+        if roadmap._syncd(ctx.get("state") or {}) is None:  # overdue is relative to syncedAt, so say when there is none
+            out += ["Not synced yet: overdue is not shown.", ""]
+        out += ["| Due | Milestone | Status |", "|---|---|---|"]
         for m in dated:
             out.append(f"| {m['due']} | {cell(m['id'] + ' ' + m['name'])} | " + ("done" if m["done"] else "overdue" if m["overdue"] else "open") + " |")
     return {"ROADMAP.md": "\n".join(out) + "\n"}

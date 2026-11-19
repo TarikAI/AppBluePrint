@@ -371,7 +371,8 @@ class TaskLadderTest(TempRoot):
     def test_only_the_owner_sets_a_task(self):
         e = self.refused("wrong-owner", 3, "T-api-keys", "doing", "owner")
         self.assertIn("backend-lead", e.message)
-        self.assertIn("--force", e.next)
+        self.assertIn("--force", e.message)
+        self.assertIn("task T-api-keys doing --by backend-lead", e.next)
         self.assertFalse((self.root / ".blueprint" / "state.json").exists())
         self.set("T-api-keys", "doing", "owner", force=True)  # the lead's call
         self.assertEqual(self.state_task("T-api-keys")["by"], "owner")
@@ -533,7 +534,8 @@ class TaskCliTest(TempRoot):
         r = self.cli("status", "--milestone", "M9")
         self.assertEqual(r.returncode, 1)
         self.assertIn("M9", r.stderr)
-        self.assertIn("next: milestones: M1", r.stderr)
+        self.assertIn("(milestones: M1)", r.stderr)
+        self.assertIn("next: python .blueprint/bin/blueprint.py status", r.stderr)
 
 
 def stub_features(**status):
@@ -658,7 +660,10 @@ class ViewTest(TempRoot):
     def test_drafts_are_not_counted_and_never_make_a_milestone_wait(self):
         feats = stub_features(inbox="accepted")
         feats.append(dict(stub_features()[1], id="F-sketch", status="draft", draft=True, statusText="draft"))
-        ctx = self.ctx(state={"tasks": {"T-domain": {"status": "done"}}}, features=feats)
+        p = v2_plan()
+        p["features"].append({"id": "F-sketch", "title": "Review snags in the inbox", "kind": "add", "owner": "frontend-engineer",
+                              "milestone": "M1", "draft": True})
+        ctx = self.ctx(p, state={"tasks": {"T-domain": {"status": "done"}}}, features=feats)
         m = ctx["milestones"][0]
         self.assertEqual(m["progress"], {"features": 2, "accepted": 2, "tasks": 1, "done": 1})
         self.assertTrue(m["done"])
@@ -766,8 +771,8 @@ class ViewTest(TempRoot):
     def test_payload_shapes(self):
         ctx = self.ctx(state={"tasks": {"T-domain": {"status": "done", "by": "owner", "at": "2027-01-01T00:00:00Z", "note": "ok"}}})
         payload = roadmap.map_payload(ctx)
-        self.assertEqual(set(payload), {"milestones", "tasks"})
-        self.assertEqual(roadmap.status_json(ctx), payload)
+        self.assertEqual(set(payload), {"milestones", "tasks", "roadmap"})
+        self.assertEqual(roadmap.status_json(ctx), {k: payload[k] for k in ("milestones", "tasks")})
         m, t = payload["milestones"][0], payload["tasks"][0]
         self.assertEqual(set(m), {"id", "name", "goal", "due", "exit", "features", "tasks", "progress", "done", "overdue", "blockedBy"})
         self.assertEqual(set(m["progress"]), {"features", "accepted", "tasks", "done"})
@@ -977,6 +982,213 @@ class ModuleShapeTest(unittest.TestCase):
         import ast
         for path in (S.PACKAGE / "roadmap.py", S.PACKAGE / "commands" / "roadmap.py", S.PACKAGE / "views" / "roadmap_md.py"):
             ast.parse(path.read_text(encoding="utf-8"), feature_version=(3, 10))
+
+
+PREFIX = "python .blueprint/bin/blueprint.py"
+
+
+class ReviewRoundOneTest(TempRoot):
+    """The fixes of review round 1 (M1 to M3, N1 to N7)."""
+    ctx = ViewTest.ctx
+
+    def setUp(self):
+        super().setUp()
+        self.plan_json = v2_plan()
+
+    # M1: a value is validated whole, so a trailing newline (or any stray whitespace) is never part of an id or a date
+    def test_ids_and_dates_are_matched_whole(self):
+        for bad in ("M2\n", "M2\r\n", " M2", "M\n2", "M2 "):
+            p = v2_plan()
+            p["milestones"].append({"id": bad, "name": "x", "goal": "y"})
+            self.assertIn("bad-id", [f["code"] for f in findings(p) if f["entry"] and f["entry"].startswith("milestone")], repr(bad))
+        for bad in ("T-x\n", "T-x\r\n", " T-x", "T-\nx", "T-x "):
+            p = v2_plan()
+            add_task(p, id=bad)
+            self.assertIn("bad-id", [f["code"] for f in findings(p) if f["entry"] and f["entry"].startswith("task")], repr(bad))
+        for bad in ("2027-01-15\n", "2027-01-15\r\n", " 2027-01-15", "2027-01-\n15", "2027-01-15 "):
+            self.assertIn("milestone-due", codes(plan_with(milestones__due=bad)), repr(bad))
+            self.assertFalse(roadmap.is_date(bad), repr(bad))
+
+    # M2: membership is the plan's; the payload only supplies statuses
+    def test_a_feature_the_payload_does_not_report_is_planned_and_blocks_done(self):
+        done = {"syncedAt": "2027-01-10T09:00:00Z", "tasks": {"T-domain": {"status": "done"}}}
+        for feats in ([stub_features(inbox="accepted")[0]],  # F-inbox left out
+                      [stub_features(inbox="accepted")[0], dict(stub_features(inbox="accepted")[1], milestone=None)]):
+            ctx = self.ctx(state=done, features=feats)
+            m = ctx["milestones"][0]
+            self.assertFalse(m["done"])
+            self.assertEqual(m["progress"], {"features": 2, "accepted": 1, "tasks": 1, "done": 1})
+            self.assertEqual(m["features"], ["F-log-snag", "F-inbox"])
+            text = roadmap_md.views(ctx)["ROADMAP.md"]
+            self.assertIn("1 of 2 features accepted", text)
+            self.assertIn("Features: accepted 1 of 2", text)  # the summary agrees with the milestone
+            self.assertIn("| F-inbox Review snags in the inbox | planned |", text)
+            self.assertEqual(roadmap.counts(ctx)["milestonesDone"], 0)
+
+    def test_the_plans_milestone_wins_over_the_payloads(self):
+        feats = [dict(f, milestone="M7") for f in stub_features(inbox="accepted")]  # the payload disagrees: not trusted
+        ctx = self.ctx(state={"tasks": {"T-domain": {"status": "done"}}}, features=feats)
+        self.assertFalse(ctx["milestones"][0]["done"])
+        self.assertEqual(ctx["milestones"][0]["progress"]["accepted"], 0)
+        self.assertEqual(ctx["milestones"][0]["features"], ["F-log-snag", "F-inbox"])
+        extra = stub_features(inbox="accepted") + [dict(stub_features()[0], id="F-ghost", milestone="M1", status="accepted")]
+        self.assertEqual(self.ctx(features=extra)["milestones"][0]["features"], ["F-log-snag", "F-inbox"])  # not in the plan
+
+    # M3: a roster id is human only when every entry with that id is
+    def duplicate_roster(self, first_kind, second_kind):
+        plan = v2_plan()
+        i = next(i for i, r in enumerate(plan["roster"]) if r["id"] == "owner")
+        human = plan["roster"].pop(i)
+        plan["roster"][i:i] = [dict(human, kind=first_kind), dict(human, kind=second_kind)]
+        self.write_plan(plan)
+        return plan
+
+    def test_duplicate_roster_entries_with_conflicting_kinds_are_not_human(self):
+        for first, second in (("agent", "human"), ("human", "agent")):
+            plan = self.duplicate_roster(first, second)
+            self.assertIn("owner-action-human", codes(plan))
+            with self.assertRaises(BlueprintError) as cm:
+                roadmap.set_task(self.root, bplan.load_plan(self.root), "T-domain", "done", "owner")
+            self.assertEqual((cm.exception.error, cm.exception.code), ("owner-action-human", 3))
+        plan = self.duplicate_roster("human", "human")  # the same kind twice is still a person
+        self.assertNotIn("owner-action-human", codes(plan))
+        roadmap.set_task(self.root, bplan.load_plan(self.root), "T-domain", "done", "owner")
+
+    def test_a_repeated_task_id_with_an_owner_action_is_one(self):
+        plan = v2_plan()
+        plan["tasks"].insert(0, {"id": "T-domain", "title": "x", "owner": "backend-lead", "milestone": "M1"})
+        self.write_plan(plan)
+        with self.assertRaises(BlueprintError) as cm:
+            roadmap.set_task(self.root, bplan.load_plan(self.root), "T-domain", "done", "backend-lead")
+        self.assertEqual(cm.exception.error, "owner-action-human")
+
+    # N6: a person's done owner action is not for an agent to move
+    def test_a_non_human_cannot_change_a_done_owner_action(self):
+        plan = v2_plan()
+        plan["roster"].append({"id": "co-owner", "kind": "human"})
+        self.write_plan(plan)
+        loaded = bplan.load_plan(self.root)
+        roadmap.set_task(self.root, loaded, "T-domain", "done", "owner")
+        for status in ("todo", "doing", "blocked", "done"):
+            for force in (False, True):
+                with self.assertRaises(BlueprintError) as cm:
+                    roadmap.set_task(self.root, loaded, "T-domain", status, "backend-lead", note="n", force=force)
+                self.assertEqual((cm.exception.error, cm.exception.code), ("owner-action-human", 3), (status, force))
+        state = json.loads((self.root / ".blueprint" / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual((state["tasks"]["T-domain"]["status"], state["tasks"]["T-domain"]["by"]), ("done", "owner"))
+        roadmap.set_task(self.root, loaded, "T-domain", "todo", "co-owner", force=True)  # a person may
+
+    # N1: every next runs as printed
+    def refused_next(self, loaded, *args):
+        with self.assertRaises(BlueprintError) as cm:
+            roadmap.set_task(self.root, loaded, *args)
+        return cm.exception.next
+
+    def test_next_steps_are_commands_that_run(self):
+        plan = v2_plan()
+        plan["roster"].append({"id": "co-owner", "kind": "human"})
+        add_task(plan, id="T-api", owner="backend-lead")
+        self.write_plan(plan)
+        loaded = bplan.load_plan(self.root)
+        for args in (("T-nope", "done", "owner"), ("T-api", "done", "nobody"), ("T-api", "finished", "backend-lead"),
+                     ("T-api", "blocked", "backend-lead"), ("T-api", "done", "owner"), ("T-domain", "done", "backend-lead")):
+            nxt = self.refused_next(loaded, *args)
+            self.assertTrue(nxt.startswith(PREFIX + " "), nxt)
+            self.assertNotIn("<", nxt)
+        self.assertIn("task T-domain done --by owner", self.refused_next(loaded, "T-domain", "done", "backend-lead"))
+        self.assertIn("--by backend-lead", self.refused_next(loaded, "T-api", "blocked", "backend-lead"))
+        self.assertIn("--by backend-lead", self.refused_next(loaded, "T-api", "done", "owner"))
+
+    def test_version_1_next_is_migrate(self):
+        (self.root / ".blueprint" / "blueprint.json").write_text(S.EXAMPLE.read_text(encoding="utf-8"), encoding="utf-8")
+        out = json.loads(self.cli("task", "T-domain", "done", "--by", "owner", "--json").stdout)
+        self.assertEqual(out["error"]["next"], PREFIX + " migrate")
+        ctx = {"plan": bplan.load_plan(self.root), "milestones": [], "tasks": []}
+        with self.assertRaises(BlueprintError) as cm:
+            roadmap.status_lines(ctx, type("A", (), {"milestone": "M1"})())
+        self.assertEqual(cm.exception.next, PREFIX + " migrate")
+
+    def test_unknown_milestone_next_runs(self):
+        with self.assertRaises(BlueprintError) as cm:
+            roadmap.status_lines(self.ctx(), type("A", (), {"milestone": "M9"})())
+        self.assertEqual(cm.exception.next, PREFIX + " status")
+
+    # N2 and N3: one line per value; no raw HTML
+    def test_status_tasks_prints_one_line_per_task(self):
+        ctx = self.ctx(state={"tasks": {"T-domain": {"status": "blocked", "note": "waiting\n  on\r\nDNS\t now"}}})
+        lines = roadmap.status_lines(ctx, type("A", (), {"tasks": True, "milestone": None})())
+        task_lines = [l for l in lines if "T-domain" in l and "blocked" in l]
+        self.assertEqual(len(task_lines), 1)
+        self.assertIn("[waiting on DNS now]", task_lines[0])
+        self.assertFalse(any("\n" in l or "\r" in l for l in lines))
+
+    def test_plan_text_in_roadmap_md_is_escaped_and_on_one_line(self):
+        p = v2_plan()
+        p["app"]["name"] = "<b>Snag</b> & Co"
+        p["milestones"][0]["name"] = "Beta <img src=x onerror=alert(1)>\n## Injected"
+        p["milestones"][0]["goal"] = "a\n# Heading\n| x | y |"
+        p["tasks"][0]["title"] = "Pay <script>x</script> & go\n## Fake | cell"
+        text = roadmap_md.views(self.ctx(p, state={"tasks": {"T-domain": {"status": "blocked", "note": "<i>n</i>\n| z"}}}))["ROADMAP.md"]
+        for raw in ("<b", "<img", "<script", "<i>"):
+            self.assertNotIn(raw, text)
+        self.assertIn("&lt;b>Snag&lt;/b> &amp; Co", text)
+        heads = [l for l in text.splitlines() if l.startswith("#")]
+        self.assertEqual(len(heads), 4, heads)  # title, M1, Open questions, Timeline: no value made a heading
+        self.assertFalse(any(l.startswith("| x") for l in text.splitlines()))
+        self.assertIn("\\| cell", text)
+
+    # N7
+    def test_the_timeline_says_when_there_is_no_sync(self):
+        line = "Not synced yet: overdue is not shown."
+        self.assertIn(line, roadmap_md.views(self.ctx(state={}))["ROADMAP.md"])
+        self.assertIn(line, roadmap_md.views(self.ctx(state={"syncedAt": None}))["ROADMAP.md"])
+        self.assertNotIn(line, roadmap_md.views(self.ctx())["ROADMAP.md"])
+        p = v2_plan()
+        p["milestones"][0].pop("due")
+        self.assertNotIn(line, roadmap_md.views(self.ctx(p, state={}))["ROADMAP.md"])  # no timeline, nothing to say
+
+    # N4: the tab reads what ROADMAP.md reads
+    def test_the_payload_carries_the_numbers_roadmap_md_prints(self):
+        ctx = self.ctx(features=[], unknowns=[])
+        extra = roadmap.map_payload(ctx)["roadmap"]
+        self.assertEqual(extra["counts"], roadmap.counts(ctx))
+        self.assertEqual(sorted(f["id"] for f in extra["features"]), ["F-inbox", "F-log-snag"])
+        self.assertEqual([u["id"] for u in extra["unknowns"]], ["U-offline"])
+        self.assertNotIn("roadmap", roadmap.status_json(ctx))
+        json.dumps(extra)
+
+
+@unittest.skipUnless(shutil.which("node"), "node is not installed")
+class TabRoundOneTest(TabRunTest):
+    """The tab and ROADMAP.md tell the same story without the features and unknowns modules, and ids are inert."""
+
+    def test_same_numbers_without_features_and_unknowns(self):
+        helper = ViewTest("test_deterministic")
+        helper.setUp()
+        self.addCleanup(helper.tearDown)
+        ctx = helper.ctx(features=[], unknowns=[])
+        d = dict(roadmap.map_payload(ctx), features=[], unknowns=[], syncedAt=None)
+        d["milestones"][0]["due"] = "2027-13-45"
+        (out,) = self.run_tab([d])
+        text = out["text"]
+        self.assertIn("0 / 2", text)  # features accepted: the plan's two, none reported accepted
+        self.assertIn("U-offline", text)  # the open questions card
+        self.assertNotIn("Timeline", text)  # an invalid date is not on the timeline
+        d["milestones"][0]["due"] = "2027-01-15"
+        (out,) = self.run_tab([d])
+        self.assertIn("Timeline", out["text"])
+        self.assertIn("Not synced yet: overdue is not shown.", out["text"])
+
+    def test_ids_are_not_looked_up_through_the_prototype(self):
+        d = {"milestones": [{"id": "constructor", "name": "C", "goal": "", "features": ["__proto__", "toString"], "tasks": ["hasOwnProperty"], "progress": {}},
+                            {"id": "__proto__", "name": "P", "features": [], "tasks": [], "progress": {}}],
+             "tasks": [{"id": "hasOwnProperty", "title": "T", "owner": "o", "milestone": "constructor", "status": "todo"},
+                       {"id": "T-loose", "title": "L", "owner": "o", "milestone": "toString", "status": "todo"}],
+             "features": [{"id": "F-x", "title": "X", "milestone": "__proto__", "status": "planned", "criteria": []}], "unknowns": []}
+        (out,) = self.run_tab([d])
+        for want in ("constructor C", "__proto__ P", "hasOwnProperty", "Not in a milestone", "T-loose", "planned"):
+            self.assertIn(want, out["text"])
+        self.assertNotIn("function", out["text"])
 
 
 if __name__ == "__main__":
