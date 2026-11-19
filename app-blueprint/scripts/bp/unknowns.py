@@ -26,7 +26,8 @@ NOT_BLOCKING_SEVERITIES = ("low", "medium")  # below the blocking threshold (2.6
 NOT_BLOCKING_STATUSES = ("resolved", "dropped")
 KINDS = ("phase", "milestone", "feature")
 TIMEBOX = re.compile(r"[0-9]{1,3}[hdw]")
-NEXT_UNKNOWNS = "blueprint.py status --unknowns (or claim again with --force if the lead says so)"
+NEXT_UNKNOWNS = "python .blueprint/bin/blueprint.py status --unknowns"
+RESOLVE_FIRST = " Resolve it first, or use --force if the lead says so."
 
 CODES = [
     (r"^unknown \S+: needs question, severity and status", "unknown-incomplete"),
@@ -135,8 +136,9 @@ def is_blocking(u):
 # --- blocking -------------------------------------------------------------------------------------------------------
 
 def _scan(plan):
-    """(blocked, info, hits): the blocking() result, {unknown id: (severity, status)} of those that block, and the
-    list indexes of the unknowns that block at least one id of this plan."""
+    """(blocked, info, hits, why): the blocking() result, {unknown id: (severity, status)} of those that block, the
+    list indexes of the unknowns that block at least one id of this plan, and why each blocked feature is blocked:
+    {"direct": {fid: [uid]}, "milestone": {fid: (mid, [uid])}}."""
     out = {"phases": set(), "milestones": set(), "features": set(), "by": {}}
     info, hits = {}, set()
     ids = _plan_ids(plan)
@@ -158,13 +160,16 @@ def _scan(plan):
                 add(f"{kind}:{tid}", uid)
                 info[uid] = (u.get("severity"), u.get("status"))
                 hits.add(i)
+    why = {"direct": {k[len("feature:"):]: list(v) for k, v in out["by"].items() if k.startswith("feature:")},
+           "milestone": {}}
     for f in _dicts(plan, "features"):  # a blocked milestone blocks its features (4.3 rule 2 reads them from here)
         fid, mid = f.get("id"), f.get("milestone")
         if isinstance(fid, str) and fid and isinstance(mid, str) and mid in out["milestones"]:
             out["features"].add(fid)
+            why["milestone"][fid] = (mid, list(out["by"].get(f"milestone:{mid}", [])))
             for uid in out["by"].get(f"milestone:{mid}", []):
                 add(f"feature:{fid}", uid)
-    return out, info, hits
+    return out, info, hits, why
 
 
 def blocking(plan):
@@ -321,7 +326,8 @@ def _payload(u, i, blocking_now):
 
 def context(root, plan, state, ctx):
     """ctx["unknowns"] (8.5) and ctx["blocked"] (1.4): the ids blocked by open, severe unknowns."""
-    ctx["blocked"], _, hits = _scan(plan)
+    ctx["blocked"], _, hits, _ = _scan(plan)
+    ctx["blocked"]["files"] = blocked_files(plan)  # planned files that claim refuses (2.6); an extra key
     items = plan.get("unknowns") if isinstance(plan, dict) else None
     ctx["unknowns"] = [_payload(u, i, i in hits)
                        for i, u in enumerate(items if isinstance(items, list) else []) if isinstance(u, dict)]
@@ -354,34 +360,86 @@ def _spellings(root, path):
     return out
 
 
-def _phase_of(plan, spellings):
+def _entry_of(plan, spellings):
+    """The planned file, or else the pattern, that the claimed path names (a pattern instance follows its pattern)."""
     keys = {path_key(s) for s in spellings}
     for f in _dicts(plan, "files"):
         if isinstance(f.get("path"), str) and path_key(norm(f["path"])) in keys:
-            return f.get("phase")
+            return f
     for p in _dicts(plan, "patterns"):
         if isinstance(p.get("glob"), str) and p["glob"]:
             rx = pattern_instance_rx(p["glob"])
             if any(rx.match(s) for s in spellings):
-                return p.get("phase")
+                return p
     return None
 
 
+def _served(entry):
+    """The feature ids an entry serves, from the plan itself; an infrastructure entry serves none."""
+    if entry.get("infrastructure") is True:
+        return []
+    out = []
+    for f in entry.get("features") if isinstance(entry.get("features"), list) else []:
+        if isinstance(f, str) and f and f not in out:
+            out.append(f)
+    return out
+
+
+def _claim_block(entry, blocked):
+    """"phase" when the entry's phase is blocked, "features" when it serves features and every one is blocked, else
+    None (an infrastructure file, a file with no feature, or one serving a free feature is claimable)."""
+    phase = entry.get("phase")
+    if isinstance(phase, str) and phase and phase in blocked["phases"] and blocked["by"].get(f"phase:{phase}"):
+        return "phase"
+    served = _served(entry)
+    if served and all(f in blocked["features"] for f in served):
+        return "features"
+    return None
+
+
+def blocked_files(plan):
+    """The planned file paths that claim refuses (2.6): in a blocked phase, or serving only blocked features."""
+    blocked = blocking(plan)
+    return {f["path"] for f in _dicts(plan, "files") if isinstance(f.get("path"), str)
+            and _claim_block(f, blocked)}
+
+
+def _named(uids, info):
+    return ", ".join(_phrase(u, *info.get(u, (None, None))) for u in uids)
+
+
 def refuse(action, root, plan, path, by):
-    """Refuse a claim on a file of a phase that an open, severe unknown blocks (2.6): (message, error, next), exit 3.
-    Every other action, and every other path, is not this module's business."""
+    """Refuse a claim (2.6): (message, "blocked-by-unknown", next), exit 3. A file is refused when its phase is
+    blocked by an open, severe unknown, or when it serves at least one feature and every feature it serves is blocked
+    (by an unknown naming the feature, or its milestone). Everything else is not this module's business."""
     if action != "claim" or not isinstance(plan, dict):
         return None
-    phase = _phase_of(plan, _spellings(root, path))
-    if not isinstance(phase, str) or not phase:
+    entry = _entry_of(plan, _spellings(root, path))
+    if entry is None:
         return None
-    blocked, info, _ = _scan(plan)
-    uids = blocked["by"].get(f"phase:{phase}") or []
-    if phase not in blocked["phases"] or not uids:
+    blocked, info, _, why = _scan(plan)
+    kind = _claim_block(entry, blocked)
+    shown = _one(norm(path))
+    if kind == "phase":
+        phase = entry["phase"]
+        uids = blocked["by"][f"phase:{phase}"]
+        return (f"{shown} is in phase {_one(phase)}, blocked by unknown{'s' if len(uids) > 1 else ''} "
+                f"{_named(uids, info)}." + RESOLVE_FIRST, "blocked-by-unknown", NEXT_UNKNOWNS)
+    if kind != "features":
         return None
-    named = ", ".join(_phrase(u, *info.get(u, (None, None))) for u in uids)
-    return (f"{_one(norm(path))} is in phase {_one(phase)}, blocked by unknown{'s' if len(uids) > 1 else ''} {named}. Resolve it "
-            "first, or use --force if the lead says so.", "blocked-by-unknown", NEXT_UNKNOWNS)
+    clauses = []
+    for fid in _served(entry):
+        parts = []
+        direct = why["direct"].get(fid) or []
+        if direct:
+            parts.append(f"blocked by unknown{'s' if len(direct) > 1 else ''} {_named(direct, info)}")
+        if fid in why["milestone"]:
+            mid, uids = why["milestone"][fid]
+            parts.append(f"whose milestone {_one(mid)} is blocked by unknown{'s' if len(uids) > 1 else ''} "
+                         f"{_named(uids, info)}")
+        clauses.append(f"{_one(fid)}, {' and '.join(parts)}")
+    served = f"feature {clauses[0]}" if len(clauses) == 1 else "blocked features: " + "; ".join(clauses)
+    return (f"{shown} serves only {served}." + RESOLVE_FIRST, "blocked-by-unknown", NEXT_UNKNOWNS)
 
 
 def _detail(u):

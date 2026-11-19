@@ -470,7 +470,7 @@ class ClaimRefusalTest(unittest.TestCase):
     def test_message_error_and_next(self):
         got = self.refuse(v2_plan())
         self.assertEqual(got, (EXPECTED_MESSAGE, "blocked-by-unknown",
-                               "blueprint.py status --unknowns (or claim again with --force if the lead says so)"))
+                               "python .blueprint/bin/blueprint.py status --unknowns"))
 
     def test_only_claims_on_blocked_phases_are_refused(self):
         plan = v2_plan()
@@ -546,7 +546,7 @@ class ClaimCommandTest(unittest.TestCase):
             r = self.claim(p, OFFLINE)
             self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
             self.assertIn("error: " + EXPECTED_MESSAGE, r.stderr)
-            self.assertIn("next: blueprint.py status --unknowns", r.stderr)
+            self.assertIn("next: python .blueprint/bin/blueprint.py status --unknowns", r.stderr)
             self.assertNotIn("Traceback", r.stderr)
             self.assertFalse((p.root / ".blueprint" / "state.json").exists() and "claimed" in
                              (p.root / ".blueprint" / "state.json").read_text(encoding="utf-8"))
@@ -589,6 +589,135 @@ class ClaimCommandTest(unittest.TestCase):
             self.assertIn("is owned by frontend-engineer", r.stderr)
             r = p.cli("claim", "no/such.ts", "--by", "backend-lead")
             self.assertIn("is not in the blueprint", r.stderr)
+
+
+INBOX = "apps/web/src/Inbox.tsx"          # serves F-inbox only (phase P1)
+MAIN = "crates/snag-api/src/main.rs"     # serves F-log-snag only (phase P1)
+CARGO = "Cargo.toml"                     # infrastructure
+
+
+def feature_message(path, what):
+    return f"{path} serves only {what}. Resolve it first, or use --force if the lead says so."
+
+
+class FeatureBlockTest(unittest.TestCase):
+    """2.6 as ruled: a claim is refused when the file serves at least one feature and every feature it serves is blocked."""
+
+    def refuse(self, plan, path):
+        return unknowns.refuse("claim", None, plan, path, "x")
+
+    def plan(self, blocks, **kw):
+        return with_unknowns(unknown(blocks=blocks, **kw))
+
+    def test_the_three_refusal_texts(self):
+        phase = self.refuse(v2_plan(), OFFLINE)
+        self.assertEqual(phase[0], "apps/web/src/offline.ts is in phase P2, blocked by unknown U-offline (high, "
+                                   "investigating). Resolve it first, or use --force if the lead says so.")
+        feature = self.refuse(self.plan(["F-inbox"]), INBOX)
+        self.assertEqual(feature[0], feature_message(INBOX, "feature F-inbox, blocked by unknown U-x (high, open)"))
+        milestone = self.refuse(self.plan(["M1"]), INBOX)
+        self.assertEqual(milestone[0], feature_message(
+            INBOX, "feature F-inbox, whose milestone M1 is blocked by unknown U-x (high, open)"))
+        for got in (phase, feature, milestone):
+            self.assertEqual(got[1:], ("blocked-by-unknown", "python .blueprint/bin/blueprint.py status --unknowns"))
+
+    def test_only_the_blocked_feature_files_are_refused(self):
+        plan = self.plan(["F-inbox"])
+        self.assertIsNotNone(self.refuse(plan, INBOX))
+        self.assertIsNotNone(self.refuse(plan, OFFLINE), "offline.ts serves F-inbox only, and its phase is free here")
+        self.assertIsNone(self.refuse(plan, MAIN))
+        self.assertIsNone(self.refuse(plan, CARGO), "infrastructure")
+
+    def test_a_milestone_blocks_the_files_of_its_features(self):
+        plan = self.plan(["milestone:M1"])
+        for path in (INBOX, MAIN, OFFLINE, "crates/snag-api/tests/snags.rs"):
+            self.assertIsNotNone(self.refuse(plan, path), path)
+        self.assertIsNone(self.refuse(plan, CARGO))
+
+    def test_one_blocked_and_one_free_feature_is_claimable(self):
+        plan = self.plan(["F-inbox"])
+        next(f for f in plan["files"] if f["path"] == INBOX)["features"] = ["F-inbox", "F-log-snag"]
+        self.assertIsNone(self.refuse(plan, INBOX))
+        plan["unknowns"][0]["blocks"] = ["F-inbox", "F-log-snag"]
+        got = self.refuse(plan, INBOX)
+        self.assertEqual(got[0], feature_message(INBOX, "blocked features: F-inbox, blocked by unknown U-x (high, open); "
+                                                        "F-log-snag, blocked by unknown U-x (high, open)"))
+
+    def test_a_feature_blocked_both_ways_names_both(self):
+        plan = with_unknowns(unknown(id="U-a", blocks=["F-inbox"]), unknown(id="U-b", severity="critical", blocks=["M1"]))
+        self.assertEqual(self.refuse(plan, INBOX)[0], feature_message(
+            INBOX, "feature F-inbox, blocked by unknown U-a (high, open) and whose milestone M1 is blocked by unknown "
+                   "U-b (critical, open)"))
+
+    def test_infrastructure_and_unlinked_files_are_claimable(self):
+        plan = self.plan(["M1", "F-inbox", "F-log-snag"])
+        inbox = next(f for f in plan["files"] if f["path"] == INBOX)
+        inbox["infrastructure"] = True
+        self.assertIsNone(self.refuse(plan, INBOX), "infrastructure wins")
+        inbox.pop("infrastructure")
+        inbox.pop("features")
+        self.assertIsNone(self.refuse(plan, INBOX), "no feature link")
+        inbox["features"] = ["F-nope"]
+        self.assertIsNone(self.refuse(plan, INBOX), "a feature the plan lacks is not blocked")
+
+    def test_a_phase_block_still_applies_to_infrastructure(self):
+        plan = self.plan(["P1"])
+        self.assertIn("is in phase P1", self.refuse(plan, CARGO)[0])
+        plan = self.plan(["P1", "F-inbox"])
+        self.assertIn("is in phase P1", self.refuse(plan, INBOX)[0], "the phase text comes first")
+
+    def test_a_pattern_instance_follows_its_pattern(self):
+        plan = self.plan(["F-inbox"])
+        plan["patterns"] = [{"id": "screens", "glob": "apps/web/src/screens/*Screen.tsx", "module": "web", "phase": "P1",
+                             "purpose": "screens", "features": ["F-inbox"]}]
+        inst = "apps/web/src/screens/DetailScreen.tsx"
+        self.assertEqual(self.refuse(plan, inst)[0], feature_message(inst, "feature F-inbox, blocked by unknown U-x "
+                                                                          "(high, open)"))
+        plan["patterns"][0]["features"] = ["F-inbox", "F-log-snag"]
+        self.assertIsNone(self.refuse(plan, inst))
+        plan["patterns"][0].pop("features")
+        self.assertIsNone(self.refuse(plan, inst))
+        plan["patterns"][0].update(features=["F-inbox"], infrastructure=True)
+        self.assertIsNone(self.refuse(plan, inst))
+
+    def test_unknowns_that_do_not_block_refuse_nothing(self):
+        for change in ({"status": "resolved", "decision": "D-offline"}, {"status": "dropped", "notes": "n"},
+                       {"severity": "low"}, {"severity": "medium"}):
+            with self.subTest(change=change):
+                for blocks in (["F-inbox"], ["M1"]):
+                    plan = with_unknowns(unknown(blocks=blocks, **change), decisions=[decision()])
+                    self.assertIsNone(self.refuse(plan, INBOX))
+                    self.assertEqual(unknowns.blocked_files(plan), set())
+
+    def test_malformed_severity_or_status_fails_closed(self):
+        for change in ({"severity": "urgent"}, {"severity": DROP}, {"status": "Resolved"}, {"status": 5}, {"status": DROP}):
+            with self.subTest(change=change):
+                self.assertIsNotNone(self.refuse(self.plan(["F-inbox"], **change), INBOX))
+                self.assertIsNotNone(self.refuse(self.plan(["M1"], **change), INBOX))
+
+    def test_blocked_files_and_the_context(self):
+        plan = self.plan(["F-inbox", "P2"])
+        self.assertEqual(unknowns.blocked_files(plan), {INBOX, OFFLINE})
+        ctx = {}
+        unknowns.context(None, plan, {}, ctx)
+        self.assertEqual(ctx["blocked"]["files"], {INBOX, OFFLINE})
+        self.assertEqual(ctx["blocked"]["phases"], {"P2"})
+        self.assertEqual(unknowns.blocking(plan).keys(), {"phases", "milestones", "features", "by"})
+
+    def test_the_claim_command_refuses_and_force_overrides(self):
+        with TempProject(self.plan(["F-inbox"])) as p:
+            r = p.cli("claim", INBOX, "--by", "frontend-engineer")
+            self.assertEqual(r.returncode, 3, r.stderr)
+            self.assertIn("error: " + feature_message(INBOX, "feature F-inbox, blocked by unknown U-x (high, open)"), r.stderr)
+            self.assertIn("next: python .blueprint/bin/blueprint.py status --unknowns", r.stderr)
+            r = p.cli("claim", ".\\" + INBOX.replace("/", "\\"), "--by", "frontend-engineer")
+            self.assertEqual(r.returncode, 3)
+            self.assertEqual(p.cli("claim", INBOX, "--by", "frontend-engineer", "--force").returncode, 0)
+            self.assertEqual(p.cli("claim", CARGO, "--by", "cto-architect").returncode, 0)
+        with TempProject(self.plan(["M1"])) as p:
+            r = p.cli("claim", MAIN, "--by", "backend-lead")
+            self.assertEqual(r.returncode, 3, r.stderr)
+            self.assertIn("whose milestone M1 is blocked by unknown U-x (high, open)", r.stderr)
 
 
 class StatusTest(unittest.TestCase):
