@@ -27,7 +27,7 @@ def _t(v):
 
 
 def _cell(v):
-    return _t(v).replace("|", "\\|")
+    return _t(v).replace("\\", "\\\\").replace("|", "\\|")  # the backslash first, so `a\|b` cannot split the cell
 
 
 def _para(v):
@@ -67,7 +67,7 @@ def _feature_lines(patterns, f, level):
     lines = [f"{h} {FEATURE_GLYPH[f['status']]} {_t(f['id'])} {_t(f['title'])} · {_t(f['statusText'])}", ""]
     if f["statement"]:
         lines += [_para(f["statement"]), ""]
-    lines += [f"{_t(f['kind'])} · {_t(f['milestone'] or 'no milestone')} · {_t(f['owner'])} · {_t(f['level'])}", ""]
+    lines += [_para(f"{f['kind']} · {f['milestone'] or 'no milestone'} · {f['owner']} · {f['level']}"), ""]
     lines.append("Depends on: " + (", ".join(_t(d) for d in f["dependsOn"]) or "none"))
     lines.append("")
     lines.append("Files:")

@@ -1537,5 +1537,52 @@ class DuplicateRosterIdTest(ProjectBase):
         self.assertEqual(features.roster_ids(p), ["cto-architect", "backend-lead", "frontend-engineer", "evaluator", "owner"])
 
 
+class ReviewRound2Test(ProjectBase):
+    def test_r2_1_a_verify_level_that_is_not_a_command_level_never_passes(self):
+        for vl in ("manual", "E2E", "", " unit", "unit\n", 5, ["unit"], True):
+            with self.subTest(verifyLevel=vl):
+                f = F(level="unit", criteria=[crit("C1", verifyLevel=vl)])
+                self.assertEqual(features.derive_status(f, items(*V), checks({"C1": entry(level="e2e")}), False), "built")
+                self.assertFalse(features_rows(f, checks({"C1": entry(level="e2e")}))[0]["counted"])
+        for vl in ("unit", "integration", "e2e"):
+            f = F(level="unit", criteria=[crit("C1", verifyLevel=vl)])
+            self.assertEqual(features.derive_status(f, items(*V), checks({"C1": entry(level="e2e")}), False), "verified")
+
+    def test_r2_2_the_kind_line_is_one_escaped_line(self):
+        p = v2_plan()
+        f = feat(p, "F-log-snag")
+        f.update(kind="# kind", milestone="M1", owner="backend-lead")
+        from bp.views import features_md
+        self.write_plan(p)
+        text = features_md.views(self.ctx(checks={}))["FEATURES.md"]
+        self.assertFalse(any(l.startswith("# kind") for l in text.splitlines()))
+        self.assertIn("\\# kind · M1 · backend-lead · integration", text)
+        f.update(kind="<b>x</b>\n## h", owner="a\n# b")
+        self.write_plan(p)
+        text = features_md.views(self.ctx(checks={}))["FEATURES.md"]
+        self.assertIn("&lt;b>x&lt;/b> ## h · M1 · a # b · integration", text)
+        self.assertEqual(len([l for l in text.splitlines() if l.startswith("## ")]), 2)
+
+    def test_r2_3_a_backslash_is_escaped_before_the_pipe(self):
+        p = v2_plan()
+        feat(p, "F-log-snag")["criteria"][0]["expected"] = "a\\|b"  # plan text: a\|b
+        self.write_plan(p)
+        from bp.views import features_md
+        text = features_md.views(self.ctx(checks={}))["FEATURES.md"]
+        row = next(l for l in text.splitlines() if l.startswith("| C1 | The API runs"))
+        self.assertIn("| a\\\\\\|b |", row)  # a, escaped backslash, escaped pipe, b
+        other = next(l for l in text.splitlines() if l.startswith("| C2 |"))
+        cells = lambda r: len(r.replace("\\\\", "").replace("\\|", "").split("|"))
+        self.assertEqual(cells(row), cells(other), "the row has as many cells as any other row")
+
+    def test_r2_5_repeat_in_the_payload_is_a_copy(self):
+        chk = {"F-log-snag": checks({"C1": entry(repeat={"n": 3, "passed": 3}), "C2": entry(level="unit")})}
+        ctx = self.ctx(checks=chk)
+        row = next(f for f in ctx["features"] if f["id"] == "F-log-snag")["criteria"][0]
+        self.assertEqual(row["repeat"], {"n": 3, "passed": 3})
+        row["repeat"]["n"] = 99
+        self.assertEqual(chk["F-log-snag"]["criteria"]["C1"]["repeat"], {"n": 3, "passed": 3})
+
+
 if __name__ == "__main__":
     unittest.main()

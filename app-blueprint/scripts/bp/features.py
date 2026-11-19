@@ -393,7 +393,9 @@ def _command_level(feature, c, level):
     criterion requires; a command never satisfies manual."""
     need = criterion_level(feature, c)
     vl = c.get("verifyLevel")
-    cap = "integration" if vl is None else (vl if vl in COMMAND_LEVELS else "unit")
+    if vl is not None and not (isinstance(vl, str) and vl in COMMAND_LEVELS):
+        return False, None, need  # a verifyLevel that is not exactly a command level never counts (validate reports it too)
+    cap = "integration" if vl is None else vl
     if level not in COMMAND_LEVELS:
         return False, None, need
     eff = level if LEVEL_RANK[level] <= LEVEL_RANK[cap] else cap
