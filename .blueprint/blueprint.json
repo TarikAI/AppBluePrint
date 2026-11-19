@@ -1,0 +1,2018 @@
+{
+  "version": 2,
+  "app": {
+    "name": "app-blueprint",
+    "summary": "The repository's own plan: who builds which file of app-blueprint 2.0, taken from section 11 of the contract.",
+    "platforms": [
+      "cli"
+    ],
+    "preset": ""
+  },
+  "stack": [],
+  "approach": {
+    "layout": "app-blueprint/ is the skill (SKILL.md, scripts, tests, references, assets); maintainers/ holds the maintainers' tools and the design contract; examples/ is generated; .blueprint/ is this plan.",
+    "notes": "A plan of files and owners only. Owner rules give every file, including files later waves will create, exactly one owner; maintainers/check_owned.py reads them to check a branch. Update the rules only when section 11 of maintainers/design/v2-contract.md changes."
+  },
+  "modules": [
+    {
+      "id": "tool",
+      "path": "app-blueprint/scripts",
+      "layer": "domain",
+      "purpose": "The tool: launcher and the bp package",
+      "dependsOn": [],
+      "verify": "python app-blueprint/scripts/blueprint.py --version"
+    },
+    {
+      "id": "tests",
+      "path": "app-blueprint/tests",
+      "layer": "build",
+      "purpose": "Tests of the tool, fixtures and golden data",
+      "dependsOn": [
+        "tool"
+      ],
+      "verify": "python -m unittest discover -s app-blueprint/tests"
+    },
+    {
+      "id": "references",
+      "path": "app-blueprint/references",
+      "layer": "docs",
+      "purpose": "Reference documents and example plans the skill points to",
+      "dependsOn": [],
+      "verify": "python app-blueprint/scripts/blueprint.py validate --root examples/snag-desk"
+    },
+    {
+      "id": "assets",
+      "path": "app-blueprint/assets",
+      "layer": "ui",
+      "purpose": "The map template and the browser scripts of its tabs",
+      "dependsOn": [],
+      "verify": "python app-blueprint/scripts/blueprint.py --version"
+    },
+    {
+      "id": "skill",
+      "path": "app-blueprint",
+      "layer": "docs",
+      "purpose": "SKILL.md and the agent files of the skill",
+      "dependsOn": [],
+      "verify": "python app-blueprint/scripts/blueprint.py --version"
+    },
+    {
+      "id": "maintainers",
+      "path": "maintainers",
+      "layer": "build",
+      "purpose": "Maintainers' tools, specification, design contract and learning-loop agents",
+      "dependsOn": [],
+      "verify": "python -m unittest discover -s maintainers/tests"
+    },
+    {
+      "id": "examples",
+      "path": "examples",
+      "layer": "build",
+      "purpose": "The generated example project",
+      "dependsOn": [],
+      "verify": "python app-blueprint/scripts/blueprint.py validate --root examples/snag-desk"
+    },
+    {
+      "id": "ci",
+      "path": ".github",
+      "layer": "build",
+      "purpose": "GitHub workflows and templates",
+      "dependsOn": [],
+      "verify": "python -c \"pass\""
+    },
+    {
+      "id": "docs",
+      "path": "",
+      "layer": "docs",
+      "purpose": "Repository-level documents: README, changelog, contributing, license, lessons",
+      "dependsOn": [],
+      "verify": "python -c \"pass\""
+    },
+    {
+      "id": "repo",
+      "path": "",
+      "layer": "build",
+      "purpose": "Repository-level configuration and the installer",
+      "dependsOn": [],
+      "verify": "python -c \"pass\""
+    },
+    {
+      "id": "dogfood",
+      "path": ".blueprint",
+      "layer": "build",
+      "purpose": "This repository's own plan and views",
+      "dependsOn": [
+        "tool"
+      ],
+      "verify": "python app-blueprint/scripts/blueprint.py validate"
+    }
+  ],
+  "phases": [
+    {
+      "id": "W0",
+      "name": "Foundations",
+      "goal": "The package split, the 2.0 foundations, migrate, and this plan with its ownership check.",
+      "exit": "validate passes on this plan; check_owned.py passes on a branch of its own files"
+    },
+    {
+      "id": "W1",
+      "name": "Roadmap, features, unknowns",
+      "goal": "Milestones and tasks, features and criteria, unknowns and blocking.",
+      "exit": "the Wave 1 tests and test_plan_fuzz_v2 pass with each module loaded"
+    },
+    {
+      "id": "W2",
+      "name": "Evidence and study",
+      "goal": "Fixtures, the evidence store, the study engine and its lanes, synthesis.",
+      "exit": "the Wave 2 tests pass; hostile archives and the time bound hold"
+    },
+    {
+      "id": "W3",
+      "name": "Verification, agents, docs",
+      "goal": "Verification records, the surveyor and evaluator agents, builder rules, references and the docs check, learning-loop upgrades.",
+      "exit": "test_docs and test_agents pass; every command in the docs parses with the real CLI"
+    },
+    {
+      "id": "W4",
+      "name": "End to end and release",
+      "goal": "End-to-end and registry tests, mutation testing, example changes, version 2.0.0.",
+      "exit": "the full suite and the mutation job pass; TOOL_VERSION is 2.0.0"
+    }
+  ],
+  "files": [
+    {
+      "path": "app-blueprint/scripts/bp/views/__init__.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W0",
+      "purpose": "Package marker for the view modules"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/__init__.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W0",
+      "purpose": "Package marker for bp"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/globs.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W0",
+      "purpose": "Glob matching for owner rules, patterns and ignores"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/learn.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W0",
+      "purpose": "Learning-loop store, redaction and incident records"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/export.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W0",
+      "purpose": "Export formats: codeowners, csv, json, AgenticTeam commands"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/install.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W0",
+      "purpose": "Copy of the tool into .blueprint/bin and the package start-up check"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/api.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W0",
+      "purpose": "Frozen 1.x public names re-exported to the launcher"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/commands/__init__.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W0",
+      "purpose": "Package marker for the command modules"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/commands/data.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W0",
+      "purpose": "The db-check command"
+    },
+    {
+      "path": "app-blueprint/tests/support.py",
+      "action": "create",
+      "module": "tests",
+      "phase": "W0",
+      "purpose": "Shared test helpers for loading the tool"
+    },
+    {
+      "path": "app-blueprint/tests/test_package.py",
+      "action": "create",
+      "module": "tests",
+      "phase": "W0",
+      "purpose": "Package layout, 1.x names, version lines and interrupted-copy tests"
+    },
+    {
+      "path": "app-blueprint/tests/test_blueprint.py",
+      "action": "create",
+      "module": "tests",
+      "phase": "W0",
+      "purpose": "The 1.3.0 behaviour tests of the tool"
+    },
+    {
+      "path": "app-blueprint/tests/test_data_and_learning.py",
+      "action": "create",
+      "module": "tests",
+      "phase": "W0",
+      "purpose": "The 1.3.0 tests of the data checks and the learning loop"
+    },
+    {
+      "path": "app-blueprint/tests/test_presets.py",
+      "action": "create",
+      "module": "tests",
+      "phase": "W0",
+      "purpose": "Tests of the stack presets"
+    },
+    {
+      "path": "app-blueprint/tests/test_contracts_module.py",
+      "action": "create",
+      "module": "tests",
+      "phase": "W0",
+      "purpose": "Tests of module README contracts"
+    },
+    {
+      "path": "app-blueprint/tests/test_ignore_anchor.py",
+      "action": "create",
+      "module": "tests",
+      "phase": "W0",
+      "purpose": "Tests of ignore rule anchoring"
+    },
+    {
+      "path": "app-blueprint/tests/test_owner_anchor.py",
+      "action": "create",
+      "module": "tests",
+      "phase": "W0",
+      "purpose": "Tests of owner rule anchoring"
+    },
+    {
+      "path": "app-blueprint/tests/test_plan_shapes.py",
+      "action": "create",
+      "module": "tests",
+      "phase": "W0",
+      "purpose": "Tests of plan shape errors"
+    },
+    {
+      "path": "app-blueprint/tests/test_plan_fuzz.py",
+      "action": "create",
+      "module": "tests",
+      "phase": "W0",
+      "purpose": "Fuzz tests of version 1 plans"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/data.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W0",
+      "purpose": "Stores and resources: SQL, Prisma and code scanning for the data checks"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/core.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W0",
+      "purpose": "Paths, JSON and git helpers, BlueprintError and the envelope, proofs",
+      "contract": true
+    },
+    {
+      "path": "app-blueprint/scripts/bp/plan.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W0",
+      "purpose": "Plan loading, shape checks and the skeleton"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/rules.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W0",
+      "purpose": "Owner rules, roster and team validation"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/status.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W0",
+      "purpose": "Status computation, claim rules and the guard decision"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/verify.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W0",
+      "purpose": "Verify commands and the hash of a verified file"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/validate.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W0",
+      "purpose": "Validation findings, codes and the schema checks"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/cli.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W0",
+      "purpose": "Argument parser, start-up completeness check and command dispatch"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/views/structure.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W0",
+      "purpose": "STRUCTURE.md"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/views/render.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W0",
+      "purpose": "Writes every view and the map"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/views/roster.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W0",
+      "purpose": "ROSTER.md"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/views/context.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W0",
+      "purpose": "The context every view and status hook reads"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/commands/plan.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W0",
+      "purpose": "init, validate, render, contracts and export commands"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/commands/progress.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W0",
+      "purpose": "sync, status, owner, claim, mark, verify, guard and hook commands"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/commands/learn.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W0",
+      "purpose": "feedback, report and doctor commands"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/registry.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W0",
+      "purpose": "Module registry, hook collection and validation code ownership",
+      "contract": true
+    },
+    {
+      "path": "app-blueprint/scripts/bp/migrate.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W0",
+      "purpose": "In-memory upgrade of plans and state from version 1 to 2"
+    },
+    {
+      "path": "app-blueprint/assets/map.template.html",
+      "action": "create",
+      "module": "assets",
+      "phase": "W0",
+      "purpose": "Template of map.html with the tab plug-in point"
+    },
+    {
+      "path": "app-blueprint/tests/test_validate.py",
+      "action": "create",
+      "module": "tests",
+      "phase": "W0",
+      "purpose": "Tests of validation codes and findings"
+    },
+    {
+      "path": "app-blueprint/tests/test_registry_hooks.py",
+      "action": "create",
+      "module": "tests",
+      "phase": "W0",
+      "purpose": "Tests of the registry and every hook with a stub module"
+    },
+    {
+      "path": "app-blueprint/tests/test_plan_fuzz_v2.py",
+      "action": "create",
+      "module": "tests",
+      "phase": "W0",
+      "purpose": "Fuzz tests of version 2 plans, run with each module loaded"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/commands/migrate.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W0",
+      "purpose": "The migrate command"
+    },
+    {
+      "path": "app-blueprint/references/example-blueprint-v2.json",
+      "action": "create",
+      "module": "references",
+      "phase": "W0",
+      "purpose": "A complete version 2 plan used by the tests and the docs"
+    },
+    {
+      "path": "app-blueprint/tests/test_migrate.py",
+      "action": "create",
+      "module": "tests",
+      "phase": "W0",
+      "purpose": "Tests of the migrate command"
+    },
+    {
+      "path": "maintainers/check_owned.py",
+      "action": "create",
+      "module": "maintainers",
+      "phase": "W0",
+      "purpose": "Pull-request ownership check: changed paths against the roster"
+    },
+    {
+      "path": "maintainers/tests/test_check_owned.py",
+      "action": "create",
+      "module": "maintainers",
+      "phase": "W0",
+      "purpose": "Tests of the ownership check on throwaway git repositories"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/roadmap.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W1",
+      "purpose": "Milestones and tasks: rules, ladder, owner actions"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/commands/roadmap.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W1",
+      "purpose": "The task command"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/views/roadmap_md.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W1",
+      "purpose": "ROADMAP.md"
+    },
+    {
+      "path": "app-blueprint/assets/tab-roadmap.js",
+      "action": "create",
+      "module": "assets",
+      "phase": "W1",
+      "purpose": "Roadmap tab of the map"
+    },
+    {
+      "path": "app-blueprint/tests/test_roadmap.py",
+      "action": "create",
+      "module": "tests",
+      "phase": "W1",
+      "purpose": "Tests of milestones, tasks and ROADMAP.md"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/features.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W1",
+      "purpose": "Features, criteria, file links and derived status"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/views/features_md.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W1",
+      "purpose": "FEATURES.md"
+    },
+    {
+      "path": "app-blueprint/assets/tab-features.js",
+      "action": "create",
+      "module": "assets",
+      "phase": "W1",
+      "purpose": "Features tab of the map"
+    },
+    {
+      "path": "app-blueprint/assets/mindmap.js",
+      "action": "modify",
+      "module": "assets",
+      "phase": "W1",
+      "purpose": "Mind map of the map, with the by-feature mode"
+    },
+    {
+      "path": "app-blueprint/tests/test_features.py",
+      "action": "create",
+      "module": "tests",
+      "phase": "W1",
+      "purpose": "Tests of features and FEATURES.md"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/unknowns.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W1",
+      "purpose": "Unknowns, experiments, blocking and claim refusal"
+    },
+    {
+      "path": "app-blueprint/assets/tab-unknowns.js",
+      "action": "create",
+      "module": "assets",
+      "phase": "W1",
+      "purpose": "Unknowns tab of the map"
+    },
+    {
+      "path": "app-blueprint/tests/test_unknowns.py",
+      "action": "create",
+      "module": "tests",
+      "phase": "W1",
+      "purpose": "Tests of unknowns"
+    },
+    {
+      "path": "app-blueprint/tests/fixtures_archives.py",
+      "action": "modify",
+      "module": "tests",
+      "phase": "W2",
+      "purpose": "Builders for APK, AAB, XAPK, IPA, asar and hostile archives"
+    },
+    {
+      "path": "app-blueprint/tests/test_fixtures_archives.py",
+      "action": "modify",
+      "module": "tests",
+      "phase": "W2",
+      "purpose": "Structural self-checks of the archive builders"
+    },
+    {
+      "path": "app-blueprint/tests/data/README.md",
+      "action": "modify",
+      "module": "tests",
+      "phase": "W2",
+      "purpose": "Where the golden files came from and how to rebuild them"
+    },
+    {
+      "path": "app-blueprint/tests/fixtures_text.py",
+      "action": "modify",
+      "module": "tests",
+      "phase": "W2",
+      "purpose": "Builders for HAR, source map, bundle, SQLite, OpenAPI, GraphQL, proto, repo, rea, JADX, apktool and capture fixtures"
+    },
+    {
+      "path": "app-blueprint/tests/test_fixtures_text.py",
+      "action": "modify",
+      "module": "tests",
+      "phase": "W2",
+      "purpose": "Self-checks of the text builders"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/evidence.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W2",
+      "purpose": "Evidence store and records"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/study/__init__.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W2",
+      "purpose": "Package marker for the study engine"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/study/engine.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W2",
+      "purpose": "Lane interface and the study run"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/study/safety.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W2",
+      "purpose": "Read limits, hostile-input rules and secret scanning"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/study/keys.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W2",
+      "purpose": "Record keys shared by the lanes"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/commands/evidence.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W2",
+      "purpose": "The evidence command"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/commands/study.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W2",
+      "purpose": "The study command"
+    },
+    {
+      "path": "app-blueprint/assets/tab-studies.js",
+      "action": "create",
+      "module": "assets",
+      "phase": "W2",
+      "purpose": "Studies tab of the map"
+    },
+    {
+      "path": "app-blueprint/tests/test_evidence.py",
+      "action": "create",
+      "module": "tests",
+      "phase": "W2",
+      "purpose": "Tests of the evidence store"
+    },
+    {
+      "path": "app-blueprint/tests/test_study_core.py",
+      "action": "create",
+      "module": "tests",
+      "phase": "W2",
+      "purpose": "Tests of the study engine and its safety rules"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/study/source.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W2",
+      "purpose": "Source lane: repositories and the import graph"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/study/trace.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W2",
+      "purpose": "study trace: roles and depth"
+    },
+    {
+      "path": "app-blueprint/tests/test_study_source.py",
+      "action": "create",
+      "module": "tests",
+      "phase": "W2",
+      "purpose": "Tests of the source lane and trace"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/study/web.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W2",
+      "purpose": "Web lane: HAR, source maps and bundles"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/study/jsscan.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W2",
+      "purpose": "JavaScript scanner shared by the web, desktop and mobile lanes"
+    },
+    {
+      "path": "app-blueprint/tests/test_study_web.py",
+      "action": "create",
+      "module": "tests",
+      "phase": "W2",
+      "purpose": "Tests of the web lane"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/study/asar.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W2",
+      "purpose": "Reader for Electron asar archives"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/study/desktop.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W2",
+      "purpose": "Desktop lane: Electron"
+    },
+    {
+      "path": "app-blueprint/tests/test_study_desktop.py",
+      "action": "create",
+      "module": "tests",
+      "phase": "W2",
+      "purpose": "Tests of the desktop lane"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/study/axml.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W2",
+      "purpose": "Reader for binary Android manifests"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/study/aabproto.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W2",
+      "purpose": "Reader for protobuf manifests of app bundles"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/study/dex.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W2",
+      "purpose": "Reader for dex files"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/study/mobile.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W2",
+      "purpose": "Mobile lane: APK, AAB, XAPK, IPA"
+    },
+    {
+      "path": "app-blueprint/tests/test_study_mobile.py",
+      "action": "create",
+      "module": "tests",
+      "phase": "W2",
+      "purpose": "Tests of the mobile lane and its parsers"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/study/datafiles.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W2",
+      "purpose": "Data lane: data files"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/study/compare.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W2",
+      "purpose": "Compare lane"
+    },
+    {
+      "path": "app-blueprint/tests/test_study_data.py",
+      "action": "create",
+      "module": "tests",
+      "phase": "W2",
+      "purpose": "Tests of the data and compare lanes"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/study/capture.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W2",
+      "purpose": "Tier B: capture"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/study/importers.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W2",
+      "purpose": "Tier C: importers for foreign tools"
+    },
+    {
+      "path": "app-blueprint/tests/test_study_import.py",
+      "action": "create",
+      "module": "tests",
+      "phase": "W2",
+      "purpose": "Tests of capture and importers"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/study/synth.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W2",
+      "purpose": "Synthesis of behaviours from evidence"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/study/adopt.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W2",
+      "purpose": "study adopt: evidence into plan entries"
+    },
+    {
+      "path": "app-blueprint/tests/test_synth.py",
+      "action": "create",
+      "module": "tests",
+      "phase": "W2",
+      "purpose": "Tests of synth, check and adopt"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/records.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W3",
+      "purpose": "Verification records, criterion checks and acceptance"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/commands/records.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W3",
+      "purpose": "The accept command"
+    },
+    {
+      "path": "app-blueprint/tests/test_records.py",
+      "action": "create",
+      "module": "tests",
+      "phase": "W3",
+      "purpose": "Tests of verification records"
+    },
+    {
+      "path": "app-blueprint/agents/blueprint-surveyor.md",
+      "action": "create",
+      "module": "skill",
+      "phase": "W3",
+      "purpose": "Surveyor agent"
+    },
+    {
+      "path": "app-blueprint/agents/blueprint-evaluator.md",
+      "action": "create",
+      "module": "skill",
+      "phase": "W3",
+      "purpose": "Evaluator agent"
+    },
+    {
+      "path": "install.py",
+      "action": "modify",
+      "module": "repo",
+      "phase": "W3",
+      "purpose": "Installer of the skill and its agents"
+    },
+    {
+      "path": "app-blueprint/tests/test_agents.py",
+      "action": "create",
+      "module": "tests",
+      "phase": "W3",
+      "purpose": "Tests of the agent files against the real CLI"
+    },
+    {
+      "path": "app-blueprint/SKILL.md",
+      "action": "modify",
+      "module": "skill",
+      "phase": "W3",
+      "purpose": "The skill: when and how an agent uses the tool"
+    },
+    {
+      "path": "app-blueprint/references/agent-rules.md",
+      "action": "modify",
+      "module": "references",
+      "phase": "W3",
+      "purpose": "Rules for builder agents"
+    },
+    {
+      "path": "app-blueprint/references/readiness-review.md",
+      "action": "modify",
+      "module": "references",
+      "phase": "W3",
+      "purpose": "Readiness review checklist"
+    },
+    {
+      "path": "app-blueprint/references/schema.md",
+      "action": "modify",
+      "module": "references",
+      "phase": "W3",
+      "purpose": "Field reference of blueprint.json"
+    },
+    {
+      "path": "app-blueprint/references/hooks.md",
+      "action": "modify",
+      "module": "references",
+      "phase": "W3",
+      "purpose": "Hook installation and protected paths"
+    },
+    {
+      "path": "app-blueprint/references/integrations.md",
+      "action": "modify",
+      "module": "references",
+      "phase": "W3",
+      "purpose": "Integrations with other tools"
+    },
+    {
+      "path": "README.md",
+      "action": "modify",
+      "module": "docs",
+      "phase": "W3",
+      "purpose": "Project README"
+    },
+    {
+      "path": "app-blueprint/tests/test_docs.py",
+      "action": "create",
+      "module": "tests",
+      "phase": "W3",
+      "purpose": "Checks that the docs match the real CLI"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/signals.py",
+      "action": "create",
+      "module": "tool",
+      "phase": "W3",
+      "purpose": "Automatic loop signals"
+    },
+    {
+      "path": "app-blueprint/tests/test_signals.py",
+      "action": "create",
+      "module": "tests",
+      "phase": "W3",
+      "purpose": "Tests of signals"
+    },
+    {
+      "path": "maintainers/learn.py",
+      "action": "modify",
+      "module": "maintainers",
+      "phase": "W3",
+      "purpose": "Maintainers' learning-loop command"
+    },
+    {
+      "path": "maintainers/tests/test_learn.py",
+      "action": "modify",
+      "module": "maintainers",
+      "phase": "W3",
+      "purpose": "Tests of the maintainers' learning-loop command"
+    },
+    {
+      "path": "maintainers/SPEC.md",
+      "action": "modify",
+      "module": "maintainers",
+      "phase": "W3",
+      "purpose": "Specification of the learning loop"
+    },
+    {
+      "path": "maintainers/agents/blueprint-harvester.md",
+      "action": "modify",
+      "module": "maintainers",
+      "phase": "W3",
+      "purpose": "Harvester agent of the learning loop"
+    },
+    {
+      "path": "maintainers/agents/blueprint-fixer.md",
+      "action": "modify",
+      "module": "maintainers",
+      "phase": "W3",
+      "purpose": "Fixer agent of the learning loop"
+    },
+    {
+      "path": "maintainers/agents/blueprint-reviewer.md",
+      "action": "modify",
+      "module": "maintainers",
+      "phase": "W3",
+      "purpose": "Reviewer agent of the learning loop"
+    },
+    {
+      "path": "app-blueprint/tests/test_e2e.py",
+      "action": "create",
+      "module": "tests",
+      "phase": "W4",
+      "purpose": "End-to-end tests"
+    },
+    {
+      "path": "app-blueprint/tests/test_registry.py",
+      "action": "create",
+      "module": "tests",
+      "phase": "W4",
+      "purpose": "Tests of the registry across all modules"
+    },
+    {
+      "path": "maintainers/mutate.py",
+      "action": "create",
+      "module": "maintainers",
+      "phase": "W4",
+      "purpose": "Mutation runner"
+    },
+    {
+      "path": "maintainers/mutations.json",
+      "action": "create",
+      "module": "maintainers",
+      "phase": "W4",
+      "purpose": "The mutations"
+    },
+    {
+      "path": ".github/workflows/mutation.yml",
+      "action": "create",
+      "module": "ci",
+      "phase": "W4",
+      "purpose": "Scheduled mutation job"
+    },
+    {
+      "path": "maintainers/make_example.py",
+      "action": "modify",
+      "module": "maintainers",
+      "phase": "W4",
+      "purpose": "Generator of the example project"
+    },
+    {
+      "path": "app-blueprint/scripts/blueprint.py",
+      "action": "modify",
+      "module": "tool",
+      "phase": "W0",
+      "purpose": "Launcher: carries the TOOL_VERSION line"
+    },
+    {
+      "path": "app-blueprint/scripts/bp/version.py",
+      "action": "modify",
+      "module": "tool",
+      "phase": "W0",
+      "purpose": "TOOL_VERSION and schema version constants"
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "module": "docs",
+      "phase": "W0",
+      "purpose": "Changelog"
+    },
+    {
+      "path": ".gitignore",
+      "action": "modify",
+      "module": "repo",
+      "phase": "W0",
+      "purpose": "Whitelist of the published paths"
+    },
+    {
+      "path": "maintainers/design/v2-contract.md",
+      "action": "modify",
+      "module": "maintainers",
+      "phase": "W0",
+      "purpose": "The contract of version 2.0",
+      "contract": true
+    },
+    {
+      "path": ".gitattributes",
+      "action": "modify",
+      "module": "repo",
+      "phase": "W0",
+      "purpose": "Line ending and binary file rules"
+    },
+    {
+      "path": "LICENSE",
+      "action": "modify",
+      "module": "docs",
+      "phase": "W0",
+      "purpose": "License"
+    },
+    {
+      "path": "CONTRIBUTING.md",
+      "action": "modify",
+      "module": "docs",
+      "phase": "W0",
+      "purpose": "How to contribute"
+    },
+    {
+      "path": "learning/LESSONS.md",
+      "action": "modify",
+      "module": "docs",
+      "phase": "W0",
+      "purpose": "Lessons the learning loop has adopted"
+    },
+    {
+      "path": "maintainers/README.md",
+      "action": "modify",
+      "module": "maintainers",
+      "phase": "W0",
+      "purpose": "Guide to the maintainers' folder"
+    },
+    {
+      "path": "maintainers/agents/preset-scout.md",
+      "action": "modify",
+      "module": "maintainers",
+      "phase": "W0",
+      "purpose": "Preset scout agent"
+    },
+    {
+      "path": ".github/pull_request_template.md",
+      "action": "modify",
+      "module": "ci",
+      "phase": "W0",
+      "purpose": "Pull request template"
+    },
+    {
+      "path": ".github/workflows/tests.yml",
+      "action": "modify",
+      "module": "ci",
+      "phase": "W0",
+      "purpose": "CI test workflow"
+    },
+    {
+      "path": "app-blueprint/agents/openai.yaml",
+      "action": "modify",
+      "module": "skill",
+      "phase": "W0",
+      "purpose": "Agent descriptor for OpenAI-style hosts"
+    },
+    {
+      "path": "app-blueprint/references/example-blueprint.json",
+      "action": "modify",
+      "module": "references",
+      "phase": "W0",
+      "purpose": "The version 1 example plan"
+    }
+  ],
+  "patterns": [
+    {
+      "id": "dogfood-views",
+      "glob": ".blueprint/*",
+      "module": "dogfood",
+      "phase": "W0",
+      "purpose": "The plan, its state and the generated views of this repository",
+      "instance": "One file init, sync or render writes in .blueprint/ (README.md, blueprint.json, state.json, log.jsonl, STRUCTURE.md, ROSTER.md, map.html, and later ROADMAP.md and FEATURES.md). The tool copy in .blueprint/bin is not committed."
+    },
+    {
+      "id": "example-project",
+      "glob": "examples/**",
+      "module": "examples",
+      "phase": "W0",
+      "purpose": "The generated example project, rebuilt by maintainers/make_example.py",
+      "instance": "One file of the example, including its own .blueprint folder and tool copy; never edited by hand."
+    },
+    {
+      "id": "example-plan",
+      "glob": "examples/*/.blueprint/**",
+      "module": "examples",
+      "phase": "W0",
+      "purpose": "The example's own plan, state, views and tool copy",
+      "instance": "One file under an example's .blueprint folder, written by the tool when make_example.py runs."
+    },
+    {
+      "id": "v1-goldens",
+      "glob": "app-blueprint/tests/data/v1/**",
+      "module": "tests",
+      "phase": "W0",
+      "purpose": "Frozen 1.3.0 inputs and golden views",
+      "instance": "One frozen input, golden or generator script of the version 1 behaviour tests."
+    },
+    {
+      "id": "android-goldens",
+      "glob": "app-blueprint/tests/data/android/**",
+      "module": "tests",
+      "phase": "W2",
+      "purpose": "Goldens built with aapt2",
+      "instance": "One manifest source or aapt2 output (text, binary AXML or proto)."
+    },
+    {
+      "id": "issue-templates",
+      "glob": ".github/ISSUE_TEMPLATE/*",
+      "module": "ci",
+      "phase": "W0",
+      "purpose": "GitHub issue forms",
+      "instance": "One issue form or the issue chooser config."
+    },
+    {
+      "id": "stack-presets",
+      "glob": "app-blueprint/references/stacks/*.md",
+      "module": "references",
+      "phase": "W0",
+      "purpose": "Stack presets the tool offers at init",
+      "instance": "One stack preset document with its parts, versions, docs URLs and folder layout."
+    }
+  ],
+  "owners": [
+    {
+      "pattern": "/.blueprint/",
+      "owner": "orchestrator"
+    },
+    {
+      "pattern": "/.gitattributes",
+      "owner": "maintainers"
+    },
+    {
+      "pattern": "/.github/ISSUE_TEMPLATE/",
+      "owner": "maintainers"
+    },
+    {
+      "pattern": "/.github/pull_request_template.md",
+      "owner": "maintainers"
+    },
+    {
+      "pattern": "/.github/workflows/mutation.yml",
+      "owner": "W4-M"
+    },
+    {
+      "pattern": "/.github/workflows/tests.yml",
+      "owner": "maintainers"
+    },
+    {
+      "pattern": "/.gitignore",
+      "owner": "orchestrator"
+    },
+    {
+      "pattern": "/CHANGELOG.md",
+      "owner": "orchestrator"
+    },
+    {
+      "pattern": "/CONTRIBUTING.md",
+      "owner": "maintainers"
+    },
+    {
+      "pattern": "/LICENSE",
+      "owner": "maintainers"
+    },
+    {
+      "pattern": "/README.md",
+      "owner": "W3-R2"
+    },
+    {
+      "pattern": "/app-blueprint/SKILL.md",
+      "owner": "W3-R1"
+    },
+    {
+      "pattern": "/app-blueprint/agents/blueprint-evaluator.md",
+      "owner": "W3-A"
+    },
+    {
+      "pattern": "/app-blueprint/agents/blueprint-surveyor.md",
+      "owner": "W3-A"
+    },
+    {
+      "pattern": "/app-blueprint/agents/openai.yaml",
+      "owner": "maintainers"
+    },
+    {
+      "pattern": "/app-blueprint/assets/map.template.html",
+      "owner": "W0-A2"
+    },
+    {
+      "pattern": "/app-blueprint/assets/mindmap.js",
+      "owner": "W1-F"
+    },
+    {
+      "pattern": "/app-blueprint/assets/tab-features.js",
+      "owner": "W1-F"
+    },
+    {
+      "pattern": "/app-blueprint/assets/tab-roadmap.js",
+      "owner": "W1-R"
+    },
+    {
+      "pattern": "/app-blueprint/assets/tab-studies.js",
+      "owner": "W2-E"
+    },
+    {
+      "pattern": "/app-blueprint/assets/tab-unknowns.js",
+      "owner": "W1-U"
+    },
+    {
+      "pattern": "/app-blueprint/references/agent-rules.md",
+      "owner": "W3-R1"
+    },
+    {
+      "pattern": "/app-blueprint/references/example-blueprint-v2.json",
+      "owner": "W0-B"
+    },
+    {
+      "pattern": "/app-blueprint/references/example-blueprint.json",
+      "owner": "maintainers"
+    },
+    {
+      "pattern": "/app-blueprint/references/hooks.md",
+      "owner": "W3-R2"
+    },
+    {
+      "pattern": "/app-blueprint/references/integrations.md",
+      "owner": "W3-R2"
+    },
+    {
+      "pattern": "/app-blueprint/references/readiness-review.md",
+      "owner": "W3-R1"
+    },
+    {
+      "pattern": "/app-blueprint/references/schema.md",
+      "owner": "W3-R2"
+    },
+    {
+      "pattern": "/app-blueprint/references/stacks/",
+      "owner": "maintainers"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/blueprint.py",
+      "owner": "orchestrator"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/__init__.py",
+      "owner": "W0-A1"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/api.py",
+      "owner": "W0-A1"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/cli.py",
+      "owner": "W0-A2"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/commands/__init__.py",
+      "owner": "W0-A1"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/commands/data.py",
+      "owner": "W0-A1"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/commands/evidence.py",
+      "owner": "W2-E"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/commands/learn.py",
+      "owner": "W0-A2"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/commands/migrate.py",
+      "owner": "W0-B"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/commands/plan.py",
+      "owner": "W0-A2"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/commands/progress.py",
+      "owner": "W0-A2"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/commands/records.py",
+      "owner": "W3-V"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/commands/roadmap.py",
+      "owner": "W1-R"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/commands/study.py",
+      "owner": "W2-E"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/core.py",
+      "owner": "W0-A2"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/data.py",
+      "owner": "W0-A2"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/evidence.py",
+      "owner": "W2-E"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/export.py",
+      "owner": "W0-A1"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/features.py",
+      "owner": "W1-F"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/globs.py",
+      "owner": "W0-A1"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/install.py",
+      "owner": "W0-A1"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/learn.py",
+      "owner": "W0-A1"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/migrate.py",
+      "owner": "W0-A2"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/plan.py",
+      "owner": "W0-A2"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/records.py",
+      "owner": "W3-V"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/registry.py",
+      "owner": "W0-A2"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/roadmap.py",
+      "owner": "W1-R"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/rules.py",
+      "owner": "W0-A2"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/signals.py",
+      "owner": "W3-L"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/status.py",
+      "owner": "W0-A2"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/study/__init__.py",
+      "owner": "W2-E"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/study/aabproto.py",
+      "owner": "W2-M"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/study/adopt.py",
+      "owner": "W2-SY"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/study/asar.py",
+      "owner": "W2-D"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/study/axml.py",
+      "owner": "W2-M"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/study/capture.py",
+      "owner": "W2-T"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/study/compare.py",
+      "owner": "W2-DA"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/study/datafiles.py",
+      "owner": "W2-DA"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/study/desktop.py",
+      "owner": "W2-D"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/study/dex.py",
+      "owner": "W2-M"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/study/engine.py",
+      "owner": "W2-E"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/study/importers.py",
+      "owner": "W2-T"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/study/jsscan.py",
+      "owner": "W2-W"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/study/keys.py",
+      "owner": "W2-E"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/study/mobile.py",
+      "owner": "W2-M"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/study/safety.py",
+      "owner": "W2-E"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/study/source.py",
+      "owner": "W2-S"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/study/synth.py",
+      "owner": "W2-SY"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/study/trace.py",
+      "owner": "W2-S"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/study/web.py",
+      "owner": "W2-W"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/unknowns.py",
+      "owner": "W1-U"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/validate.py",
+      "owner": "W0-A2"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/verify.py",
+      "owner": "W0-A2"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/version.py",
+      "owner": "orchestrator"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/views/__init__.py",
+      "owner": "W0-A1"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/views/context.py",
+      "owner": "W0-A2"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/views/features_md.py",
+      "owner": "W1-F"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/views/render.py",
+      "owner": "W0-A2"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/views/roadmap_md.py",
+      "owner": "W1-R"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/views/roster.py",
+      "owner": "W0-A2"
+    },
+    {
+      "pattern": "/app-blueprint/scripts/bp/views/structure.py",
+      "owner": "W0-A2"
+    },
+    {
+      "pattern": "/app-blueprint/tests/data/README.md",
+      "owner": "W2-FX1"
+    },
+    {
+      "pattern": "/app-blueprint/tests/data/android/",
+      "owner": "W2-FX1"
+    },
+    {
+      "pattern": "/app-blueprint/tests/data/v1/",
+      "owner": "W0-A1"
+    },
+    {
+      "pattern": "/app-blueprint/tests/fixtures_archives.py",
+      "owner": "W2-FX1"
+    },
+    {
+      "pattern": "/app-blueprint/tests/fixtures_text.py",
+      "owner": "W2-FX2"
+    },
+    {
+      "pattern": "/app-blueprint/tests/support.py",
+      "owner": "W0-A1"
+    },
+    {
+      "pattern": "/app-blueprint/tests/test_agents.py",
+      "owner": "W3-A"
+    },
+    {
+      "pattern": "/app-blueprint/tests/test_blueprint.py",
+      "owner": "W0-A1"
+    },
+    {
+      "pattern": "/app-blueprint/tests/test_contracts_module.py",
+      "owner": "W0-A1"
+    },
+    {
+      "pattern": "/app-blueprint/tests/test_data_and_learning.py",
+      "owner": "W0-A1"
+    },
+    {
+      "pattern": "/app-blueprint/tests/test_docs.py",
+      "owner": "W3-R2"
+    },
+    {
+      "pattern": "/app-blueprint/tests/test_e2e.py",
+      "owner": "W4-E2E"
+    },
+    {
+      "pattern": "/app-blueprint/tests/test_evidence.py",
+      "owner": "W2-E"
+    },
+    {
+      "pattern": "/app-blueprint/tests/test_features.py",
+      "owner": "W1-F"
+    },
+    {
+      "pattern": "/app-blueprint/tests/test_fixtures_archives.py",
+      "owner": "W2-FX1"
+    },
+    {
+      "pattern": "/app-blueprint/tests/test_fixtures_text.py",
+      "owner": "W2-FX2"
+    },
+    {
+      "pattern": "/app-blueprint/tests/test_ignore_anchor.py",
+      "owner": "W0-A1"
+    },
+    {
+      "pattern": "/app-blueprint/tests/test_migrate.py",
+      "owner": "W0-B"
+    },
+    {
+      "pattern": "/app-blueprint/tests/test_owner_anchor.py",
+      "owner": "W0-A1"
+    },
+    {
+      "pattern": "/app-blueprint/tests/test_package.py",
+      "owner": "W0-A1"
+    },
+    {
+      "pattern": "/app-blueprint/tests/test_plan_fuzz.py",
+      "owner": "W0-A1"
+    },
+    {
+      "pattern": "/app-blueprint/tests/test_plan_fuzz_v2.py",
+      "owner": "W0-A2"
+    },
+    {
+      "pattern": "/app-blueprint/tests/test_plan_shapes.py",
+      "owner": "W0-A1"
+    },
+    {
+      "pattern": "/app-blueprint/tests/test_presets.py",
+      "owner": "W0-A1"
+    },
+    {
+      "pattern": "/app-blueprint/tests/test_records.py",
+      "owner": "W3-V"
+    },
+    {
+      "pattern": "/app-blueprint/tests/test_registry.py",
+      "owner": "W4-E2E"
+    },
+    {
+      "pattern": "/app-blueprint/tests/test_registry_hooks.py",
+      "owner": "W0-A2"
+    },
+    {
+      "pattern": "/app-blueprint/tests/test_roadmap.py",
+      "owner": "W1-R"
+    },
+    {
+      "pattern": "/app-blueprint/tests/test_signals.py",
+      "owner": "W3-L"
+    },
+    {
+      "pattern": "/app-blueprint/tests/test_study_core.py",
+      "owner": "W2-E"
+    },
+    {
+      "pattern": "/app-blueprint/tests/test_study_data.py",
+      "owner": "W2-DA"
+    },
+    {
+      "pattern": "/app-blueprint/tests/test_study_desktop.py",
+      "owner": "W2-D"
+    },
+    {
+      "pattern": "/app-blueprint/tests/test_study_import.py",
+      "owner": "W2-T"
+    },
+    {
+      "pattern": "/app-blueprint/tests/test_study_mobile.py",
+      "owner": "W2-M"
+    },
+    {
+      "pattern": "/app-blueprint/tests/test_study_source.py",
+      "owner": "W2-S"
+    },
+    {
+      "pattern": "/app-blueprint/tests/test_study_web.py",
+      "owner": "W2-W"
+    },
+    {
+      "pattern": "/app-blueprint/tests/test_synth.py",
+      "owner": "W2-SY"
+    },
+    {
+      "pattern": "/app-blueprint/tests/test_unknowns.py",
+      "owner": "W1-U"
+    },
+    {
+      "pattern": "/app-blueprint/tests/test_validate.py",
+      "owner": "W0-A2"
+    },
+    {
+      "pattern": "/examples/",
+      "owner": "orchestrator"
+    },
+    {
+      "pattern": "/install.py",
+      "owner": "W3-A"
+    },
+    {
+      "pattern": "/learning/LESSONS.md",
+      "owner": "maintainers"
+    },
+    {
+      "pattern": "/maintainers/README.md",
+      "owner": "maintainers"
+    },
+    {
+      "pattern": "/maintainers/SPEC.md",
+      "owner": "W3-L"
+    },
+    {
+      "pattern": "/maintainers/agents/blueprint-fixer.md",
+      "owner": "W3-L"
+    },
+    {
+      "pattern": "/maintainers/agents/blueprint-harvester.md",
+      "owner": "W3-L"
+    },
+    {
+      "pattern": "/maintainers/agents/blueprint-reviewer.md",
+      "owner": "W3-L"
+    },
+    {
+      "pattern": "/maintainers/agents/preset-scout.md",
+      "owner": "maintainers"
+    },
+    {
+      "pattern": "/maintainers/check_owned.py",
+      "owner": "W0-C"
+    },
+    {
+      "pattern": "/maintainers/design/v2-contract.md",
+      "owner": "orchestrator"
+    },
+    {
+      "pattern": "/maintainers/learn.py",
+      "owner": "W3-L"
+    },
+    {
+      "pattern": "/maintainers/make_example.py",
+      "owner": "W4-X"
+    },
+    {
+      "pattern": "/maintainers/mutate.py",
+      "owner": "W4-M"
+    },
+    {
+      "pattern": "/maintainers/mutations.json",
+      "owner": "W4-M"
+    },
+    {
+      "pattern": "/maintainers/tests/test_check_owned.py",
+      "owner": "W0-C"
+    },
+    {
+      "pattern": "/maintainers/tests/test_learn.py",
+      "owner": "W3-L"
+    }
+  ],
+  "roster": [
+    {
+      "id": "W0-A1",
+      "kind": "agent",
+      "harness": "claude-code",
+      "role": "Mechanical split of the 1.3.0 tool into the bp package, launcher, copied layout",
+      "lane": "W0-A1",
+      "model": "Opus"
+    },
+    {
+      "id": "W0-A2",
+      "kind": "agent",
+      "harness": "claude-code",
+      "role": "2.0 foundations: registry and hooks, findings, envelope, proofs, validation of schema 2",
+      "lane": "W0-A2",
+      "model": "Opus"
+    },
+    {
+      "id": "W0-B",
+      "kind": "agent",
+      "harness": "claude-code",
+      "role": "The migrate command and the version 2 example plan",
+      "lane": "W0-B",
+      "model": "Sonnet"
+    },
+    {
+      "id": "W0-C",
+      "kind": "agent",
+      "harness": "claude-code",
+      "role": "This plan and the pull-request ownership check",
+      "lane": "W0-C",
+      "model": "Sonnet"
+    },
+    {
+      "id": "W1-R",
+      "kind": "agent",
+      "harness": "claude-code",
+      "role": "Roadmap: milestones, tasks, ROADMAP.md, Roadmap tab",
+      "lane": "W1-R",
+      "model": "Sonnet"
+    },
+    {
+      "id": "W1-F",
+      "kind": "agent",
+      "harness": "claude-code",
+      "role": "Features, criteria, file links, FEATURES.md, Features tab",
+      "lane": "W1-F",
+      "model": "Sonnet"
+    },
+    {
+      "id": "W1-U",
+      "kind": "agent",
+      "harness": "claude-code",
+      "role": "Unknowns, blocking, claim refusal, Unknowns tab",
+      "lane": "W1-U",
+      "model": "Sonnet"
+    },
+    {
+      "id": "W2-FX1",
+      "kind": "agent",
+      "harness": "claude-code",
+      "role": "Archive fixture builders and the aapt2 goldens",
+      "lane": "W2-FX1",
+      "model": "Sonnet"
+    },
+    {
+      "id": "W2-FX2",
+      "kind": "agent",
+      "harness": "claude-code",
+      "role": "Text fixture builders",
+      "lane": "W2-FX2",
+      "model": "Sonnet"
+    },
+    {
+      "id": "W2-E",
+      "kind": "agent",
+      "harness": "claude-code",
+      "role": "Evidence store and the study engine",
+      "lane": "W2-E",
+      "model": "Opus"
+    },
+    {
+      "id": "W2-S",
+      "kind": "agent",
+      "harness": "claude-code",
+      "role": "Source lane, import graph, study trace",
+      "lane": "W2-S",
+      "model": "Opus"
+    },
+    {
+      "id": "W2-W",
+      "kind": "agent",
+      "harness": "claude-code",
+      "role": "Web lane: HAR, source maps, jsscan",
+      "lane": "W2-W",
+      "model": "Sonnet"
+    },
+    {
+      "id": "W2-D",
+      "kind": "agent",
+      "harness": "claude-code",
+      "role": "Desktop lane: asar reader",
+      "lane": "W2-D",
+      "model": "Opus"
+    },
+    {
+      "id": "W2-M",
+      "kind": "agent",
+      "harness": "claude-code",
+      "role": "Mobile lane: AXML, proto and dex readers",
+      "lane": "W2-M",
+      "model": "Opus"
+    },
+    {
+      "id": "W2-DA",
+      "kind": "agent",
+      "harness": "claude-code",
+      "role": "Data lane and compare lane",
+      "lane": "W2-DA",
+      "model": "Sonnet"
+    },
+    {
+      "id": "W2-T",
+      "kind": "agent",
+      "harness": "claude-code",
+      "role": "Tier B and C: capture and importers",
+      "lane": "W2-T",
+      "model": "Sonnet"
+    },
+    {
+      "id": "W2-SY",
+      "kind": "agent",
+      "harness": "claude-code",
+      "role": "Synthesis: synth, check, adopt",
+      "lane": "W2-SY",
+      "model": "Opus"
+    },
+    {
+      "id": "W3-V",
+      "kind": "agent",
+      "harness": "claude-code",
+      "role": "Verification records, criterion checks, accept",
+      "lane": "W3-V",
+      "model": "Sonnet"
+    },
+    {
+      "id": "W3-A",
+      "kind": "agent",
+      "harness": "claude-code",
+      "role": "Surveyor and evaluator agents and their installation",
+      "lane": "W3-A",
+      "model": "Opus"
+    },
+    {
+      "id": "W3-R1",
+      "kind": "agent",
+      "harness": "claude-code",
+      "role": "Builder rules: SKILL.md, agent rules, readiness review",
+      "lane": "W3-R1",
+      "model": "Sonnet"
+    },
+    {
+      "id": "W3-R2",
+      "kind": "agent",
+      "harness": "claude-code",
+      "role": "References, README and the docs check",
+      "lane": "W3-R2",
+      "model": "Sonnet"
+    },
+    {
+      "id": "W3-L",
+      "kind": "agent",
+      "harness": "claude-code",
+      "role": "Learning-loop upgrades: signals, SPEC.md, maintainer agents",
+      "lane": "W3-L",
+      "model": "Sonnet"
+    },
+    {
+      "id": "W4-E2E",
+      "kind": "agent",
+      "harness": "claude-code",
+      "role": "End-to-end and registry tests",
+      "lane": "W4-E2E",
+      "model": "Sonnet"
+    },
+    {
+      "id": "W4-M",
+      "kind": "agent",
+      "harness": "claude-code",
+      "role": "Mutation testing",
+      "lane": "W4-M",
+      "model": "Sonnet"
+    },
+    {
+      "id": "W4-X",
+      "kind": "agent",
+      "harness": "claude-code",
+      "role": "Changes to the example generator",
+      "lane": "W4-X",
+      "model": "Sonnet"
+    },
+    {
+      "id": "orchestrator",
+      "kind": "agent",
+      "harness": "claude-code",
+      "role": "Merges, version lines, CHANGELOG, examples, the contract, this plan's rules after a table change",
+      "lane": "orchestrator",
+      "model": "Opus"
+    },
+    {
+      "id": "maintainers",
+      "kind": "human",
+      "role": "Files from before 2.0 that no workstream of the table touches",
+      "lane": "maintainers"
+    }
+  ],
+  "decisions": [
+    {
+      "id": "D1",
+      "decision": "Files marked with a dagger in section 11 are recorded as W0-A2's; bp/version.py and the launcher (whole files), CHANGELOG.md, examples/**, .gitignore and the contract as orchestrator.",
+      "why": "Section 11 hands the dagger files from W0-A1 to W0-A2 and the version lines, changelog and examples to the orchestrator after W0-A1 merges.",
+      "source": "maintainers/design/v2-contract.md section 11"
+    },
+    {
+      "id": "D2",
+      "decision": "Files no workstream of the table touches belong to the roster id maintainers.",
+      "why": "Every tracked file needs exactly one owner; these are the pre-2.0 files that stay as they are.",
+      "source": "maintainers/design/v2-contract.md section 11"
+    },
+    {
+      "id": "D4",
+      "decision": "The .blueprint/** files are recorded as orchestrator, the final owner once the W0-C pull request merges (a third handover). maintainers/check_owned.py and its test stay W0-C.",
+      "why": "Only a person or the orchestrator changes the plan; the check reads it from the base, so a builder branch cannot widen its own area.",
+      "source": "orchestrator ruling, review round 1"
+    },
+    {
+      "id": "D3",
+      "decision": "The tool copy in .blueprint/bin is not committed.",
+      "why": "The repository is the tool; a copy would go stale at every version bump.",
+      "source": "W0-C"
+    }
+  ],
+  "ignore": [],
+  "milestones": [],
+  "features": [],
+  "tasks": [],
+  "unknowns": []
+}

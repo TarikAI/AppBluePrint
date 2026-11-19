@@ -1,0 +1,114 @@
+{
+  "stateVersion": 2,
+  "files": {},
+  "patterns": {
+    "dogfood-views": {
+      "instances": [
+        ".blueprint/ROSTER.md",
+        ".blueprint/STRUCTURE.md",
+        ".blueprint/blueprint.json",
+        ".blueprint/log.jsonl",
+        ".blueprint/map.html",
+        ".blueprint/state.json"
+      ]
+    },
+    "example-project": {
+      "instances": [
+        "examples/snag-desk/.blueprint/README.md",
+        "examples/snag-desk/.blueprint/ROSTER.md",
+        "examples/snag-desk/.blueprint/STRUCTURE.md",
+        "examples/snag-desk/.blueprint/bin/MANIFEST",
+        "examples/snag-desk/.blueprint/bin/VERSION",
+        "examples/snag-desk/.blueprint/bin/blueprint.py",
+        "examples/snag-desk/.blueprint/bin/bp/__init__.py",
+        "examples/snag-desk/.blueprint/bin/bp/api.py",
+        "examples/snag-desk/.blueprint/bin/bp/cli.py",
+        "examples/snag-desk/.blueprint/bin/bp/commands/__init__.py",
+        "examples/snag-desk/.blueprint/bin/bp/commands/data.py",
+        "examples/snag-desk/.blueprint/bin/bp/commands/learn.py",
+        "examples/snag-desk/.blueprint/bin/bp/commands/plan.py",
+        "examples/snag-desk/.blueprint/bin/bp/commands/progress.py",
+        "examples/snag-desk/.blueprint/bin/bp/core.py",
+        "examples/snag-desk/.blueprint/bin/bp/data.py",
+        "examples/snag-desk/.blueprint/bin/bp/export.py",
+        "examples/snag-desk/.blueprint/bin/bp/globs.py",
+        "examples/snag-desk/.blueprint/bin/bp/install.py",
+        "examples/snag-desk/.blueprint/bin/bp/learn.py",
+        "examples/snag-desk/.blueprint/bin/bp/migrate.py",
+        "examples/snag-desk/.blueprint/bin/bp/plan.py",
+        "examples/snag-desk/.blueprint/bin/bp/registry.py",
+        "examples/snag-desk/.blueprint/bin/bp/rules.py",
+        "examples/snag-desk/.blueprint/bin/bp/status.py",
+        "examples/snag-desk/.blueprint/bin/bp/validate.py",
+        "examples/snag-desk/.blueprint/bin/bp/verify.py",
+        "examples/snag-desk/.blueprint/bin/bp/version.py",
+        "examples/snag-desk/.blueprint/bin/bp/views/__init__.py",
+        "examples/snag-desk/.blueprint/bin/bp/views/context.py",
+        "examples/snag-desk/.blueprint/bin/bp/views/render.py",
+        "examples/snag-desk/.blueprint/bin/bp/views/roster.py",
+        "examples/snag-desk/.blueprint/bin/bp/views/structure.py",
+        "examples/snag-desk/.blueprint/bin/map.template.html",
+        "examples/snag-desk/.blueprint/bin/mindmap.js",
+        "examples/snag-desk/.blueprint/blueprint.json",
+        "examples/snag-desk/.blueprint/log.jsonl",
+        "examples/snag-desk/.blueprint/map.html",
+        "examples/snag-desk/.blueprint/state.json",
+        "examples/snag-desk/.env.example",
+        "examples/snag-desk/Cargo.toml",
+        "examples/snag-desk/README.md",
+        "examples/snag-desk/apps/web/package.json",
+        "examples/snag-desk/apps/web/src/screens/SnagDetailScreen.tsx",
+        "examples/snag-desk/crates/snag-api/Cargo.toml",
+        "examples/snag-desk/crates/snag-api/migrations/0001_snags.sql",
+        "examples/snag-desk/crates/snag-api/src/main.rs",
+        "examples/snag-desk/crates/snag-core/Cargo.toml",
+        "examples/snag-desk/crates/snag-core/src/lib.rs",
+        "examples/snag-desk/notes/todo.txt"
+      ]
+    },
+    "example-plan": {
+      "instances": []
+    },
+    "v1-goldens": {
+      "instances": [
+        "app-blueprint/tests/data/v1/blueprint-1.3.0.py",
+        "app-blueprint/tests/data/v1/make_goldens.py",
+        "app-blueprint/tests/data/v1/snag-desk-input.json",
+        "app-blueprint/tests/data/v1/views.json"
+      ]
+    },
+    "android-goldens": {
+      "instances": [
+        "app-blueprint/tests/data/android/AndroidManifest.xml",
+        "app-blueprint/tests/data/android/manifest.axml",
+        "app-blueprint/tests/data/android/manifest.proto"
+      ]
+    },
+    "issue-templates": {
+      "instances": [
+        ".github/ISSUE_TEMPLATE/bug_report.yml",
+        ".github/ISSUE_TEMPLATE/config.yml",
+        ".github/ISSUE_TEMPLATE/feature.yml",
+        ".github/ISSUE_TEMPLATE/guidance.yml",
+        ".github/ISSUE_TEMPLATE/preset.yml"
+      ]
+    },
+    "stack-presets": {
+      "instances": [
+        "app-blueprint/references/stacks/nextjs-prisma.md",
+        "app-blueprint/references/stacks/pnpm-monorepo-docker.md",
+        "app-blueprint/references/stacks/rust-agent-engine.md",
+        "app-blueprint/references/stacks/vite-react-supabase.md"
+      ]
+    }
+  },
+  "unplanned": [],
+  "syncedAt": "2026-11-19T20:44:13Z",
+  "head": "a474596",
+  "tasks": {},
+  "ignoredTracked": {
+    "count": 0,
+    "paths": []
+  },
+  "missingModify": []
+}
