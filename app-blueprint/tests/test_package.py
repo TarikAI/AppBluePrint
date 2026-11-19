@@ -27,9 +27,9 @@ frozen = S.load_frozen()
 goldens = S.load_module(S.DATA_V1 / "make_goldens.py", "bp_make_goldens")
 
 # contract 1.2, as far as W0-A1 builds it; same-rank modules may not import each other (views/* excepted)
-IMPORT_RANK = {"version": 0, "core": 1, "globs": 2, "learn": 3, "plan": 5, "rules": 6, "data": 6, "status": 7,
-               "verify": 8, "validate": 18, "views": 19, "export": 20, "install": 20, "commands": 21, "cli": 22,
-               "api": 23}
+IMPORT_RANK = {"version": 0, "core": 1, "globs": 2, "learn": 3, "migrate": 4, "plan": 5, "rules": 6, "data": 6,
+               "status": 7, "verify": 8, "registry": 17, "validate": 18, "views": 19, "export": 20, "install": 20,
+               "commands": 21, "cli": 22, "api": 23}
 DOMAIN = {"rules", "data", "status", "verify"}
 VERSION_LINE = re.compile(r'^TOOL_VERSION = "([^"]+)"', re.M)
 
@@ -62,7 +62,9 @@ class NamesAndVersionTest(unittest.TestCase):
         self.assertEqual(sorted(set(bp.__all__)), sorted(set(names)))
 
     def test_1x_constants_unchanged(self):
-        skip = {"TOOL_VERSION", "HERE", "_RX_CACHE"}
+        # W0-A2 changes three, as the contract says: SCHEMA_VERSION and SKELETON become version 2 (1.5 row e, 2.1) and
+        # VALIDATION_CODES gains the 2.0 codes in front of the 1.x list (7.4); checked below instead.
+        skip = {"TOOL_VERSION", "HERE", "_RX_CACHE", "SCHEMA_VERSION", "SKELETON", "VALIDATION_CODES"}
         for n in frozen_names():
             old = getattr(frozen, n)
             if n in skip or callable(old) or isinstance(old, types.ModuleType):
@@ -71,6 +73,12 @@ class NamesAndVersionTest(unittest.TestCase):
                 self.assertEqual(getattr(bp, n), old)
         self.assertEqual(bp.HERE, S.SCRIPTS)
         self.assertIs(bp.subprocess, __import__("subprocess"))
+        self.assertEqual(bp.SCHEMA_VERSION, 2)
+        new = ("milestones", "features", "tasks", "unknowns")
+        self.assertEqual(bp.SKELETON, dict(frozen.SKELETON, version=2, **{k: [] for k in new}))
+        self.assertEqual(list(bp.SKELETON)[-4:], list(new))
+        n_old = len(frozen.VALIDATION_CODES)
+        self.assertEqual(bp.VALIDATION_CODES[-n_old:], frozen.VALIDATION_CODES)
 
     def test_version_lines_match(self):
         launcher = VERSION_LINE.search(S.LAUNCHER.read_text(encoding="utf-8")).group(1)
@@ -130,15 +138,21 @@ class GoldenViewsTest(unittest.TestCase):
             try:
                 with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
                     plan = tool.load_plan(root)
-                    found = tool.validate_plan(plan)
+                    errors, warnings = tool.validate_plan(plan)
+                    if tool is bp:  # 1.5 row d: the schema-v1 warning is new in 2.0
+                        warnings = [w for w in warnings if not w.startswith("blueprint.json is schema version 1")]
                     state = tool.load_state(root)
                     if plan["stores"] or plan["resources"]:
                         state["data"] = tool.scan_data(root, plan, state, tool.repo_files(root, plan))
                     comp = tool.compute(root, plan, state)
-                    return ("ok", found, tool.render_structure(plan, state, comp), tool.render_roster(plan, state, comp))
+                    return ("ok", (errors, warnings), tool.render_structure(plan, state, comp),
+                            tool.render_roster(plan, state, comp))
             except SystemExit as e:
-                return ("exit", e.code, err.getvalue())
+                return ("exit", e.code, err.getvalue() + (getattr(e, "message", "") or ""))
 
+        # 1.5 row k: the top-level version is checked at load from 2.0 on (1.3.0 reported it only in validate)
+        version_errors = ("blueprint.json: version is required", "blueprint.json: version must be a whole number",
+                          "blueprint.json is schema version")
         count, differ = 0, []
         with mock.patch.object(bp.subprocess, "run", side_effect=OSError("no git in the fuzz golden test")):
             for path in tf.mutation_paths(base):
@@ -150,8 +164,13 @@ class GoldenViewsTest(unittest.TestCase):
                         continue
                     count += 1
                     (root / ".blueprint" / "blueprint.json").write_text(json.dumps(plan), encoding="utf-8")
-                    if outcome(bp) != outcome(frozen):
-                        differ.append(f"{'/'.join(map(str, path))} = " + ("<deleted>" if delete else json.dumps(value)))
+                    label = f"{'/'.join(map(str, path))} = " + ("<deleted>" if delete else json.dumps(value))
+                    got = outcome(bp)
+                    if path == ("version",):
+                        if not (got[:2] == ("exit", 1) and any(v in got[2] for v in version_errors)):
+                            differ.append(label + " (row k: expected a load error)")
+                    elif got != outcome(frozen):
+                        differ.append(label)
         self.assertGreater(count, 1500)
         self.assertEqual(differ, [], f"{len(differ)} of {count} fuzz plans differ from 1.3.0")
 
@@ -325,8 +344,8 @@ class CopiedToolTest(CopyTestBase):
         before = {p: p.stat().st_mtime_ns for p in self.bin.rglob("*") if p.is_file()}
         r = S.run_script(self.copy, ["init", "--refresh-tool"], self.root, env=self.env)  # init's root is the cwd
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn("This is already the project's copy (tool 1.9.0). Run the skill's script to refresh it: "
-                      "python <skill>/scripts/blueprint.py init --refresh-tool", r.stdout)
+        self.assertIn(f"This is already the project's copy (tool {bp.TOOL_VERSION}). Run the skill's script to refresh "
+                      "it: python <skill>/scripts/blueprint.py init --refresh-tool", r.stdout)
         self.assertNotIn("Refreshed", r.stdout)
         self.assertEqual(before, {p: p.stat().st_mtime_ns for p in self.bin.rglob("*") if p.is_file()})
 
