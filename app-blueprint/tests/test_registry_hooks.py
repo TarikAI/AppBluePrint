@@ -618,6 +618,87 @@ class ViewFileTest(CliTestBase):
                 self.assertEqual(os.stat(view).st_nlink, 1)
                 self.assertEqual(view.read_text(encoding="utf-8"), HEADER + "\nversion two\n")
 
+    def test_the_temp_name_is_never_written_through(self):
+        """Migrate review follow-up: whatever already sits at <view>.tmp (a hard link, a file) is unlinked first, so
+        an outside file linked there keeps its bytes; a folder there stops render with a message naming it."""
+        self.run_("sync")
+        name = "TMPCASE.md"
+        src = f"WANT = [{HEADER!r} + '\\none\\n']\ndef views(ctx):\n    return {{{name!r}: WANT[0]}}\n"
+        with extension({"views/features_md.py": src}):
+            mod = importlib.import_module("bp.views.features_md")
+            self.assertEqual(self.run_("render")[0], 0)
+            view = self.root / ".blueprint" / name
+            tmp = self.root / ".blueprint" / (name + ".tmp")
+            victim, linked = self.outside_file("a.md"), self.outside_file("b.md")
+            before = (victim.read_bytes(), linked.read_bytes())
+            view.unlink()
+            self.link_or_skip("hard", victim, view)  # the recorded view became a link: render writes via the temp name
+            self.link_or_skip("hard", linked, tmp)    # and something already sits at that temp name
+            mod.WANT[0] = HEADER + "\ntwo\n"
+            code, _, err = self.run_("render")
+            self.assertEqual(code, 0, err)
+            self.assertEqual((victim.read_bytes(), linked.read_bytes()), before)
+            self.assertEqual(view.read_text(encoding="utf-8"), HEADER + "\ntwo\n")
+            self.assertFalse(tmp.exists())
+            view.unlink()
+            self.link_or_skip("hard", victim, view)
+            tmp.mkdir()
+            mod.WANT[0] = HEADER + "\nthree\n"
+            code, _, err = self.run_("render")
+            self.assertEqual(code, 1, err)
+            self.assertIn(name + ".tmp", err)
+            self.assertEqual(victim.read_bytes(), before[0])
+
+    def test_a_view_entry_that_cannot_be_replaced_is_a_conflict(self):
+        """Review P10-4: a read-only or open temp file, or a read-only hard-linked view, ends as a view conflict
+        naming the path (render 1; sync keeps its exit code), never exit 70; render's own temp file is removed."""
+        import stat
+        self.run_("sync")
+        name = "BUSY.md"
+        src = f"WANT = [{HEADER!r} + '\\none\\n']\ndef views(ctx):\n    return {{{name!r}: WANT[0]}}\n"
+        view = self.root / ".blueprint" / name
+        tmp = self.root / ".blueprint" / (name + ".tmp")
+        with extension({"views/features_md.py": src}):
+            mod = importlib.import_module("bp.views.features_md")
+            self.assertEqual(self.run_("render")[0], 0)
+            for case in ("read-only temp", "open temp", "read-only linked view"):
+                with self.subTest(case=case):
+                    victim = self.outside_file(case.replace(" ", "-") + ".md")
+                    before = victim.read_bytes()
+                    if view.exists():
+                        os.chmod(view, stat.S_IREAD | stat.S_IWRITE)
+                        view.unlink()
+                    self.link_or_skip("hard", victim, view)
+                    handle = None
+                    if case == "read-only temp":
+                        tmp.write_text("leftover", encoding="utf-8")
+                        os.chmod(tmp, stat.S_IREAD)
+                    elif case == "open temp":
+                        tmp.write_text("leftover", encoding="utf-8")
+                        handle = open(tmp, "rb")
+                    else:
+                        os.chmod(view, stat.S_IREAD)
+                    mod.WANT[0] = HEADER + "\n" + case + "\n"
+                    try:
+                        code, _, err = self.run_("render")
+                        sync_code, _, sync_err = self.run_("sync")
+                    finally:
+                        if handle:
+                            handle.close()
+                        for p in (tmp, view):
+                            if os.path.lexists(p):
+                                os.chmod(p, stat.S_IREAD | stat.S_IWRITE)
+                    self.assertIn(code, (0, 1), err)
+                    self.assertEqual(sync_code, 0, sync_err)
+                    if code == 1:
+                        self.assertIn(name, err)
+                        self.assertIn("cannot be written", err)
+                    self.assertEqual(victim.read_bytes(), before, "never written through")
+                    self.assertFalse(any(p.name.startswith(name + ".tmp") and p.read_text(encoding="utf-8") != "leftover"
+                                         for p in (self.root / ".blueprint").iterdir()), "render's own temp file is removed")
+                    if tmp.exists():
+                        tmp.unlink()
+
     def test_the_header_check_reads_a_bounded_amount(self):
         """Review P7-2: at most five lines of at most 4096 bytes each; a huge file with no newline is a conflict."""
         big = self.root / ".blueprint" / "BIG.md"
@@ -868,6 +949,25 @@ class UnreadablePlanTest(CliTestBase):
             self.assertIn("unexpected error", err)
             self.assertIn(REPAIR, err)
             self.assertEqual(self.run_("guard", ".blueprint/blueprint.json")[0], 0, "the repair write stays allowed")
+
+
+class LoadBugTest(CliTestBase):
+    """Review P10-3: a RecursionError in a load step on a shallow plan is a bug: an incident (exit 70; guard 2), never
+    the bad-json 'nested too deeply' load error."""
+
+    def test_a_shallow_plan_crash_is_an_incident(self):
+        from bp import plan as bplan_mod
+
+        def recurse(plan):
+            return recurse(plan)
+
+        with mock.patch.object(bplan_mod, "normalize_plan", recurse):
+            code, _, err = self.run_("status")
+            self.assertEqual(code, 70, err)
+            self.assertNotIn("nested too deeply", err)
+            code, _, err = self.run_("guard", "random/new.txt")
+            self.assertEqual(code, 2, err)
+            self.assertIn("unexpected error", err)
 
 
 class GuardModeTest(CliTestBase):
