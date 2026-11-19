@@ -655,3 +655,49 @@ class DoctorTest(CopyTestBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InstallHelpersTest(unittest.TestCase):
+    """Review round 2 nits on PR #2: a read-only folder, and a temp file that cannot be removed."""
+
+    def setUp(self):
+        import bp.install as install
+        self.install = install
+        self.tmp = Path(tempfile.mkdtemp(prefix="bp-install-"))
+
+    def tearDown(self):
+        for folder, dirs, files in os.walk(self.tmp):
+            for name in dirs + files:
+                os.chmod(os.path.join(folder, name), stat.S_IWRITE | stat.S_IREAD | stat.S_IEXEC)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_rmtree_clears_read_only_on_the_folder_itself(self):
+        root = self.tmp / "bp.old"
+        root.mkdir()
+        (root / "a.py").write_text("x = 1\n", encoding="utf-8")
+        seen = []
+        real = self.install._writable
+
+        def spy(path):
+            seen.append(Path(path))
+            real(path)
+
+        with mock.patch.object(self.install, "_writable", spy):
+            self.install._rmtree(root)
+        self.assertIn(root, seen, "the folder being removed must be made writable too, not only what is inside it")
+        self.assertFalse(root.exists())
+
+    def test_copy_exits_1_when_the_old_file_cannot_be_removed(self):
+        src = self.tmp / "src.py"
+        dst = self.tmp / "dst.py"
+        src.write_text("new\n", encoding="utf-8")
+        dst.write_text("old\n", encoding="utf-8")
+        err = io.StringIO()
+        with mock.patch.object(self.install.os, "remove", side_effect=PermissionError(13, "in use")), \
+                contextlib.redirect_stderr(err):
+            with self.assertRaises(SystemExit) as cm:
+                self.install._copy(src, dst)
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn("in use", err.getvalue())
+        self.assertIn("dst.py", err.getvalue())
+        self.assertIn("init --refresh-tool", err.getvalue())
