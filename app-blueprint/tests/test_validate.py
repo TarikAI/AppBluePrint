@@ -982,5 +982,96 @@ class FindingsTest(TempRoot):
                     self.assertIn("rows", out)
 
 
+# ---------------------------------------------------------------------------------------------------- deep nesting
+
+MARK = '"__DEEP__"'
+
+
+def deep_json(depth):
+    return "[" * depth + "1" + "]" * depth
+
+
+def reader_limit():
+    """The deepest list the JSON reader accepts, measured in a fresh process (the limit depends on the version)."""
+    code = ("import json\nlo, hi = 50, 200000\nwhile lo < hi:\n    m = (lo + hi + 1) // 2\n    try:\n"
+            "        json.loads('[' * m + ']' * m)\n        lo = m\n    except RecursionError:\n        hi = m - 1\nprint(lo)")
+    return int(subprocess.run([S.PY, "-c", code], capture_output=True, text=True).stdout)
+
+
+class DeepNestingTest(unittest.TestCase):
+    """Migrate review R2-M3: a plan the JSON reader accepts and 1.3.0 loaded loads in 2.0 (upgrade_plan and
+    upgrade_state copy without recursion), with the same STRUCTURE.md and ROSTER.md; a plan nested deeper than any
+    step can take is the bad-json load error (exit 1, 2 for guard), never exit 70."""
+
+    LIMIT = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.LIMIT = reader_limit()
+        cls.base = Path(tempfile.mkdtemp(prefix="bp deep "))
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def project(self, tag, where, depth):
+        root = self.base / f"{tag}-{where}-{depth}"
+        (root / ".blueprint").mkdir(parents=True)
+        plan = v1_plan()
+        state = {"files": {}, "patterns": {}, "unplanned": [], "syncedAt": None, "head": None}
+        if where == "top":
+            plan["x"] = "__DEEP__"
+        elif where == "file":
+            plan["files"][0]["extra"] = "__DEEP__"
+        else:
+            state["x"] = "__DEEP__"
+        (root / ".blueprint" / "blueprint.json").write_text(json.dumps(plan).replace(MARK, deep_json(depth)), encoding="utf-8")
+        (root / ".blueprint" / "state.json").write_text(json.dumps(state).replace(MARK, deep_json(depth)), encoding="utf-8")
+        return root
+
+    def run_tool(self, tool, args, root):
+        return S.run_script(tool, list(args) + ["--root", root], root).returncode
+
+    def test_wherever_1_3_0_loads_2_0_loads(self):
+        depths = [100, 300, 500, 900, max(100, self.LIMIT - 300)]
+        for where in ("top", "file", "state"):
+            for depth in depths:
+                with self.subTest(where=where, depth=depth):
+                    old, new = self.project("old", where, depth), self.project("new", where, depth)
+                    for args in (["validate"], ["status"], ["render"]):
+                        before = self.run_tool(S.FROZEN, args, old)
+                        if before == 0:
+                            self.assertEqual(self.run_tool(S.LAUNCHER, args, new), 0, args)
+                    for view in ("STRUCTURE.md", "ROSTER.md"):
+                        a, b = old / ".blueprint" / view, new / ".blueprint" / view
+                        if a.exists():
+                            self.assertEqual(b.read_bytes(), a.read_bytes(), view)
+
+    def test_deeper_than_the_reader_is_a_load_error(self):
+        root = self.project("over", "top", self.LIMIT + 500)
+        self.assertEqual(self.run_tool(S.LAUNCHER, ["validate"], root), 1)
+        self.assertEqual(self.run_tool(S.LAUNCHER, ["guard", "x.txt"], root), 2)
+        r = S.run_script(S.LAUNCHER, ["validate", "--json", "--root", root], root)
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertEqual(json.loads(r.stdout)["error"]["code"], "bad-json")
+
+    def test_upgrade_is_iterative_and_pure(self):
+        deep = json.loads(deep_json(500))
+        raw = dict(v1_plan(), x=deep)
+        up = migrate.upgrade_plan(raw)
+        self.assertEqual(up["version"], 2)
+        self.assertIs(raw["x"], deep, "the input is not changed")
+        self.assertEqual((raw["version"], "features" in raw), (1, False))
+        self.assertIsNot(up["x"], deep, "nothing is shared")
+        node_a, node_b = up["x"], deep
+        for _ in range(500):
+            node_a, node_b = node_a[0], node_b[0]
+        self.assertEqual(node_a, node_b)
+        st = migrate.upgrade_state({"files": {}, "x": deep})
+        self.assertEqual(st["stateVersion"], 2)
+        self.assertIsNot(st["x"], deep)
+        self.assertEqual(migrate.upgrade_plan(dict(v2_plan(), x=deep))["version"], 2)
+
+
 if __name__ == "__main__":
     unittest.main()

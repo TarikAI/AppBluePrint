@@ -615,6 +615,37 @@ class ViewFileTest(CliTestBase):
                 self.assertEqual(os.stat(view).st_nlink, 1)
                 self.assertEqual(view.read_text(encoding="utf-8"), HEADER + "\nversion two\n")
 
+    def test_the_temp_name_is_never_written_through(self):
+        """Migrate review follow-up: whatever already sits at <view>.tmp (a hard link, a file) is unlinked first, so
+        an outside file linked there keeps its bytes; a folder there stops render with a message naming it."""
+        self.run_("sync")
+        name = "TMPCASE.md"
+        src = f"WANT = [{HEADER!r} + '\\none\\n']\ndef views(ctx):\n    return {{{name!r}: WANT[0]}}\n"
+        with extension({"views/features_md.py": src}):
+            mod = importlib.import_module("bp.views.features_md")
+            self.assertEqual(self.run_("render")[0], 0)
+            view = self.root / ".blueprint" / name
+            tmp = self.root / ".blueprint" / (name + ".tmp")
+            victim, linked = self.outside_file("a.md"), self.outside_file("b.md")
+            before = (victim.read_bytes(), linked.read_bytes())
+            view.unlink()
+            self.link_or_skip("hard", victim, view)  # the recorded view became a link: render writes via the temp name
+            self.link_or_skip("hard", linked, tmp)    # and something already sits at that temp name
+            mod.WANT[0] = HEADER + "\ntwo\n"
+            code, _, err = self.run_("render")
+            self.assertEqual(code, 0, err)
+            self.assertEqual((victim.read_bytes(), linked.read_bytes()), before)
+            self.assertEqual(view.read_text(encoding="utf-8"), HEADER + "\ntwo\n")
+            self.assertFalse(tmp.exists())
+            view.unlink()
+            self.link_or_skip("hard", victim, view)
+            tmp.mkdir()
+            mod.WANT[0] = HEADER + "\nthree\n"
+            code, _, err = self.run_("render")
+            self.assertEqual(code, 1, err)
+            self.assertIn(name + ".tmp", err)
+            self.assertEqual(victim.read_bytes(), before[0])
+
     def test_the_header_check_reads_a_bounded_amount(self):
         """Review P7-2: at most five lines of at most 4096 bytes each; a huge file with no newline is a conflict."""
         big = self.root / ".blueprint" / "BIG.md"
