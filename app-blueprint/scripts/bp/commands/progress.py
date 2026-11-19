@@ -11,6 +11,7 @@ from pathlib import Path
 from bp.core import append_log, bp_dir, die, find_root, git_head, norm, now_iso
 from bp.globs import pattern_instance_rx
 from bp.plan import GLYPH, LABEL, STATES, load_plan, load_state, owner_of, planned_file, save_state
+from bp.registry import command_built
 from bp.validate import validate_plan
 from bp.views.render import render_all
 
@@ -135,6 +136,9 @@ def cmd_status(args):
             print(f"    {r['path']}  ({r['owner']}, {r['phase']})")
         if not ready:
             print("    nothing: everything in the current phase is claimed, built or waiting on a dependency")
+    if plan.get("_from") == 1:  # contract 3.3; the migrate hint only once the command exists (1.5 row d)
+        print("\nSchema version 1: " + ("run migrate to use milestones, features, tasks and unknowns."
+                                        if command_built("migrate") else "it keeps working."))
 
 
 def cmd_owner(args):

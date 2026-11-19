@@ -8,7 +8,7 @@ Standard library only, Python 3.10+. Every 1.x name stays importable from this f
 import os
 import sys
 
-TOOL_VERSION = "1.9.0"  # mirror of bp/version.py; test_package keeps the two equal
+TOOL_VERSION = "1.9.1"  # mirror of bp/version.py; test_package keeps the two equal
 
 
 def _key(p):

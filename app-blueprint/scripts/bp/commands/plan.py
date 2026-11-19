@@ -12,7 +12,9 @@ from pathlib import Path
 from bp.version import TOOL_VERSION
 from bp.core import append_log, bp_dir, die, find_root, norm, read_json, write_json
 from bp.learn import _copy_version, _file_tool_version
+from bp.migrate import plan_version, upgrade_state
 from bp.plan import SKELETON, load_plan, load_state, owner_of, save_state
+from bp.registry import command_built
 from bp.validate import record_friction, validate_plan
 from bp.views.render import render_all
 from bp.export import agenticteam_tasks, shq
@@ -206,6 +208,14 @@ def cmd_init(args):
             print(f"Upgraded .blueprint/bin from the single-file tool {old} to the package tool {TOOL_VERSION}.")
         else:
             print(f"Refreshed .blueprint/bin to tool {TOOL_VERSION}.")
+        try:
+            raw = read_json(plan_path)
+        except (OSError, ValueError):
+            raw = None
+        if plan_version(raw) == 1:  # contract 1.7; the migrate hint only once the command exists (1.5 row d)
+            hint = (" To use milestones, features, tasks and unknowns, run: python .blueprint/bin/blueprint.py migrate"
+                    if command_built("migrate") else "")
+            print("Your blueprint is schema version 1. It keeps working." + hint)
         return
     if plan_path.exists():
         die(f"{plan_path} already exists. Edit it, or use --refresh-tool to update the copied script.", 1)
@@ -214,7 +224,7 @@ def cmd_init(args):
     plan["app"]["name"] = args.name or root.name
     plan["app"]["preset"] = args.preset or ""
     write_json(plan_path, plan)
-    save_state(root, {"files": {}, "patterns": {}, "unplanned": [], "syncedAt": None, "head": None})
+    save_state(root, upgrade_state({"files": {}, "patterns": {}, "unplanned": [], "syncedAt": None, "head": None}))
     (d / "log.jsonl").touch()
     copy_tool(root)
     readme = d / "README.md"

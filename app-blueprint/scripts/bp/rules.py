@@ -5,7 +5,7 @@ validate.validate_plan calls validate(), then data.validate_data(), then validat
 import json
 import re
 
-from bp.version import SCHEMA_VERSION
+from bp.version import SUPPORTED_SCHEMAS
 from bp.core import norm
 from bp.globs import pattern_instance_rx
 from bp.plan import ACTIONS, ROSTER_KINDS, WRITE_ACCESS, item_verify, owner_of, phase_index
@@ -13,8 +13,9 @@ from bp.plan import ACTIONS, ROSTER_KINDS, WRITE_ACCESS, item_verify, owner_of, 
 
 def validate(plan, E, W, vctx):
     """The body of 1.x validate_plan up to the data check, unchanged. E and W append an error or a warning."""
-    if plan.get("version") != SCHEMA_VERSION:
-        E(f"version must be {SCHEMA_VERSION}")
+    v = plan.get("version")
+    if not (type(v) is int and v in SUPPORTED_SCHEMAS):  # load_plan rejects these first; direct callers get this
+        E("version must be 1 or 2")
     if not (plan.get("app") or {}).get("name"):
         E("app.name is empty")
 

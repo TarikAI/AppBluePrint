@@ -1,10 +1,12 @@
 """cli: main(), moved from blueprint.py 1.3.0 (contract 1.5), and the package completeness check."""
 import argparse
 import importlib
+import json
 import os
 import sys
 
 from bp.version import TOOL_VERSION
+from bp.core import BlueprintError
 from bp.learn import FEEDBACK_KINDS, record_incident
 from bp.commands.plan import cmd_contracts, cmd_export, cmd_init, cmd_render, cmd_validate
 from bp.commands.progress import cmd_claim, cmd_guard, cmd_hook, cmd_mark, cmd_owner, cmd_status, cmd_sync, cmd_verify
@@ -16,8 +18,8 @@ from bp.commands.learn import cmd_doctor, cmd_feedback, cmd_report
 # 1 otherwise) instead of failing later inside a command. All but bp.verify are imported at start anyway, so this
 # costs one small module. test_package keeps the list equal to the files of the package.
 PACKAGE_MODULES = (
-    "bp", "bp.version", "bp.core", "bp.globs", "bp.learn", "bp.plan", "bp.rules", "bp.data", "bp.status", "bp.verify",
-    "bp.validate", "bp.views", "bp.views.structure", "bp.views.roster", "bp.views.render", "bp.export", "bp.install",
+    "bp", "bp.version", "bp.core", "bp.globs", "bp.learn", "bp.migrate", "bp.plan", "bp.rules", "bp.data", "bp.status", "bp.verify",
+    "bp.registry", "bp.validate", "bp.views", "bp.views.structure", "bp.views.roster", "bp.views.render", "bp.export", "bp.install",
     "bp.commands", "bp.commands.plan", "bp.commands.progress", "bp.commands.data", "bp.commands.learn",
 )
 
@@ -30,6 +32,23 @@ def _check_complete():
 
 
 _check_complete()
+
+
+def _guarding(args):
+    """guard and hook pre fail closed: any 2.0 error there exits 2, which Claude Code treats as a refusal."""
+    return args.cmd == "guard" or (args.cmd == "hook" and getattr(args, "when", None) == "pre")
+
+
+def report_error(args, e):
+    """Print a BlueprintError: the 7.1 failure envelope on stdout with --json, else `error:` and `  next:` on stderr."""
+    if getattr(args, "json", False):
+        print(json.dumps({"ok": False, "command": args.cmd, "error": {"code": e.error, "message": e.message,
+                                                                      "entry": e.entry, "next": e.next}},
+                         indent=2, ensure_ascii=False))
+        return
+    print(f"error: {e.message}", file=sys.stderr)
+    if e.next:
+        print(f"  next: {e.next}", file=sys.stderr)
 
 
 def main(argv=None):
@@ -134,6 +153,9 @@ def main(argv=None):
         if os.environ.get("APP_BLUEPRINT_SELFTEST_CRASH") == "1":  # test hook for the incident path
             raise RuntimeError("selftest crash")
         args.fn(args)
+    except BlueprintError as e:
+        report_error(args, e)
+        sys.exit(2 if _guarding(args) else e.code)
     except (SystemExit, KeyboardInterrupt):
         raise
     except Exception as exc:  # an unexpected error is a bug in the tool: record it for the learning loop

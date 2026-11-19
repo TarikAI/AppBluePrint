@@ -84,6 +84,22 @@ def die(msg, code=1):
     sys.exit(code)
 
 
+class BlueprintError(SystemExit):
+    """An error raised by code added in 2.0 (contract 7.3). It is a SystemExit, so callers that expect an exit see one:
+    .code is the int exit status, .error the identifier of 7.3, .message the text, .entry the plan reference it is
+    about and .next the command or edit that fixes it (or None). cli.main prints it (7.1); 1.x paths keep die()."""
+
+    def __init__(self, error, message, *, entry=None, next=None, code=1):  # noqa: A002 (next is the contract's name)
+        super().__init__(code)
+        self.error = error
+        self.message = message
+        self.entry = entry
+        self.next = next
+
+    def __str__(self):
+        return self.message
+
+
 def _git(root, *args):
     try:
         out = subprocess.run(["git", *args], cwd=root, capture_output=True, timeout=10)
