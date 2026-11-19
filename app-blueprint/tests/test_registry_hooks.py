@@ -416,6 +416,12 @@ class MapPayloadTest(CliTestBase):
         self.assertIn("window.BP_TABS", tpl)
         html, _ = self.render_map()
         self.assertNotIn("/*__TABS_JS__*/", html)
+        # mind map branch modes (W1-F's "by feature", 8.4) plug in from mindmap.js, which is inlined after the
+        # registries are declared and before the template's script reads them
+        self.assertLess(tpl.index("var BP_TABS = [], BP_BRANCHES = [];"), tpl.index("/*__MINDMAP_JS__*/"))
+        self.assertIn("window.BP_BRANCHES", tpl)
+        for helper in ("fileLeaf: fileLeaf", "patLeaf: patLeaf", "byModule: byModule", "el: el", "stack: stack"):
+            self.assertIn(helper, tpl)
 
 
 class GuardRefusalTest(CliTestBase):
