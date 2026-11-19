@@ -12,10 +12,13 @@ Fail closed: the only things that unblock work are the exact words `resolved` an
 to fix. Hooks defined here: CODES, CODE_EXAMPLES, validate, context, refuse, status_lines, status_json, map_payload.
 Every hook reads the plan with `isinstance` checks, so a malformed value never raises.
 """
+import os
 import posixpath
 import re
 
-from bp.core import norm, path_key, project_path
+from pathlib import Path
+
+from bp.core import TOOL_HOME, bp_dir, norm, path_key, project_path
 from bp.globs import pattern_instance_rx
 from bp.rules import uniq
 
@@ -26,7 +29,7 @@ NOT_BLOCKING_SEVERITIES = ("low", "medium")  # below the blocking threshold (2.6
 NOT_BLOCKING_STATUSES = ("resolved", "dropped")
 KINDS = ("phase", "milestone", "feature")
 TIMEBOX = re.compile(r"[0-9]{1,3}[hdw]")
-NEXT_UNKNOWNS = "python .blueprint/bin/blueprint.py status --unknowns"
+MAX_NAMED = 5  # unknowns a refusal names before "and N more"
 RESOLVE_FIRST = " Resolve it first, or use --force if the lead says so."
 
 CODES = [
@@ -34,7 +37,7 @@ CODES = [
     (r"^unknown \S+: severity must be", "unknown-severity"),
     (r"^unknown \S+: status must be", "unknown-status"),
     (r"^unknown \S+: blocks ", "unknown-blocks"),
-    (r"^unknown \S+: (investigating needs experiment|experiment\.)", "unknown-experiment"),
+    (r"^unknown \S+: (investigating needs experiment|experiment( must|\.))", "unknown-experiment"),
     (r"^unknown \S+: resolved needs decision", "unknown-resolved-no-decision"),
     (r"^unknown \S+: dropped needs notes", "unknown-dropped-no-note"),
     (r"^unknown \S+: evidence ", "unknown-evidence"),
@@ -101,16 +104,34 @@ def _plan_ids(plan):
 
 
 def _uid(u, i):
-    """The id a message or a `by` list uses for the unknown at index i (a placeholder when it has no usable id)."""
+    """The id a `by` list uses for the unknown at index i (a placeholder when it has no usable id)."""
     return u["id"] if isinstance(u.get("id"), str) and u["id"] else f"unknowns[{i}]"
 
 
+def _label(u, i):
+    """The name a validation message uses: the id, or a placeholder when it is missing or has whitespace in it."""
+    uid = u.get("id")
+    return uid if isinstance(uid, str) and uid and not any(c.isspace() for c in uid) else f"unknowns[{i}]"
+
+
+def _run(root, args, needs=None):
+    """A command line that runs as printed (as commands/migrate.py does): the project's own copy when it has the
+    command (`needs` is the module of the copy that provides it), else this tool with --root."""
+    if root is None:
+        return f"python .blueprint/bin/blueprint.py {args}"
+    copy = Path(bp_dir(Path(root))) / "bin"
+    if (copy / "blueprint.py").is_file() and (needs is None or (copy / "bp" / needs).is_file()):
+        return f"python .blueprint/bin/blueprint.py {args}"
+    return f'python "{TOOL_HOME / "blueprint.py"}" {args} --root "{root}"'
+
+
 def _blocks_of(u):
-    """The strings of `blocks` (a lone string counts as one entry, so a plan edited by hand does not unblock)."""
+    """The strings of `blocks`, exactly as written (a lone string counts as one entry). Never stripped: " P2" names
+    nothing, and validate says so."""
     b = u.get("blocks")
     if isinstance(b, str):
         b = [b]
-    return [x.strip() for x in b if isinstance(x, str) and x.strip()] if isinstance(b, list) else []
+    return [x for x in b if isinstance(x, str)] if isinstance(b, list) else []
 
 
 def _resolve(entry, ids):
@@ -122,12 +143,17 @@ def _resolve(entry, ids):
     return [(k, entry) for k in KINDS if entry in ids[k]]
 
 
-def is_blocking(u):
-    """True when the unknown blocks the ids in `blocks`: not resolved or dropped, and not low or medium. Anything
-    else, including a missing or wrongly typed status or severity, blocks (fail closed)."""
+def is_blocking(u, decisions=frozenset()):
+    """True when the unknown blocks the ids in `blocks`: not resolved (with its decision in `decisions`) or dropped,
+    and not low or medium. Anything else, including a missing or wrongly typed status or severity and a `resolved`
+    whose decision names nothing, blocks (fail closed)."""
     status, severity = u.get("status"), u.get("severity")
-    if isinstance(status, str) and status in NOT_BLOCKING_STATUSES:
+    if isinstance(status, str) and status == "dropped":
         return False
+    if isinstance(status, str) and status == "resolved":
+        d = u.get("decision")
+        if isinstance(d, str) and d in decisions:
+            return False
     if isinstance(severity, str) and severity in NOT_BLOCKING_SEVERITIES:
         return False
     return True
@@ -138,20 +164,22 @@ def is_blocking(u):
 def _scan(plan):
     """(blocked, info, hits, why): the blocking() result, {unknown id: (severity, status)} of those that block, the
     list indexes of the unknowns that block at least one id of this plan, and why each blocked feature is blocked:
-    {"direct": {fid: [uid]}, "milestone": {fid: (mid, [uid])}}."""
+    {"direct": {fid: [uid]}, "milestone": {fid: (mid, [uid])}}. One pass over the unknowns."""
     out = {"phases": set(), "milestones": set(), "features": set(), "by": {}}
-    info, hits = {}, set()
+    info, hits, seen = {}, set(), {}
     ids = _plan_ids(plan)
+    decisions = _unique_ids(plan, "decisions")
     plural = {"phase": "phases", "milestone": "milestones", "feature": "features"}
 
     def add(key, uid):
-        lst = out["by"].setdefault(key, [])
-        if uid not in lst:
-            lst.append(uid)
+        members = seen.setdefault(key, set())
+        if uid not in members:
+            members.add(uid)
+            out["by"].setdefault(key, []).append(uid)
 
     items = plan.get("unknowns") if isinstance(plan, dict) else None
     for i, u in enumerate(items if isinstance(items, list) else []):
-        if not isinstance(u, dict) or not is_blocking(u):
+        if not isinstance(u, dict) or not is_blocking(u, decisions):
             continue
         uid = _uid(u, i)
         for entry in _blocks_of(u):
@@ -204,6 +232,14 @@ def _experiment_problems(ex, roster):
     return out
 
 
+def _kinds_text(kinds, b):
+    """The ambiguity message for an id that names more than one kind, naming every kind."""
+    if len(kinds) == 2:
+        return f"names both a {kinds[0]} and a {kinds[1]}; write {kinds[0]}:{b} or {kinds[1]}:{b}"
+    named = ", ".join("a " + k for k in kinds[:-1]) + f" and a {kinds[-1]}"
+    return f"names {named}; write {', '.join(k + ':' + b for k in kinds[:-1])} or {kinds[-1]}:{b}"
+
+
 def validate(plan, E, W, vctx):
     if not isinstance(plan, dict):
         return
@@ -215,6 +251,7 @@ def validate(plan, E, W, vctx):
     roster = _unique_ids(plan, "roster")
     decisions = _unique_ids(plan, "decisions")
     known = _ids(plan, "unknowns")
+    root = vctx.get("root") if isinstance(vctx, dict) else None
     evidence = vctx.get("evidenceIds") if isinstance(vctx, dict) else None
     try:
         evidence = None if evidence is None else set(evidence)
@@ -223,7 +260,7 @@ def validate(plan, E, W, vctx):
     for i, u in enumerate(raw if isinstance(raw, list) else []):
         if not isinstance(u, dict):
             continue
-        uid = _one(_uid(u, i))
+        uid = _label(u, i)
         entry = f"unknown {uid}"
         status, severity = u.get("status"), u.get("severity")
         if isinstance(u.get("id"), str) and u["id"] and not ID_FORM.fullmatch(u["id"]):
@@ -245,22 +282,21 @@ def validate(plan, E, W, vctx):
         else:
             entries = blocks if isinstance(blocks, list) else [blocks]
         for b in entries:
-            hits = _resolve(b.strip(), ids) if isinstance(b, str) else []
+            hits = _resolve(b, ids) if isinstance(b, str) else []
             if len(hits) == 1:
                 continue
             if len(hits) > 1:
-                a, c = hits[0][0], hits[1][0]
-                E(f"unknown {uid}: blocks {_show(b)}, which names both a {a} and a {c}; write {a}:{b} or {c}:{b}",
-                  code="unknown-blocks", entry=entry, next=f"write {a}:{b} or {c}:{b} in blocks")
+                E(f"unknown {uid}: blocks {_show(b)}, which " + _kinds_text([k for k, _ in hits], _one(b)),
+                  code="unknown-blocks", entry=entry, next="write the kind and a colon before the id in blocks")
             else:
-                E(f"unknown {uid}: blocks {_show(b)}, which is no phase, milestone or feature",
-                  code="unknown-blocks", entry=entry,
+                E(f"unknown {uid}: blocks {_show(b)}, which is no phase, milestone or feature (ids are matched "
+                  "exactly)", code="unknown-blocks", entry=entry,
                   next="name an id from phases[], milestones[] or features[] (phase:X or milestone:X when both exist)")
         if evidence is not None:
             for key in ("evidenceFor", "evidenceAgainst"):
                 for ev in u.get(key) if isinstance(u.get(key), list) else []:
                     if isinstance(ev, str) and ev not in evidence:
-                        W(f"unknown {uid}: evidence {ev} is not in .blueprint/studies", code="unknown-evidence",
+                        W(f"unknown {uid}: evidence {_one(ev)} is not in .blueprint/studies", code="unknown-evidence",
                           entry=entry, next="remove it, or import the study that holds it (evidence import)")
         ex = u.get("experiment")
         if ex is None:
@@ -278,30 +314,167 @@ def validate(plan, E, W, vctx):
         if status == "resolved":
             d = u.get("decision")
             if not _text(d):
-                E(f"unknown {uid}: resolved needs decision, the id of the decisions[] entry that settles it",
-                  code="unknown-resolved-no-decision", entry=entry,
+                E(f"unknown {uid}: resolved needs decision, the id of the decisions[] entry that settles it; it keeps "
+                  "blocking until then", code="unknown-resolved-no-decision", entry=entry,
                   next="record the outcome in decisions[] and put its id in decision")
             elif not isinstance(d, str) or d not in decisions:
-                E(f"unknown {uid}: resolved needs decision {_show(d)} to be the id of a decisions[] entry; it is not",
-                  code="unknown-resolved-no-decision", entry=entry,
+                E(f"unknown {uid}: resolved needs decision {_show(d)} to be the id of a decisions[] entry; it is not, "
+                  "so it keeps blocking", code="unknown-resolved-no-decision", entry=entry,
                   next="add that entry to decisions[], or fix the id in decision")
         if status == "dropped" and not _text(u.get("notes")):
             E(f"unknown {uid}: dropped needs notes saying why it no longer matters", code="unknown-dropped-no-note",
               entry=entry, next="say why in notes")
         if status in ("open", "investigating") and severity in ("high", "critical"):
-            targets = [b for b in _blocks_of(u) if _resolve(b, ids)]
+            targets = [_one(b) for b in _blocks_of(u) if _resolve(b, ids)]
             if targets:
                 W(f"unknown {uid} ({severity}) is open and blocks {', '.join(targets)}; claim and status --next skip "
                   "them until it is resolved", code="unknown-open-blocker", entry=entry,
-                  next="python .blueprint/bin/blueprint.py status --unknowns")
+                  next=_run(root, "status --unknowns", "unknowns.py"))
     for d in _dicts(plan, "decisions"):
         ref = d.get("unknown")
         if isinstance(ref, str) and ref and ref not in known:
-            did = d["id"] if isinstance(d.get("id"), str) and d["id"] else "?"
+            did = _one(d["id"]) if isinstance(d.get("id"), str) and d["id"] else "?"
             E(f"decision {did}: unknown {_show(ref)} does not exist; use an id from unknowns[] or remove the field",
               code="decision-unknown", entry=f"decision {did}",
-              next=("python .blueprint/bin/blueprint.py migrate" if plan.get("_from") == 1
+              next=(_run(root, "migrate", "commands/migrate.py") if plan.get("_from") == 1
                     else "fix decisions[].unknown in blueprint.json"))
+
+
+# --- which claims are refused ---------------------------------------------------------------------------------------
+
+def _spellings(root, path):
+    """Every way the claimed path can be written that still names one file: as given, with `./`, `..` and repeated
+    slashes folded, and (when the root is known) as the project resolves it (a junction or symlink included)."""
+    first = norm(path)
+    out = [first, posixpath.normpath(first)]
+    try:
+        rel = project_path(root, path) if root is not None else None
+    except Exception:  # noqa: BLE001 - a path the resolver cannot read is simply not another spelling
+        rel = None
+    if rel and rel not in out:
+        out.append(rel)
+    return out
+
+
+class _Plan:
+    """What claim decisions need from a plan, computed once: the blocking scan, the plan's feature ids, planned files
+    by path key and the patterns with their instance expressions."""
+
+    def __init__(self, plan):
+        self.plan = plan
+        self.blocked, self.info, self.hits, self.why = _scan(plan)
+        self.features = _ids(plan, "features")
+        self.files, self.pos = [], {}
+        self.by_key = {}
+        for f in _dicts(plan, "files"):
+            if isinstance(f.get("path"), str):
+                self.pos[id(f)] = len(self.files)
+                self.files.append(f)
+                self.by_key.setdefault(path_key(norm(f["path"])), []).append(f)
+        fold = re.IGNORECASE if os.path.normcase("A") == "a" else 0  # a case-insensitive disk: fail closed
+        self.patterns = [(p, re.compile((rx := pattern_instance_rx(p["glob"])).pattern, rx.flags | fold))
+                         for p in _dicts(plan, "patterns") if isinstance(p.get("glob"), str) and p["glob"]]
+
+    def served(self, entries):
+        """The feature ids the entries serve, in order, from the plan: only ids that name a feature of features[]
+        (compared exactly) count, so a typo is never a free feature. Infrastructure is just a file with none."""
+        out = []
+        for e in entries:
+            for f in e.get("features") if isinstance(e.get("features"), list) else []:
+                if isinstance(f, str) and f in self.features and f not in out:
+                    out.append(f)
+        return out
+
+    def phase_blocked(self, entry):
+        phase = entry.get("phase")
+        return isinstance(phase, str) and phase in self.blocked["phases"] and bool(self.blocked["by"].get(f"phase:{phase}"))
+
+    def matches(self, spellings):
+        """(files, patterns) that any spelling names: planned files whose path key equals a spelling's, in plan
+        order, and patterns whose instance expression matches a spelling."""
+        keys = {path_key(s) for s in spellings}
+        files, seen = [], set()
+        for k in keys:
+            for f in self.by_key.get(k, []):
+                if id(f) not in seen:
+                    seen.add(id(f))
+                    files.append(f)
+        files.sort(key=lambda f: self.pos[id(f)])
+        pats = [p for p, rx in self.patterns if any(rx.match(s) for s in spellings)]
+        return files, pats
+
+    def judge(self, files, pats):
+        """The first reason a claim is refused, as (kind, entry-or-patterns, served): every matching planned file is
+        judged on its own, the matching patterns together (phase of any one, features as a union); None if free."""
+        for f in files:
+            if self.phase_blocked(f):
+                return "phase", [f], []
+            served = self.served([f])
+            if served and all(x in self.blocked["features"] for x in served):
+                return "features", [f], served
+        for p in pats:
+            if self.phase_blocked(p):
+                return "phase", [p], []
+        served = self.served(pats)
+        if served and all(x in self.blocked["features"] for x in served):
+            return "features", pats, served
+        return None
+
+
+def _named(uids, info):
+    shown = ", ".join(_phrase(u, *info.get(u, (None, None))) for u in uids[:MAX_NAMED])
+    if len(uids) > MAX_NAMED:
+        shown += f", and {len(uids) - MAX_NAMED} more (see status --unknowns)"
+    return shown
+
+
+def _decide(pl, root, path):
+    """(message, error, next) when claiming `path` is refused under `pl` (a _Plan), else None."""
+    files, pats = pl.matches(_spellings(root, path))
+    verdict = pl.judge(files, pats)
+    if verdict is None:
+        return None
+    kind, entries, served = verdict
+    shown = _one(norm(path))
+    if entries[0] in files:
+        subject = _one(norm(entries[0]["path"]))
+    else:
+        subject = f"{shown} (pattern {', '.join(_one(e.get('id', '?')) for e in entries)})"
+    nxt = _run(root, "status --unknowns", "unknowns.py")
+    if kind == "phase":
+        phase = entries[0]["phase"]
+        uids = pl.blocked["by"][f"phase:{phase}"]
+        return (f"{subject} is in phase {_one(phase)}, blocked by unknown{'s' if len(uids) > 1 else ''} "
+                f"{_named(uids, pl.info)}." + RESOLVE_FIRST, "blocked-by-unknown", nxt)
+    clauses = []
+    for fid in served:
+        parts = []
+        direct = pl.why["direct"].get(fid) or []
+        if direct:
+            parts.append(f"blocked by unknown{'s' if len(direct) > 1 else ''} {_named(direct, pl.info)}")
+        if fid in pl.why["milestone"]:
+            mid, uids = pl.why["milestone"][fid]
+            parts.append(f"whose milestone {_one(mid)} is blocked by unknown{'s' if len(uids) > 1 else ''} "
+                         f"{_named(uids, pl.info)}")
+        clauses.append(f"{_one(fid)}, {' and '.join(parts)}")
+    what = f"feature {clauses[0]}" if len(clauses) == 1 else "blocked features: " + "; ".join(clauses)
+    return (f"{subject} serves only {what}." + RESOLVE_FIRST, "blocked-by-unknown", nxt)
+
+
+def blocked_files(plan, root=None):
+    """The planned file paths that a claim refuses: the same decision `refuse` makes, so the two never disagree."""
+    pl = _Plan(plan)
+    return {f["path"] for f in pl.files if _decide(pl, root, f["path"])}
+
+
+def refuse(action, root, plan, path, by):
+    """Refuse a claim (2.6): (message, "blocked-by-unknown", next), exit 3. Every planned file and every pattern that
+    any spelling of the path names is judged, and the claim is refused when one of them would be: its phase is
+    blocked by an open, severe unknown, or it serves at least one feature and every feature it serves is blocked (by
+    an unknown naming the feature, or its milestone). The refusal names the entry that caused it."""
+    if action != "claim" or not isinstance(plan, dict):
+        return None
+    return _decide(_Plan(plan), root, path)
 
 
 # --- context, views and status --------------------------------------------------------------------------------------
@@ -310,31 +483,45 @@ def _strings(v):
     return [x for x in v if isinstance(x, str)] if isinstance(v, list) else []
 
 
-def _payload(u, i, blocking_now):
-    """One entry of ctx["unknowns"] and of the map and status --json payloads (8.5)."""
+def _payload(u, ids, blocking_now):
+    """One entry of ctx["unknowns"] and of the map and status --json payloads (8.5). `unresolved` lists the `blocks`
+    entries that name no phase, milestone or feature of the plan."""
     ex = u.get("experiment")
     ex = {k: ex[k] for k in ("plan", "timebox", "exit", "owner") if isinstance(ex.get(k), str)} if isinstance(ex, dict) else None
+    blocks = _blocks_of(u)
     return {"id": u["id"] if isinstance(u.get("id"), str) else "",
             "question": u["question"] if isinstance(u.get("question"), str) else "",
             "severity": u["severity"] if isinstance(u.get("severity"), str) else "",
             "status": u["status"] if isinstance(u.get("status"), str) else "",
-            "blocks": _blocks_of(u), "evidenceFor": _strings(u.get("evidenceFor")),
+            "blocks": blocks, "unresolved": [b for b in blocks if not _resolve(b, ids)],
+            "evidenceFor": _strings(u.get("evidenceFor")),
             "evidenceAgainst": _strings(u.get("evidenceAgainst")), "experiment": ex,
             "decision": u["decision"] if isinstance(u.get("decision"), str) and u["decision"] else None,
             "blocking": blocking_now}
 
 
 def context(root, plan, state, ctx):
-    """ctx["unknowns"] (8.5) and ctx["blocked"] (1.4): the ids blocked by open, severe unknowns."""
-    ctx["blocked"], _, hits, _ = _scan(plan)
-    ctx["blocked"]["files"] = blocked_files(plan)  # planned files that claim refuses (2.6); an extra key
+    """ctx["unknowns"] (8.5) and ctx["blocked"] (1.4): the ids blocked by open, severe unknowns, and the planned files
+    that claim refuses (an extra key, "files")."""
+    pl = _Plan(plan)
+    ctx["blocked"] = pl.blocked
+    ctx["blocked"]["files"] = {f["path"] for f in pl.files if _decide(pl, root, f["path"])}
+    ids = _plan_ids(plan)
     items = plan.get("unknowns") if isinstance(plan, dict) else None
-    ctx["unknowns"] = [_payload(u, i, i in hits)
+    ctx["unknowns"] = [_payload(u, ids, i in pl.hits)
                        for i, u in enumerate(items if isinstance(items, list) else []) if isinstance(u, dict)]
 
 
+def _next_step(ctx):
+    """The one command to run when there are no unknowns: render, or migrate for a version 1 plan."""
+    root, plan = ctx.get("root"), ctx.get("plan")
+    if isinstance(plan, dict) and plan.get("_from") == 1:
+        return "run: " + _run(root, "migrate", "commands/migrate.py")
+    return "run: " + _run(root, "render")
+
+
 def map_payload(ctx):
-    return {"unknowns": ctx.get("unknowns") or []}
+    return {"unknowns": ctx.get("unknowns") or [], "unknownsNext": _next_step(ctx)}
 
 
 def status_json(ctx):
@@ -346,102 +533,6 @@ def _phrase(uid, sev, status):
             f"{_one(status) if isinstance(status, str) and status else 'no status'})")
 
 
-def _spellings(root, path):
-    """Every way the claimed path can be written that still names one file: as given, with `./`, `..` and repeated
-    slashes folded, and (when the root is known) as the project resolves it."""
-    first = norm(path)
-    out = [first, posixpath.normpath(first)]
-    try:
-        rel = project_path(root, path) if root is not None else None
-    except Exception:  # noqa: BLE001 - a path the resolver cannot read is simply not another spelling
-        rel = None
-    if rel:
-        out.append(rel)
-    return out
-
-
-def _entry_of(plan, spellings):
-    """The planned file, or else the pattern, that the claimed path names (a pattern instance follows its pattern)."""
-    keys = {path_key(s) for s in spellings}
-    for f in _dicts(plan, "files"):
-        if isinstance(f.get("path"), str) and path_key(norm(f["path"])) in keys:
-            return f
-    for p in _dicts(plan, "patterns"):
-        if isinstance(p.get("glob"), str) and p["glob"]:
-            rx = pattern_instance_rx(p["glob"])
-            if any(rx.match(s) for s in spellings):
-                return p
-    return None
-
-
-def _served(entry):
-    """The feature ids an entry serves, from the plan itself; an infrastructure entry serves none."""
-    if entry.get("infrastructure") is True:
-        return []
-    out = []
-    for f in entry.get("features") if isinstance(entry.get("features"), list) else []:
-        if isinstance(f, str) and f and f not in out:
-            out.append(f)
-    return out
-
-
-def _claim_block(entry, blocked):
-    """"phase" when the entry's phase is blocked, "features" when it serves features and every one is blocked, else
-    None (an infrastructure file, a file with no feature, or one serving a free feature is claimable)."""
-    phase = entry.get("phase")
-    if isinstance(phase, str) and phase and phase in blocked["phases"] and blocked["by"].get(f"phase:{phase}"):
-        return "phase"
-    served = _served(entry)
-    if served and all(f in blocked["features"] for f in served):
-        return "features"
-    return None
-
-
-def blocked_files(plan):
-    """The planned file paths that claim refuses (2.6): in a blocked phase, or serving only blocked features."""
-    blocked = blocking(plan)
-    return {f["path"] for f in _dicts(plan, "files") if isinstance(f.get("path"), str)
-            and _claim_block(f, blocked)}
-
-
-def _named(uids, info):
-    return ", ".join(_phrase(u, *info.get(u, (None, None))) for u in uids)
-
-
-def refuse(action, root, plan, path, by):
-    """Refuse a claim (2.6): (message, "blocked-by-unknown", next), exit 3. A file is refused when its phase is
-    blocked by an open, severe unknown, or when it serves at least one feature and every feature it serves is blocked
-    (by an unknown naming the feature, or its milestone). Everything else is not this module's business."""
-    if action != "claim" or not isinstance(plan, dict):
-        return None
-    entry = _entry_of(plan, _spellings(root, path))
-    if entry is None:
-        return None
-    blocked, info, _, why = _scan(plan)
-    kind = _claim_block(entry, blocked)
-    shown = _one(norm(path))
-    if kind == "phase":
-        phase = entry["phase"]
-        uids = blocked["by"][f"phase:{phase}"]
-        return (f"{shown} is in phase {_one(phase)}, blocked by unknown{'s' if len(uids) > 1 else ''} "
-                f"{_named(uids, info)}." + RESOLVE_FIRST, "blocked-by-unknown", NEXT_UNKNOWNS)
-    if kind != "features":
-        return None
-    clauses = []
-    for fid in _served(entry):
-        parts = []
-        direct = why["direct"].get(fid) or []
-        if direct:
-            parts.append(f"blocked by unknown{'s' if len(direct) > 1 else ''} {_named(direct, info)}")
-        if fid in why["milestone"]:
-            mid, uids = why["milestone"][fid]
-            parts.append(f"whose milestone {_one(mid)} is blocked by unknown{'s' if len(uids) > 1 else ''} "
-                         f"{_named(uids, info)}")
-        clauses.append(f"{_one(fid)}, {' and '.join(parts)}")
-    served = f"feature {clauses[0]}" if len(clauses) == 1 else "blocked features: " + "; ".join(clauses)
-    return (f"{shown} serves only {served}." + RESOLVE_FIRST, "blocked-by-unknown", NEXT_UNKNOWNS)
-
-
 def _detail(u):
     ex = u.get("experiment")
     if not isinstance(ex, dict) or not ex:
@@ -450,21 +541,26 @@ def _detail(u):
             f"ends when: {_one(ex.get('exit') or '?')}")
 
 
+def _blocks_text(u):
+    """`blocks` for people, one line, marking each entry that names nothing in the plan."""
+    nothing = set(u.get("unresolved") or [])
+    return ", ".join(_one(b) + (" (names nothing)" if b in nothing else "") for b in u["blocks"])
+
+
 def status_lines(ctx, args):
     """status: the open blocking unknowns; with --unknowns every unknown, its experiment and what it blocks (7.2).
     Every free-text value is put on one line."""
     unknowns = ctx.get("unknowns") or []
     if getattr(args, "unknowns", False):
         if not unknowns:
-            v1 = isinstance(ctx.get("plan"), dict) and ctx["plan"].get("_from") == 1
-            return ["", "  Unknowns: none. " + (
-                "This is a schema version 1 plan: run python .blueprint/bin/blueprint.py migrate to use unknowns[]."
-                if v1 else "Add open questions to unknowns[] in .blueprint/blueprint.json (see references/schema.md), "
-                           "then run: python .blueprint/bin/blueprint.py render")]
+            return ["", "  Unknowns: none. " + ("This is a schema version 1 plan; " if isinstance(ctx.get("plan"), dict)
+                                                  and ctx["plan"].get("_from") == 1 else
+                                                  "Add open questions to unknowns[] in .blueprint/blueprint.json "
+                                                  "(see references/schema.md); ") + _next_step(ctx)]
         live = [u for u in unknowns if u["status"] not in NOT_BLOCKING_STATUSES]
         out = ["", f"  Unknowns: {len(live)} open or investigating, {len(unknowns) - len(live)} resolved or dropped"]
         for u in unknowns:
-            tail = f"  blocks {_one(', '.join(u['blocks']))}" if u["blocks"] else ""
+            tail = f"  blocks {_blocks_text(u)}" if u["blocks"] else ""
             out.append(f"    {_one(u['id']) or '(no id)'}  {_one(u['severity']) or '?'}  {_one(u['status']) or '?'}"
                        + ("  BLOCKING" + tail if u["blocking"] else ""))
             if _one(u["question"]):
@@ -480,5 +576,5 @@ def status_lines(ctx, args):
     out = ["", f"  Open blocking unknowns: {len(hard)} (claims on what they block are refused; see status --unknowns)"]
     for u in hard:
         out.append(f"    {_one(u['id']) or '(no id)'} ({_one(u['severity']) or '?'}, {_one(u['status']) or '?'}) blocks "
-                   f"{_one(', '.join(u['blocks'])) or 'nothing'}")
+                   f"{_blocks_text(u) or 'nothing'}")
     return out

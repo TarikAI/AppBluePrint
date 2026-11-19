@@ -35,7 +35,8 @@
     var blocks = list(u.blocks).filter(function (b) { return typeof b === 'string'; });
     var sevKind = sev === 'critical' || sev === 'high' ? 'bad' : (sev === 'medium' ? 'warn' : (sev === 'low' ? 'ok' : 'warn'));
     var idCell = [H.el('code', { text: str(u.id) || '(no id)' }), H.el('div', { text: str(u.question) || 'No question written.' })];
-    var blockCell = blocks.map(function (b) { return H.el('code', { cls: 'chip', text: b }); });
+    var nothing = new Map(list(u.unresolved).filter(function (b) { return typeof b === 'string'; }).map(function (b) { return [b, true]; }));
+    var blockCell = blocks.map(function (b) { return H.el('code', { cls: 'chip', text: b + (nothing.get(b) === true ? ' (names nothing)' : '') }); });
     if (u.blocking === true) blockCell.unshift(pill(H, 'blocks work', 'bad'), ' ');
     if (!blockCell.length) blockCell = [H.el('span', { cls: 'meta', text: 'nothing' })];
     var expCell = [H.el('span', { cls: 'meta', text: isLive(u) ? 'No experiment yet.' : '' })];
@@ -65,8 +66,9 @@
     render: function (host, D, H) {
       var all = entries(D);
       if (!all.length) {
+        var next = str(D && D.unknownsNext) || 'run the render command of this tool';
         host.appendChild(H.el('p', { cls: 'empty', text: 'No unknowns yet. Add each open question of the plan to unknowns[] in ' +
-          '.blueprint/blueprint.json with a severity, what it blocks and an experiment, then run: blueprint.py render.' }));
+          '.blueprint/blueprint.json with a severity, what it blocks and an experiment. Next: ' + next }));
         return;
       }
       var live = all.filter(isLive).length, hard = all.filter(function (u) { return u.blocking === true; }).length;
