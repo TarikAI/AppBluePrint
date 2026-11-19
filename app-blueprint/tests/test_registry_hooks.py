@@ -399,7 +399,7 @@ class MapPayloadTest(CliTestBase):
         self.assertIn("BP_TABS.push({id: 'roadmap'", html)
         self.assertIn("// <\\/script>", html, "tab scripts are escaped like mindmap.js")
         self.assertNotIn("/*__TABS_JS__*/", html)
-        self.assertIn("var BP_TABS = [];", html)
+        self.assertIn("var BP_TABS = [], BP_BRANCHES = [];", html)
 
     def test_payload_collisions_are_bugs(self):
         for exts in ({"features.py": "def map_payload(ctx):\n    return {'milestones': []}\n",
