@@ -885,8 +885,8 @@ class FindingsTest(TempRoot):
         r = self.cli("validate", "--json")
         self.assertEqual(r.returncode, 0, r.stderr)
         out = json.loads(r.stdout)
-        self.assertEqual((out["ok"], out["command"], out["data"]["errors"], out["data"]["warnings"]),
-                         (True, "validate", [], []))
+        self.assertEqual((out["ok"], out["command"], out["data"]["valid"], out["data"]["errors"], out["data"]["warnings"]),
+                         (True, "validate", True, [], []))
         self.assertEqual(out["data"]["counts"], {"files": 5, "patterns": 0, "modules": 3, "phases": 2, "owners": 5,
                                                  "resources": 0, "features": 2, "milestones": 1, "tasks": 1,
                                                  "unknowns": 1})
@@ -895,7 +895,9 @@ class FindingsTest(TempRoot):
         self.write_plan(plan)
         r = self.cli("validate", "--json")
         self.assertEqual(r.returncode, 1)
-        data = json.loads(r.stdout)["data"]
+        out = json.loads(r.stdout)
+        self.assertEqual((out["ok"], out["data"]["valid"]), (True, False))  # 7.1: ok = the command ran; exit 1
+        data = out["data"]
         self.assertEqual([f["code"] for f in data["errors"]], ["app-name"])
         self.assertEqual([f["code"] for f in data["warnings"]], ["schema-v1", "other"])  # + the example's data warning
         r = self.cli("validate")

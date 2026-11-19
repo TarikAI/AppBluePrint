@@ -320,6 +320,14 @@ class ContextTest(CliTestBase):
         self.assertEqual(ctx["milestones"], [{"id": "M1", "features": ["F-log-snag", "F-inbox"]}])
         self.assertEqual(ctx["features"][0]["blockedBy"], ["U-offline"])
 
+    def test_blocking_keys_have_one_format(self):
+        from bp.views.context import blocked_by
+        ctx = {"blocked": {"by": {"phase:P2": ["U-a"], "milestone:M1": ["U-b"], "feature:F-x": ["U-c"], "P3": ["U-d"]}}}
+        self.assertEqual([blocked_by(ctx, k, t) for k, t in (("phase", "P2"), ("milestone", "M1"), ("feature", "F-x"))],
+                         [["U-a"], ["U-b"], ["U-c"]])
+        self.assertEqual(blocked_by(ctx, "phase", "P3"), [], "a bare id is not a key")
+        self.assertEqual(blocked_by({}, "phase", "P2"), [])
+
     def test_blocked_phases_reach_status_next(self):
         ext = {"unknowns.py": '''
             def context(root, plan, state, ctx):

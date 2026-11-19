@@ -27,11 +27,20 @@ bp = S.load_launcher("blueprint_package_test")
 frozen = S.load_frozen()
 goldens = S.load_module(S.DATA_V1 / "make_goldens.py", "bp_make_goldens")
 
-# contract 1.2, as far as W0-A1 builds it; same-rank modules may not import each other (views/* excepted)
-IMPORT_RANK = {"version": 0, "core": 1, "globs": 2, "learn": 3, "migrate": 4, "plan": 5, "rules": 6, "data": 6,
-               "status": 7, "verify": 8, "registry": 17, "validate": 18, "views": 19, "export": 20, "install": 20,
-               "commands": 21, "cli": 22, "api": 23}
-DOMAIN = {"rules", "data", "status", "verify"}
+# Contract 1.2, for every module of the 1.1 tree, built or not yet: a module may import only modules of a lower rank;
+# same-rank modules may not import each other (views/* excepted). study/* modules are ranked one by one.
+IMPORT_RANK = {
+    "version": 0, "core": 1, "globs": 2, "learn": 3, "study": 4, "study.safety": 5, "study.keys": 5,
+    "study.jsscan": 6, "study.asar": 6, "study.axml": 6, "study.aabproto": 6, "study.dex": 6,
+    "migrate": 7, "plan": 8, "rules": 9, "data": 9, "status": 10, "verify": 11, "evidence": 12, "unknowns": 13,
+    "features": 14, "records": 15, "roadmap": 16, "signals": 17, "study.engine": 18,
+    "study.source": 19, "study.trace": 19, "study.web": 19, "study.desktop": 19, "study.mobile": 19,
+    "study.datafiles": 19, "study.compare": 19, "study.capture": 19, "study.importers": 19,
+    "study.synth": 20, "study.adopt": 20, "registry": 21, "validate": 22, "views": 23, "export": 24, "install": 24,
+    "commands": 25, "cli": 26, "api": 27}
+# domain and lane modules: commands/* import them inside their handlers, never at module top (1.2)
+DOMAIN = {"rules", "data", "status", "verify", "evidence", "unknowns", "features", "records", "roadmap", "signals",
+          "study"}
 VERSION_LINE = re.compile(r'^TOOL_VERSION = "([^"]+)"', re.M)
 
 
@@ -51,7 +60,14 @@ def frozen_names():
 def module_rank(modname):
     parts = modname.split(".")
     assert parts[0] == "bp", modname
-    return IMPORT_RANK[parts[1]] if len(parts) > 1 else -1
+    if len(parts) == 1:
+        return -1
+    key = ".".join(parts[1:3]) if parts[1] == "study" and len(parts) > 2 else parts[1]
+    if key not in IMPORT_RANK:
+        raise AssertionError(f"bp.{key} is not in the import order of contract 1.2 (IMPORT_RANK in test_package.py). "
+                             "A module the contract's tree does not name: ask the orchestrator; do not add it here "
+                             "yourself.")
+    return IMPORT_RANK[key]
 
 
 class NamesAndVersionTest(unittest.TestCase):
@@ -110,6 +126,17 @@ class NamesAndVersionTest(unittest.TestCase):
                     if me.startswith("bp.commands.") and t.split(".")[1] in DOMAIN and node in top:
                         problems.append(f"{me} imports domain module {t} at module top")
         self.assertEqual(problems, [])
+
+    def test_import_rank_covers_the_contract_tree(self):
+        """Every module of contract 1.1 has a rank (modules not built yet included); an unknown one is refused."""
+        for name in ("unknowns", "features", "records", "roadmap", "evidence", "signals", "study", "study.engine",
+                     "study.mobile", "study.adopt", "views.roadmap_md", "commands.migrate", "commands.study"):
+            module_rank("bp." + name)
+        self.assertLess(module_rank("bp.study.safety"), module_rank("bp.migrate"))
+        self.assertLess(module_rank("bp.features"), module_rank("bp.records"))
+        self.assertLess(module_rank("bp.study.engine"), module_rank("bp.study.source"))
+        with self.assertRaisesRegex(AssertionError, "ask the orchestrator"):
+            module_rank("bp.not_in_the_contract")
 
 
 class GoldenViewsTest(unittest.TestCase):
@@ -297,6 +324,10 @@ class CopyTestBase(unittest.TestCase):
         for f in (self.copy, self.bin / "bp" / "version.py"):
             f.write_text(VERSION_LINE.sub(f'TOOL_VERSION = "{old}"', f.read_text(encoding="utf-8")), encoding="utf-8")
         (self.bin / "VERSION").write_text(old + "\n", encoding="utf-8")
+        man = self.bin / "MANIFEST"  # an older copy's manifest names its own version
+        if man.exists():
+            lines = man.read_text(encoding="utf-8").splitlines()
+            man.write_text("\n".join(["# app-blueprint tool " + old] + lines[1:]) + "\n", encoding="utf-8")
 
     def copy_run(self, *args, stdin=None):
         return S.run_script(self.copy, list(args), self.elsewhere, stdin=stdin, env=self.env)
@@ -424,7 +455,7 @@ class InterruptedRefreshTest(CopyTestBase):
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         else:
             self.assert_fails_closed()
-        if stop == 4:  # before step 5: complete, but VERSION still names the old copy
+        if stop in (4, "manifest"):  # before step 5: complete, but VERSION still names the old copy
             r = self.copy_run("doctor", "--strict")
             self.assertEqual(r.returncode, 1, r.stdout)
             self.assertIn("Out of date", r.stdout)
@@ -465,7 +496,117 @@ class InterruptedRefreshTest(CopyTestBase):
         self.check(self.from_19, 3, "works")
 
     def test_from_19_stopped_after_step_4(self):
-        self.check(self.from_19, 4, "works")
+        self.check(self.from_19, 4, "works")  # before MANIFEST: the old one names the old version, so it is not used
+
+    def test_from_19_stopped_after_the_manifest(self):
+        self.check(self.from_19, "manifest", "works")
+
+    def test_from_1x_stopped_after_the_manifest(self):
+        self.check(self.from_1x, "manifest", "works")
+
+
+class ManifestTest(CopyTestBase):
+    """W0-A2, decision 1 (option D): .blueprint/bin/MANIFEST lists every copied file; the start-up check enforces it.
+
+    The rule: MANIFEST is enforced when its version line is the running TOOL_VERSION. Otherwise, if VERSION says the
+    running TOOL_VERSION (the copy was completed by this version, which writes MANIFEST before VERSION), the copy is
+    incomplete. Otherwise (the skill folder, a 1.9.0 copy, a refresh stopped before the MANIFEST step) every module
+    present on disk is imported and nothing more is required."""
+
+    def manifest(self):
+        lines = (self.bin / "MANIFEST").read_text(encoding="utf-8").splitlines()
+        return lines[0], lines[1:]
+
+    def test_manifest_lists_every_copied_file(self):
+        self.init_package_copy()
+        head, files = self.manifest()
+        self.assertEqual(head, "# app-blueprint tool " + bp.TOOL_VERSION)
+        on_disk = sorted(p.relative_to(self.bin).as_posix() for p in self.bin.rglob("*")
+                         if p.is_file() and p.name not in ("VERSION", "MANIFEST"))
+        self.assertEqual(files, on_disk)
+        self.assertEqual(files, sorted(files))
+        self.assertIn("blueprint.py", files)
+        self.assertIn("bp/registry.py", files)
+        self.assertIn("map.template.html", files)
+        self.assertNotIn(b"\r", (self.bin / "MANIFEST").read_bytes())
+
+    def test_missing_or_older_manifest_after_version_is_incomplete(self):
+        self.init_package_copy()
+        good = (self.bin / "MANIFEST").read_bytes()
+        (self.bin / "MANIFEST").unlink()
+        self.assert_fails_closed()
+        head, files = good.decode("utf-8").splitlines()[0], good.decode("utf-8").splitlines()[1:]
+        (self.bin / "MANIFEST").write_text("\n".join(["# app-blueprint tool 1.8.9"] + files) + "\n", encoding="utf-8")
+        self.assert_fails_closed()
+        (self.bin / "MANIFEST").write_bytes(good)
+        self.assert_guards_work()
+
+    def test_a_stale_manifest_mid_refresh_never_breaks_a_complete_package(self):
+        """Refresh stopped before the MANIFEST step: VERSION and MANIFEST are the old tool's, and the old manifest
+        lists a module the new package no longer has. The new launcher and package work."""
+        self.init_package_copy()
+        lines = (self.bin / "MANIFEST").read_text(encoding="utf-8").splitlines()
+        (self.bin / "MANIFEST").write_text("\n".join(["# app-blueprint tool 1.8.9"] + sorted(lines[1:] + ["bp/gone.py"]))
+                                           + "\n", encoding="utf-8")
+        (self.bin / "VERSION").write_text("1.8.9\n", encoding="utf-8")
+        self.assert_guards_work()
+        self.assertEqual(self.copy_run("validate").returncode, 0)
+
+    def test_a_listed_module_that_does_not_import_fails_closed(self):
+        self.init_package_copy()
+        (self.bin / "bp" / "verify.py").write_text("def broken(:\n", encoding="utf-8")
+        self.assert_fails_closed()
+
+    def test_a_hand_damaged_copy_missing_a_later_module_fails_closed(self):
+        """A later workstream's module (here a throwaway W3-V guard module in a temp skill) is covered by the manifest
+        without any list being edited: deleted from the copy, every command fails closed."""
+        skill = self.base / "skill later"
+        shutil.copytree(S.SCRIPTS, skill / "scripts", ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copytree(S.SKILL / "assets", skill / "assets")
+        (skill / "scripts" / "bp" / "records.py").write_text(
+            "def refuse(action, root, plan, path, by):\n"
+            "    if action == 'write' and path == '.blueprint/state.json':\n"
+            "        return '.blueprint/state.json is written only by blueprint.py'\n", encoding="utf-8")
+        r = S.run_script(skill / "scripts" / "blueprint.py", ["init", "--name", "Later", "--root", self.root],
+                         self.elsewhere, env=self.env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.write_example_plan()
+        self.assertIn("bp/records.py", self.manifest()[1])
+        self.assertEqual(self.copy_run("guard", ".blueprint/state.json").returncode, 2)  # the module works
+        self.assert_guards_work()
+        (self.bin / "bp" / "records.py").unlink()
+        self.assert_fails_closed()
+        r = self.copy_run("guard", ".blueprint/state.json")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("is incomplete", r.stderr)
+
+    def test_not_built_in_the_skill_but_never_in_a_copy(self):
+        """registry: absent from the skill = not built (optional); listed in the copy's MANIFEST and absent = an
+        incomplete copy, even if the start-up check were bypassed."""
+        from bp import install, registry
+        self.assertIsNone(registry.load("records"))  # the skill folder has no MANIFEST: not built
+        self.assertFalse(registry.exists("records"))
+        with mock.patch.object(install, "listed_missing", lambda name, home=None: name == "records"):
+            with self.assertRaisesRegex(ImportError, "listed in this copy's MANIFEST"):
+                registry.load("records")
+            with self.assertRaisesRegex(ImportError, "listed in this copy's MANIFEST"):
+                registry.exists("records")
+            self.assertIsNone(registry.load("roadmap"))
+
+    def test_required_modules_rule(self):
+        from bp import install
+        home = self.base / "home bin"
+        (home / "bp").mkdir(parents=True)
+        self.assertEqual(install.required_modules(home), [])  # the skill: nothing beyond what is on disk
+        (home / "VERSION").write_text("1.8.9\n", encoding="utf-8")
+        self.assertEqual(install.required_modules(home), [])  # an old copy, or a refresh before the MANIFEST step
+        (home / "VERSION").write_text(bp.TOOL_VERSION + "\n", encoding="utf-8")
+        with self.assertRaises(ImportError):
+            install.required_modules(home)  # completed by this version, yet no MANIFEST
+        install.write_manifest(home, ["bp/a.py", "bp/views/__init__.py", "blueprint.py", "VERSION", "MANIFEST"])
+        self.assertEqual(install.required_modules(home), ["bp.a", "bp.views"])
+        self.assertEqual((home / "MANIFEST").read_text(encoding="utf-8"),
+                         f"# app-blueprint tool {bp.TOOL_VERSION}\nblueprint.py\nbp/a.py\nbp/views/__init__.py\n")
 
 
 REAL_RMTREE, REAL_RENAME, REAL_REPLACE = shutil.rmtree, os.rename, os.replace
@@ -636,8 +777,9 @@ class PackageCompletenessTest(CopyTestBase):
         for p in S.PACKAGE.rglob("*.py"):
             parts = ("bp",) + p.relative_to(S.PACKAGE).with_suffix("").parts
             expected.append(".".join(parts[:-1] if parts[-1] == "__init__" else parts))
-        # the launcher imports bp.api and bp.cli itself; cli checks every other module
-        self.assertEqual(sorted(cli.PACKAGE_MODULES + ("bp.api", "bp.cli")), sorted(expected))
+        # W0-A2 (decision 1, option D): the list is no longer written by hand; cli checks every module on disk (the
+        # launcher imports bp.api and bp.cli itself), so a later module is covered by its file alone
+        self.assertEqual(sorted(cli.PACKAGE_MODULES), sorted(expected))
 
     def test_missing_module_fails_closed(self):
         self.init_package_copy()
