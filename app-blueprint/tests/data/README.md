@@ -34,8 +34,10 @@ What differs, and why:
 * **Line numbers** in node headers (see above).
 * **Proto manifest**: aapt2 does not sort attributes by resource id (in the golden `package` comes first, then the others in
   an order of its own, with its four added attributes among them) and records real source positions: line and column on
-  elements, text nodes and namespace declarations, line only on attributes. The builder keeps the attribute order it is given
-  and writes synthetic positions (line = element number + 2, column = 4 x depth; line only on attributes). Whitespace text
+  elements, text nodes and namespace declarations, and a line only on attributes that have a compiled item (string-valued
+  attributes such as `package`, `versionName`, `label` and `name` carry no position at all). The builder keeps the attribute
+  order it is given and writes synthetic positions (line = element number + 2, column = 4 x depth), with a line on every
+  attribute, so a parser must not rely on a position being present. Whitespace text
   nodes are written by default (`text=False` drops them), as aapt2 keeps those of the source. The tests compare elements,
   attribute names, resource ids, values and value types, not bytes.
 * `aapt2 convert --output-format binary` turns the builder's proto manifest into an AXML equal to `make_axml`'s output

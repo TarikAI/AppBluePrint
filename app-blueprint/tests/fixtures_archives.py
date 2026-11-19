@@ -939,7 +939,9 @@ def make_absolute_path_zip(path):
 
 def make_nul_name_zip(path):
     """A member whose name contains a NUL (`evil\\0.txt`), written into both the local and central headers. Python's
-    `zipfile` cuts names at a NUL on some versions and keeps them on others (3.14 keeps `orig_filename`), so the property
+    `zipfile` cuts `filename` and `namelist()` at the NUL (seen on 3.11, 3.13 and 3.14) and keeps the full name only in
+    `ZipInfo.orig_filename`. A safety layer must check `orig_filename` or the raw central directory, or the NUL rule
+    never trips. The property
     is only reliable in the raw central directory. Trips the `unsafe-path` rule (NUL)."""
     return _write(path, zip_bytes([ZipEntry("ok.txt", "fine\n"), ZipEntry(b"evil\0.txt", "nul\n")]))
 
@@ -1016,7 +1018,8 @@ def make_corrupt_deflate_zip(path):
 def make_truncated_member_zip(path):
     """`cut.bin` (stored, 4096 bytes declared) has only its first 2048 bytes in the file, so its declared size runs into
     the next member's header, while the central directory is intact; `ok.txt` follows. Trips the `malformed` skip
-    (bad CRC or short read) for the member."""
+    for the member (on current Pythons `BadZipFile`: "Overlapped entries", because the declared size runs into the
+    next member; a bad CRC or a short read on others)."""
     real = bytes((n * 7 + 3) & 0xFF for n in range(4096))
     return _write(path, zip_bytes([ZipEntry("cut.bin", b"", method=0, compressed=real[:2048], csize=4096, usize=4096,
                                             crc=zlib.crc32(real) & 0xFFFFFFFF), ZipEntry("ok.txt", "fine\n")]))

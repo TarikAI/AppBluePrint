@@ -1076,8 +1076,8 @@ class TestWithAapt2(Base):
         out = run([AAPT2, "dump", "resources", ANDROID_JAR])
         self.assertEqual(out.returncode, 0, out.stderr)
         real = {m.group(2): int(m.group(1), 16) for m in re.finditer(r"resource (0x[0-9a-f]{8}) attr/(\w+)", out.stdout)}
-        if not real:
-            self.skipTest("this aapt2 cannot list the attr table of android.jar")
+        self.assertTrue(real, "aapt2 dump resources printed no attr table: its output format changed, update the pattern")
+        self.assertTrue(set(F.RES_IDS) & set(real), "none of RES_IDS is in this android.jar")
         for name, resid in F.RES_IDS.items():
             if name in real:  # an attribute missing from an older platform is not a failure; a different id is
                 self.assertEqual(real[name], resid, name)
@@ -1090,7 +1090,7 @@ class TestWithDexdump(Base):
         path.write_bytes(F.make_dex(F.SNAGDESK_STRINGS, F.SNAGDESK_TYPES))
         out = run([DEXDUMP, "-f", str(path)])
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
-        self.assertIn("035", out.stdout)  # the format version; the layout of the other lines varies with the tool
+        self.assertRegex(out.stdout, r"(?i)(magic|version)\D{0,20}035")  # the format version, not any "035" in an offset
         self.assertRegex(out.stdout, r"string_ids_size\s*:\s*%d\b" % len(set(F.SNAGDESK_STRINGS) | set(F.SNAGDESK_TYPES)))
         self.assertRegex(out.stdout, r"type_ids_size\s*:\s*%d\b" % len(F.SNAGDESK_TYPES))
 
