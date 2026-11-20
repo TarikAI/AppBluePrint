@@ -1387,15 +1387,25 @@ class ShortNameTest(unittest.TestCase):
                     unknowns.context(p.root, p.loaded(), {}, ctx)
                     self.assertTrue({self.LONG, self.SHORT} <= ctx["blocked"]["files"])
 
-    def test_a_short_folder_name(self):
+    def test_a_short_folder_name_in_both_directions_and_both_orders(self):
         if os.name != "nt":
             self.skipTest("8.3 short names are a Windows thing")
-        plan = self.project([("apps/web/longfoldername/x.ts", "P2"), ("apps/web/LONGFO~1/x.ts", "P1")])
-        with TempProject(plan) as p:
-            (p.root / "apps" / "web" / "longfoldername").mkdir(parents=True)
-            if not (p.root / "apps" / "web" / "LONGFO~1").exists():
-                self.skipTest("this volume does not make 8.3 short names")
-            self.assertIsNotNone(unknowns.refuse("claim", p.root, p.loaded(), "apps/web/LONGFO~1/x.ts", "x"))
+        long_path, short_path = "apps/web/longfoldername/x.ts", "apps/web/LONGFO~1/x.ts"
+        for long_blocked in (True, False):
+            for long_first in (True, False):
+                pair = [(long_path, "P2" if long_blocked else "P1"), (short_path, "P1" if long_blocked else "P2")]
+                plan = self.project(pair if long_first else pair[::-1])
+                with TempProject(plan) as p:
+                    (p.root / "apps" / "web" / "longfoldername").mkdir(parents=True)
+                    if not (p.root / "apps" / "web" / "LONGFO~1").exists():
+                        self.skipTest("this volume does not make 8.3 short names")
+                    for claimed in (long_path, short_path):
+                        got = unknowns.refuse("claim", p.root, p.loaded(), claimed, "x")
+                        self.assertIsNotNone(got, f"{claimed}: long blocked {long_blocked}, long first {long_first}")
+                        self.assertEqual(p.cli("claim", claimed, "--by", "frontend-engineer").returncode, 3)
+                    ctx = {}
+                    unknowns.context(p.root, p.loaded(), {}, ctx)
+                    self.assertTrue({long_path, short_path} <= ctx["blocked"]["files"])
 
     def test_when_neither_exists_the_names_are_compared_as_written(self):
         """No file has either name, so there is no short-name alias: `LONGFI~1.TS` is a different path from
@@ -1452,6 +1462,32 @@ class KnownLimitTest(unittest.TestCase):
             self.assertIsNotNone(unknowns.refuse("claim", p.root, p.loaded(), "apps/web/a/x/f.ts", "x"))
             self.assertIsNone(unknowns.refuse("claim", p.root, p.loaded(), "apps/web/b/y/f.ts", "x"),
                               "the known limit: documented in the contract, not followed")
+
+
+class KnownLimitLeafLinkTest(unittest.TestCase):
+    def test_known_limit_a_planned_symlink_to_a_free_planned_file(self):
+        """Known limit (R4-N2, on the safe side): `b.ts` is planned in a blocked phase and is itself a symlink to the
+        differently named, free planned file `a.ts`. The context lists `a.ts` (the two are one file), but a claim on
+        `a.ts` is allowed, because nothing about the name `a.ts` points at the link. Claiming `b.ts` is refused. This
+        asymmetry is documented in the contract; the test keeps it from changing unnoticed."""
+        plan = with_unknowns(unknown(blocks=["P2"]))
+        add_file(plan, "apps/web/a.ts", "P1")
+        add_file(plan, "apps/web/b.ts", "P2")
+        with TempProject(plan) as p:
+            (p.root / "apps" / "web").mkdir(parents=True)
+            (p.root / "apps" / "web" / "a.ts").write_text("x\n", encoding="utf-8")
+            try:
+                os.symlink("a.ts", p.root / "apps" / "web" / "b.ts")
+            except (OSError, NotImplementedError):
+                self.skipTest("this machine cannot create a file symlink")
+            loaded = p.loaded()
+            ctx = {}
+            unknowns.context(p.root, loaded, {}, ctx)
+            self.assertIn("apps/web/b.ts", ctx["blocked"]["files"])
+            self.assertIn("apps/web/a.ts", ctx["blocked"]["files"], "the context lists the target")
+            self.assertIsNotNone(unknowns.refuse("claim", p.root, loaded, "apps/web/b.ts", "x"))
+            self.assertIsNone(unknowns.refuse("claim", p.root, loaded, "apps/web/a.ts", "x"),
+                              "the known limit: the claim on the target is allowed")
 
 
 class CostTest(unittest.TestCase):
