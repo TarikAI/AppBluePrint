@@ -317,7 +317,8 @@ def cmd_status(args):
                                                for r in comp["rows"]):
                 print(f"    (phase {one_line(ph['id'])} skipped: blocked by "
                       f"{one_line(', '.join(blocked_by(ctx, 'phase', ph['id'])) or 'an open unknown')})")
-        held = [r for r in held if not args.owner or r["owner"] == args.owner]
+        # the count is of the files that would be offered without the block, so it never names a later phase's file
+        held = [r for r in next_ready(plan, comp["rows"], args.owner, blocked_phases=blocked) if id(r) in held_ids]
         if held:
             print(f"    ({len(held)} file(s) skipped: blocked by an open unknown; see status --unknowns)")
         for r in ready[:20]:
