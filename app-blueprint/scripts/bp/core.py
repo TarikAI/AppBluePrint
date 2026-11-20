@@ -665,7 +665,7 @@ def state_lock(root):
     locked. Waits up to $BLUEPRINT_LOCK_TIMEOUT seconds (default 15, at most 600), then raises state-busy. Never
     nested (a second take in one process is a RuntimeError) and never held across a subprocess: hold it only to read,
     change and write state, append log lines and write views. Windows and WSL processes do not share it."""
-    key = os.path.normcase(os.path.abspath(bp_dir(root) / STATE_LOCK))
+    key = _lock_key(root)
     if key in _HELD:
         raise RuntimeError("the state lock is already held by this process; it is never nested")
     fds = _acquire(root)
@@ -678,7 +678,8 @@ def state_lock(root):
 
 
 def _lock_key(root):
-    return os.path.normcase(os.path.abspath(bp_dir(root) / STATE_LOCK))
+    """One key per project however its root is spelled (8.3 short names, links, case), so nesting is always seen."""
+    return os.path.normcase(os.path.realpath(bp_dir(root) / STATE_LOCK))
 
 
 def _holding(root):

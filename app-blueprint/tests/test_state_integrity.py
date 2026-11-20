@@ -404,6 +404,20 @@ class TheLock(IntegrityChecks, unittest.TestCase):
         with core.state_lock(self.p.root):  # released: can be taken again
             pass
 
+    def test_the_lock_is_known_however_the_root_is_spelled(self):
+        """A root spelled another way (a link here; 8.3 short names on Windows CI) is the same project: holding the
+        lock through one spelling is holding it for every spelling, so nesting is always caught."""
+        link = self.p.root.parent / "link-to-p"
+        try:
+            os.symlink(self.p.root, link, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("this account cannot create symbolic links")
+        with core.state_lock(link):
+            self.assertTrue(core._holding(self.p.root))
+            with self.assertRaises(RuntimeError):
+                with core.state_lock(self.p.root):
+                    pass
+
     def test_a_file_system_without_locks_is_a_clean_error(self):
         from bp import cli
         err = io.StringIO()
