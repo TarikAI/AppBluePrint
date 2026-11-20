@@ -9,6 +9,8 @@ import contextlib
 import copy
 import io
 import json
+import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -1354,13 +1356,38 @@ class TabRoundTwoTest(TabRunTest):
         self.assertIn("7 / 9", out["text"])
 
 
+BS = chr(92)  # a backslash, built here so no escape in this file can go wrong
+_DRIVE = re.compile("(?<![A-Za-z0-9])[A-Za-z]:[" + BS + BS + "/]")  # C:\ or C:/ (not the s:/ of a URL)
+_UNC = re.compile("(?<![" + BS + "w" + BS + BS + "])" + BS + BS + "{2,4}[A-Za-z0-9_.$-]+" + BS + BS + "{1,2}[A-Za-z0-9_.$-]")  # UNC: two backslashes, server, backslash (also JSON-escaped)
+_ROOTED = re.compile(r"(?<![\w/.:<>-])/(?:home|Users|tmp|var|mnt|private|root|usr|opt|etc|run|Volumes)/")
+
+
+def leaks(text, machine=()):
+    """What in text names this machine: one of the given folders, a drive-letter path, a UNC path or a rooted path."""
+    found = [m for m in machine if m and m in text]
+    for rx in (_DRIVE, _UNC, _ROOTED):
+        m = rx.search(text)
+        if m:
+            found.append(m.group(0))
+    return found
+
+
 class NoMachineSpecificTextTest(TempRoot):
     """Files in .blueprint/ are committed and shared: none may carry an absolute path or this machine's folders."""
 
+    def test_the_scanner_catches_leaks_and_passes_clean_text(self):
+        win = "C:" + BS + "Users" + BS + "someone" + BS + "proj"
+        unc = BS + BS + "server" + BS + "share" + BS + "proj"
+        json_unc = BS * 4 + "server" + BS * 2 + "share" + BS * 2 + "x"  # the UNC path escaped inside a JSON file
+        os_form = "C:" + os.sep + "Users" + os.sep + "someone"  # backslashes on Windows, slashes elsewhere
+        for bad in (win, "D:/work/app", unc, "at " + unc + " now", json_unc, os_form, "/home/x/project", "cwd=/tmp/bp 123/x",
+                    '("/Users/x/y")', "see " + str(self.root) + "/x", "see " + self.root.as_posix() + "/x"):
+            self.assertTrue(leaks(bad, {str(self.root), self.root.as_posix()}), bad)
+        for ok in ("https://example.test/a/b", "apps/web/src/x.ts", "a/b", "1/2", "2027-01-15", "and/or", "T-domain",
+                   "http://localhost:3000/tmp", "a:b", "x = a / home / b", "line one" + BS + "nline two"):
+            self.assertEqual(leaks(ok, {str(self.root), self.root.as_posix()}), [], ok)
+
     def test_nothing_written_into_the_project_names_this_machine(self):
-        import os
-        import re
-        import tempfile
         plan = v2_plan()
         add_task(plan, id="T-api-keys", title="Create the API keys", owner="backend-lead")
         self.write_plan(plan)
@@ -1376,14 +1403,8 @@ class NoMachineSpecificTextTest(TempRoot):
         machine = {str(self.root), self.root.as_posix(), str(self.root.resolve()), self.root.resolve().as_posix(),
                    tempfile.gettempdir(), Path(tempfile.gettempdir()).as_posix(), str(S.SKILL), S.SKILL.as_posix(),
                    os.path.expanduser("~"), Path(os.path.expanduser("~")).as_posix()}
-        drive = re.compile(r"(?<![A-Za-z0-9])[A-Za-z]:[\/]")  # C:\ or C:/ (not the s:/ of a URL)
-        rooted = re.compile(r"(?<![\w/.:<>\"'=,-])/(?:home|Users|tmp|var|mnt|private|root|usr|opt|etc|run|Volumes)/")
         for name in names:
-            text = (folder / name).read_text(encoding="utf-8")
-            for bad in machine:
-                self.assertNotIn(bad, text, f"{name} contains {bad}")
-            self.assertIsNone(drive.search(text), f"{name}: {drive.search(text)}")
-            self.assertIsNone(rooted.search(text), f"{name}: {rooted.search(text)}")
+            self.assertEqual(leaks((folder / name).read_text(encoding="utf-8"), machine), [], name)
 
     def test_the_payload_and_next_texts_use_the_project_copy_form(self):
         from bp import roadmap as rm
