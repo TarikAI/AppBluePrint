@@ -1148,6 +1148,26 @@ class StateLockTest(MigrateCase):
         self.assertEqual(self.state()["files"]["apps/web/src/api.ts"]["state"], "claimed")
         self.assertEqual(self.state()["stateVersion"], 2)
 
+    def test_a_plan_another_migrate_finished_meanwhile_is_left_alone(self):
+        """Two migrates at once: the second re-reads the plan's version under the lock and, finding version 2 there,
+        stops with the normal 'already version 2' result: nothing written, no backup (review of #14)."""
+        real = cmd._check_writable
+        migrated = (json.dumps(v2_plan(), indent=2) + "\n").encode("utf-8")
+
+        def check_then_migrate(root, targets):
+            self.plan_path.write_bytes(migrated)  # the other migrate finished between our read and our lock
+            return real(root, targets)
+
+        with mock.patch.object(cmd, "_check_writable", check_then_migrate):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                cmd.cmd_migrate(Namespace(root=str(self.root), dry_run=False, force=True, json=True))
+        self.assertEqual(json.loads(out.getvalue()), {"ok": True, "command": "migrate", "data": {
+            "from": 2, "to": 2, "written": [], "dryRun": False}})
+        self.assertEqual(self.plan_path.read_bytes(), migrated)
+        self.assertFalse((self.bp / "blueprint.v1.json").exists())
+        self.assertNotIn("stateVersion", self.state())
+
 
 if __name__ == "__main__":
     unittest.main()

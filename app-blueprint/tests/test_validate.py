@@ -1240,6 +1240,192 @@ class FindingsTest(HermeticRoot):
 MARK = '"__DEEP__"'
 
 
+# ------------------------------------------------------------------------------- values JSON cannot write back
+
+def tree_bytes(root):
+    """{relative path: bytes} of every file under .blueprint (what a refused command must leave as it was)."""
+    d = root / ".blueprint"
+    return {str(p.relative_to(d)): p.read_bytes() for p in sorted(d.rglob("*")) if p.is_file()}
+
+
+def _put(path, value):
+    """A change to a plan dict: set the value at path (a list of keys and indexes)."""
+    def change(plan):
+        node = plan
+        for k in path[:-1]:
+            node = node[k]
+        node[path[-1]] = value
+    return change
+
+
+def _key(plan):
+    plan["app"]["x\udc80y"] = 1
+
+
+UNUSABLE = [  # (label, change to the plan dict, the key path the error names, the message's description)
+    ("lone surrogate", _put(["app", "name"], "Snag \ud800 Desk"), "app.name",
+     "an unpaired surrogate (\\ud800), which UTF-8 text cannot hold"),
+    ("low surrogate in a list", _put(["files", 1, "dependsOn"], ["\udfff"]), "files[1].dependsOn[0]",
+     "an unpaired surrogate (\\udfff), which UTF-8 text cannot hold"),
+    ("surrogate in a key", _key, "the key app.x\\udc80y", "an unpaired surrogate (\\udc80), which UTF-8 text cannot hold"),
+    ("NaN", _put(["app", "extra"], [1, {"n": float("nan")}]), "app.extra[1].n",
+     "a number that is not finite (NaN), which JSON does not have"),
+    ("Infinity", _put(["app", "extra"], float("inf")), "app.extra",
+     "a number that is not finite (Infinity), which JSON does not have"),
+    ("-Infinity", _put(["app", "extra"], float("-inf")), "app.extra",
+     "a number that is not finite (-Infinity), which JSON does not have"),
+    ("1e400", _put(["app", "extra"], "@BIG@"), "app.extra",
+     "a number that is not finite (Infinity), which JSON does not have"),
+]
+
+
+def unusable_text(version, change):
+    """The plan text with the change: json.dumps writes a lone surrogate as an escape and NaN/Infinity as such."""
+    plan = v1_plan() if version == 1 else v2_plan()
+    change(plan)
+    return json.dumps(plan, indent=2).replace('"@BIG@"', "1e400")
+
+
+class UnusableJsonTest(TempRoot):
+    """A plan holding a value JSON cannot write back (a lone surrogate, NaN, Infinity, or a number too large) is the
+    bad-json load error naming its key path, for every command and both schema versions, migrate included; in
+    state.json it is bad-state. Nothing is written."""
+
+    COMMANDS = [(["validate"], 1), (["validate", "--json"], 1), (["status"], 1), (["status", "--json"], 1),
+                (["status", "--next"], 1), (["sync"], 1), (["render"], 1), (["render", "--force"], 1),
+                (["export", "json"], 1), (["export", "csv"], 1), (["claim", "Cargo.toml", "--by", "cto-architect"], 1),
+                (["mark", "Cargo.toml", "built", "--by", "cto-architect"], 1), (["verify"], 1), (["migrate"], 1),
+                (["migrate", "--dry-run"], 1), (["guard", "Cargo.toml"], 2)]
+
+    def test_every_command_refuses_the_plan(self):
+        for version in (1, 2):
+            for label, put, where, what in UNUSABLE:
+                text = unusable_text(version, put)
+                (self.root / ".blueprint" / "blueprint.json").write_text(text, encoding="utf-8")
+                before = tree_bytes(self.root)
+                message = f"blueprint.json cannot be used: {where} holds {what}"
+                for argv, code in self.COMMANDS:
+                    with self.subTest(version=version, value=label, cmd=" ".join(argv)):
+                        r = self.cli(*argv)
+                        self.assertEqual(r.returncode, code, r.stdout + r.stderr)
+                        self.assertNotIn("Traceback", r.stderr)
+                        if "--json" in argv:
+                            env = json.loads(r.stdout)
+                            self.assertEqual((env["ok"], env["error"]["code"], env["error"]["message"]),
+                                             (False, "bad-json", message))
+                        else:
+                            self.assertIn(message, r.stderr)
+                        self.assertEqual(tree_bytes(self.root), before, "nothing is written")
+
+    def test_load_raw_plan_is_the_one_place(self):
+        from bp import plan as P
+        text = unusable_text(2, UNUSABLE[0][1])
+        (self.root / ".blueprint" / "blueprint.json").write_text(text, encoding="utf-8")
+        for fn in (P.load_raw_plan, P.load_plan):
+            with self.subTest(fn=fn.__name__):
+                with self.assertRaises(SystemExit) as cm:
+                    quiet(fn, self.root)
+                self.assertEqual((cm.exception.code, cm.exception.error), (1, "bad-json"))
+
+    def test_hook_pre_fails_closed(self):
+        (self.root / ".blueprint" / "blueprint.json").write_text(unusable_text(2, UNUSABLE[3][1]), encoding="utf-8")
+        payload = json.dumps({"cwd": str(self.root), "tool_input": {"file_path": str(self.root / "Cargo.toml")}})
+        r = S.run_script(self.launcher(), ["hook", "pre"], self.root, stdin=payload, env=S.tool_env())
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("blueprint.json cannot be used: app.extra[1].n holds a number that is not finite (NaN)", r.stderr)
+
+    def test_the_same_values_in_state_are_bad_state(self):
+        self.write_plan(v2_plan())
+        cases = [('{"files": {"Cargo.toml": {"state": "built", "note": "a\\ud800"}}}',
+                  'files["Cargo.toml"].note', "an unpaired surrogate (\\ud800), which UTF-8 text cannot hold"),
+                 ('{"files": {}, "syncedAt": NaN}', "syncedAt", "a number that is not finite (NaN), which JSON does not have"),
+                 ('{"files": {}, "x": [1e999]}', "x[0]", "a number that is not finite (Infinity), which JSON does not have")]
+        for text, where, what in cases:
+            (self.root / ".blueprint" / "state.json").write_text(text, encoding="utf-8")
+            self.touch("Cargo.toml")
+            before = tree_bytes(self.root)
+            for argv in (["status"], ["status", "--json"], ["sync"], ["mark", "Cargo.toml", "built", "--by", "cto-architect"]):
+                with self.subTest(state=text, cmd=" ".join(argv)):
+                    r = self.cli(*argv)
+                    self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                    self.assertNotIn("Traceback", r.stderr)
+                    shown = json.loads(r.stdout)["error"] if "--json" in argv else None
+                    msg = f".blueprint/state.json is damaged: {where} holds {what}"
+                    if shown:
+                        self.assertEqual((shown["code"], shown["message"]), ("bad-state", msg))
+                    else:
+                        self.assertIn(msg, r.stderr)
+                    self.assertEqual(tree_bytes(self.root), before, "state.json is left as it is")
+
+    def test_a_clean_plan_is_unchanged(self):  # the check costs nothing to a plan without such values
+        self.write_plan(v2_plan())
+        self.assertEqual(self.cli("validate").returncode, 0)
+        plan = v2_plan()
+        plan["app"]["name"] = "Snag \U0001F600 Desk \u2028"  # a real astral character and a separator are fine
+        plan["app"]["extra"] = [1.5, -0.0, 1e308, 10 ** 30]
+        self.write_plan(plan)
+        self.assertEqual(self.cli("validate").returncode, 0)
+
+
+class LoadNextTest(TempRoot):
+    """Item 2: the load errors' and the schema-v1 warning's next run as printed. The schema-v1 finding is data
+    (validate --json), so it holds nothing machine-specific: the copy's form when the copy has migrate, else the
+    portable <skill> form."""
+
+    def hint(self, args):
+        return f'python "{S.SCRIPTS / "blueprint.py"}" {args} --root "{self.root.resolve()}"'
+
+    def copy(self, *modules):
+        bin_ = self.root / ".blueprint" / "bin"
+        (bin_ / "bp" / "commands").mkdir(parents=True, exist_ok=True)
+        (bin_ / "blueprint.py").write_text("# copy\n", encoding="utf-8")
+        for m in modules:
+            (bin_ / "bp" / (m + ".py")).write_text("# copy\n", encoding="utf-8")
+
+    def test_load_errors(self):
+        r = self.cli("status", "--json")
+        self.assertEqual(json.loads(r.stdout)["error"]["next"], self.hint('init --name "App name"'))
+        (self.root / ".blueprint" / "blueprint.json").write_text("{", encoding="utf-8")
+        r = self.cli("status", "--json")
+        self.assertEqual(json.loads(r.stdout)["error"]["next"], f"fix .blueprint/blueprint.json, then run: {self.hint('validate')}")
+        self.write_plan({"version": 2})
+        r = self.cli("status", "--json")
+        self.assertEqual(json.loads(r.stdout)["error"]["code"], "bad-shape")
+        self.assertEqual(json.loads(r.stdout)["error"]["next"], f"fix .blueprint/blueprint.json, then run: {self.hint('validate')}")
+        self.copy()
+        r = self.cli("status", "--json")
+        self.assertEqual(json.loads(r.stdout)["error"]["next"],
+                         "fix .blueprint/blueprint.json, then run: python .blueprint/bin/blueprint.py validate")
+
+    def test_schema_v1_warning(self):
+        self.write_plan(v1_plan())
+        first = json.loads(self.cli("validate", "--json").stdout)["data"]["warnings"][0]
+        self.assertEqual((first["code"], first["next"]), ("schema-v1", "python <skill>/scripts/blueprint.py migrate --root ."))
+        self.copy("commands/migrate")
+        first = json.loads(self.cli("validate", "--json").stdout)["data"]["warnings"][0]
+        self.assertEqual(first["next"], "python .blueprint/bin/blueprint.py migrate")
+
+
+@unittest.skipUnless(os.name == "nt", "a junction is a Windows link")
+class LockKeyJunctionTest(HermeticRoot):
+    def test_a_junction_to_the_project_is_the_same_lock(self):
+        """The lock is keyed by the project's real path: a junction (made without any privilege) names the same project
+        (review of #14; without realpath this test fails on Windows)."""
+        from bp import core
+        self.write_plan(v2_plan())
+        link = Path(tempfile.mkdtemp(prefix="bp-junction-")) / "j"
+        self.addCleanup(shutil.rmtree, link.parent, True)
+        r = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(self.root)], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.addCleanup(lambda: os.path.isdir(link) and os.rmdir(link))
+        self.assertNotEqual(os.path.normcase(str(link)), os.path.normcase(str(self.root)))
+        with core.state_lock(link):
+            self.assertTrue(core._holding(self.root))
+            with self.assertRaises(RuntimeError):
+                with core.state_lock(self.root):
+                    pass
+
+
 def deep_json(depth):
     return "[" * depth + "1" + "]" * depth
 
