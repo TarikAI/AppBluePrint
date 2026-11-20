@@ -1057,24 +1057,55 @@ class FindingsTest(HermeticRoot):
                 self.assertEqual((errs[0]["message"], errs[0]["code"]), ("version must be 1 or 2", "version"))
 
     def test_windows_alias_paths(self):
-        """file-path-alias (version 2 only): a segment ending in a dot or a space, or holding ':', is another spelling
-        of the plain path on Windows, so the plan must use the plain one (review of #13, R2-M1)."""
-        spellings = {"apps/web/y.ts.": "apps/web/y.ts", "apps/web/z.ts::$DATA": "apps/web/z.ts",
-                     "apps/web.. /a.ts": "apps/web/a.ts", "docs/notes.md:alt": "docs/notes.md"}
+        """file-path-alias (version 2 only): every message says what Windows really does with the name (review of
+        #16, N4): a trailing dot or space at the end is dropped, so it names the plain file; elsewhere the name cannot
+        be stored as written; ':' starts a stream name; an empty segment, a device name, a case-only twin."""
+        cases = {
+            "apps/web/y.ts.": "Windows drops the trailing dots and spaces, so it names the same file as 'apps/web/y.ts'",
+            "apps/web/y2.ts ..": "Windows drops the trailing dots and spaces, so it names the same file as 'apps/web/y2.ts'",
+            "apps/web../a.ts": "the folder name 'web..' ends in a dot or a space, which Windows cannot store as written",
+            "apps/web /b.ts": "the folder name 'web ' ends in a dot or a space, which Windows cannot store as written",
+            "apps/z.ts::$DATA": "':' in 'z.ts::$DATA' starts a stream name on Windows",
+            "src:x/a.ts": "':' in 'src:x' starts a stream name on Windows",
+            "src/con.ts": "'con.ts' is the Windows device name CON",
+            "lpt9/a.ts": "'lpt9' is the Windows device name LPT9",
+            "src/Aux": "'Aux' is the Windows device name AUX",
+        }
         plan = v2_plan()
-        for path in spellings:
+        for path in cases:
             plan["files"].append(dict(plan["files"][1], path=path, dependsOn=[]))
         found = [f for f in self.v.validate_findings(self.load(plan)) if f["code"] == "file-path-alias"]
-        self.assertEqual([(f["level"], f["entry"]) for f in found], [("error", f"file {p}") for p in spellings])
-        for f, plain in zip(found, spellings.values()):
-            self.assertIn(f"the same file as {plain!r}", f["message"])
-            self.assertEqual(self.v.classify_error(f["message"]), "file-path-alias")
-            self.assertEqual(f["next"], f"write the path as {plain!r} in files[]")
+        self.assertEqual([(f["level"], f["entry"]) for f in found], [("error", f"file {p}") for p in cases])
+        for f, (path, why) in zip(found, cases.items()):
+            with self.subTest(path=path):
+                self.assertEqual(f["message"], f"file {path!r}: not a portable name on Windows: {why}")
+                self.assertEqual(self.v.classify_error(f["message"]), "file-path-alias")
         self.assertEqual([f["code"] for f in self.v.validate_findings(self.load(v2_plan()))], [])
+        fine = v2_plan()  # names close to the rules that are fine
+        for path in ("src/console.ts", "src/com10.ts", "src/.env", "src/a.b.c", "src/com.ts", "src/nul1.ts"):
+            fine["files"].append(dict(fine["files"][1], path=path, dependsOn=[]))
+        self.assertEqual([f["message"] for f in self.v.validate_findings(self.load(fine))], [])
         v1 = v1_plan()
         v1["files"].append(dict(v1["files"][1], path="apps/web/y.ts.", dependsOn=[]))
+        v1["files"].append(dict(v1["files"][1], path="src/con.ts", dependsOn=[]))
         self.assertNotIn("file-path-alias", [f["code"] for f in self.v.validate_findings(self.load(v1))],
                          "a version 1 plan validates as in 1.3.0")
+
+    def test_case_twins_and_pattern_segments(self):
+        plan = v2_plan()
+        first = plan["files"][1]["path"]
+        twin = first.upper()
+        plan["files"].append(dict(plan["files"][1], path=twin, dependsOn=[]))
+        plan["patterns"].append({"id": "pat-alias", "glob": "src/aux/*.ts.", "module": plan["modules"][0]["id"],
+                                 "phase": plan["phases"][0]["id"], "purpose": "p", "instance": "one file", "verify": "true"})
+        found = [f for f in self.v.validate_findings(self.load(plan)) if f["code"] == "file-path-alias"]
+        self.assertEqual([f["message"] for f in found], [
+            f"file {twin!r}: differs from file {first!r} only by case; Windows and macOS see one file",
+            "pattern 'pat-alias': not a portable name on Windows: 'aux' is the Windows device name AUX",
+        ])
+        self.assertEqual([f["entry"] for f in found], [f"file {twin}", "pattern pat-alias"])
+        for f in found:
+            self.assertEqual(self.v.classify_error(f["message"]), "file-path-alias")
 
     def test_bad_id_is_registered_once_in_the_core(self):
         """Contract 7.4: bad-id is a cross-section code; the core registers it, domain modules only emit it."""

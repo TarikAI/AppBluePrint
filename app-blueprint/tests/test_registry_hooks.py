@@ -14,6 +14,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -1605,11 +1606,326 @@ class RosterCellsTest(CliTestBase):
         self.assertEqual(len(self.cells(line)), 7, line)
         self.assertIn("| a\\|b c | lead\\\\ |", line)
 
+    def test_version_2_pattern_column_and_write_lists(self):
+        plan = v2_plan()
+        plan["owners"][0]["pattern"] = "a\\|b"
+        plan["phases"][0]["name"] = "Walking\nskeleton"
+        text = self.roster(plan)
+        line = next(l for l in text.splitlines() if l.startswith("| 1 | `"))
+        self.assertEqual(len(self.cells(line)), 5, line)
+        self.assertIn(f"**{plan['phases'][0]['id']} Walking skeleton**", text)
+        self.assertNotIn("\nskeleton", text)
+
     def test_version_1_keeps_1_3_0_bytes(self):
         text = self.roster(self.hostile(v1_plan()))
         rid = v1_plan()["roster"][0]["id"]
         line = next(l for l in text.splitlines() if l.startswith(f"| {rid} |"))
         self.assertIn("| a\\|b c | lead\\ |", line)
+
+
+NODE = shutil.which("node")
+
+# Runs every inline script of a rendered map.html in node against a fake DOM that accepts any use, so the only errors
+# are the page's own (a TypeError from plan text, a JSON.parse failure). Prints {"errors": [...]}.
+PAGE_HARNESS = r"""
+const vm = require('vm'), fs = require('fs');
+const html = fs.readFileSync(process.argv[process.argv.length - 1], 'utf8');
+let payload = null; const code = [];
+for (const m of html.matchAll(/<script([^>]*)>([\s\S]*?)<\/script>/g)) { if (/id="bp"/.test(m[1])) payload = m[2]; else code.push(m[2]); }
+function stub() {
+  const store = Object.create(null);
+  return new Proxy(function () {}, {
+    get(t, k) {
+      if (k === Symbol.iterator) return function* () {};
+      if (k === Symbol.toPrimitive) return () => 0;
+      if (k === 'then') return undefined;
+      if (k in store) return store[k];
+      if (k === 'children' || k === 'childNodes') return [];
+      if (k === 'length') return 0;
+      if (k === 'value' || k === 'textContent' || k === 'hash') return '';
+      if (k === 'classList') return { toggle() {}, add() {}, remove() {}, contains() { return false; } };
+      if (k === 'style') return store.style || (store.style = {});
+      return stub();
+    },
+    set(t, k, v) { store[k] = v; return true; },
+    apply() { return stub(); },
+  });
+}
+const ids = Object.create(null);
+const document = { getElementById(id) { if (id === 'bp') return { textContent: payload }; return ids[id] || (ids[id] = stub()); },
+  createElement: stub, createElementNS: stub, createTextNode: stub, querySelector: stub, querySelectorAll() { return []; },
+  addEventListener() {}, body: stub(), documentElement: stub() };
+const errors = [];
+const ctx = { document, location: { hash: '' }, history: { replaceState() {} }, setTimeout() {}, clearTimeout() {},
+  requestAnimationFrame() {}, addEventListener() {}, scrollTo() {}, getComputedStyle: stub, matchMedia() { return { matches: false, addEventListener() {} }; },
+  console: { log() {}, warn() {}, error(...a) { errors.push(a.join(' ')); } } };
+ctx.window = ctx;
+vm.createContext(ctx);
+for (const c of code) { try { vm.runInContext(c, ctx); } catch (e) { errors.push(String(e && e.stack || e)); } }
+let parsed = null;
+try { parsed = JSON.parse(payload); } catch (e) { errors.push('JSON.parse: ' + e.message); }
+process.stdout.write(JSON.stringify({ errors, name: parsed && parsed.app && parsed.app.name }));
+"""
+
+
+def strict_json(text):
+    def refuse(name):
+        raise ValueError(f"non-standard JSON constant {name}")
+    return json.loads(text, parse_constant=refuse)
+
+
+class MapRoundOneTest(CliTestBase):
+    """Review of #16, round 1: the map payload is strict JSON (M2, M3), plan text that names an Object.prototype
+    member cannot blank the page (M4), assets are escaped case-insensitively (N1), a template without a placeholder is
+    a bug (N11), and render.py holds no literal line separators (N10)."""
+
+    def render_text(self, text, exts=None):
+        from bp.views import render
+        from bp.views.context import build_context
+        (self.root / ".blueprint" / "blueprint.json").write_text(text, encoding="utf-8")
+        with extension(exts or {}):
+            loaded = quiet(bplan.load_plan, self.root)[0]
+            state = bplan.load_state(self.root)
+            ctx = build_context(self.root, loaded, state)
+            with mock.patch.object(render, "tab_scripts", lambda: []):
+                return render.render_map(loaded, state, ctx["comp"], ctx)
+
+    def page(self, html):
+        """Errors from running the page's scripts in node (and its strict JSON.parse of the payload)."""
+        f = self.root / "page.html"
+        f.write_text(html, encoding="utf-8")
+        r = subprocess.run([NODE, "-e", PAGE_HARNESS, str(f)], capture_output=True, text=True, encoding="utf-8", timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)
+
+    def test_non_finite_numbers_become_null_and_lone_surrogates_are_escaped(self):
+        for version in (1, 2):
+            with self.subTest(version=version):
+                plan = v1_plan() if version == 1 else v2_plan()
+                plan["app"]["extra"] = [float("nan"), {"deep": [[float("inf")]]}, float("-inf"), 1.5]
+                plan["app"]["name"] = "A\ud800B\udfffC"
+                plan["files"][0]["purpose"] = "x\udc00"
+                text = json.dumps(plan, indent=2)  # NaN, Infinity and \ud800 escapes, as a hand-edited plan can hold
+                self.assertIn("NaN", text)
+                html = self.render_text(text)
+                html.encode("utf-8")  # no lone surrogate reaches the bytes of map.html
+                data = strict_json(MapSafetyTest.payload(html))
+                self.assertEqual(data["app"]["extra"], [None, {"deep": [[None]]}, None, 1.5])
+                self.assertEqual(data["app"]["name"], "A\ud800B\udfffC")
+                self.assertEqual(data["rows"][0]["purpose"], "x\udc00")
+                if NODE:
+                    out = self.page(html)
+                    self.assertEqual(out["errors"], [])
+                    self.assertEqual(out["name"], "A\ud800B\udfffC")
+
+    @unittest.skipUnless(NODE, "node is not installed")
+    def test_plan_text_naming_prototype_members(self):
+        for version in (1, 2):
+            with self.subTest(version=version):
+                plan = v1_plan() if version == 1 else v2_plan()
+                names = ["constructor", "toString", "__proto__", "hasOwnProperty", "valueOf"]
+                for name in names:
+                    plan["files"].append(dict(plan["files"][1], path=name, dependsOn=list(names)))
+                plan["files"].append(dict(plan["files"][1], path="__proto__/constructor/x.ts", dependsOn=["constructor"]))
+                plan["files"][0]["dependsOn"] = ["constructor", "__proto__"]
+                plan["modules"].append(dict(plan["modules"][0], id="constructor", path="__proto__", dependsOn=["toString"]))
+                html = self.render_text(json.dumps(plan))
+                self.assertEqual(self.page(html)["errors"], [])
+
+    @unittest.skipUnless(NODE, "node is not installed")
+    def test_the_harness_sees_page_errors(self):  # control: a page that throws is reported
+        html = self.render_text(json.dumps(v2_plan())).replace("var D = JSON.parse", "null.x; var D = JSON.parse", 1)
+        self.assertNotEqual(self.page(html)["errors"], [])
+
+    def test_assets_are_escaped_case_insensitively(self):
+        from bp.views import render
+        from bp.views.context import build_context
+        hostile = "var a = '</SCRIPT>', b = '</Script\t>', c = '<!--<script>', d = '</script >';"
+        self.write_plan(v2_plan())
+        loaded = quiet(bplan.load_plan, self.root)[0]
+        state = bplan.load_state(self.root)
+        ctx = build_context(self.root, loaded, state)
+        with mock.patch.object(render, "tab_scripts", lambda: [hostile]):
+            html = render.render_map(loaded, state, ctx["comp"], ctx)
+        tpl = (S.SKILL / "assets" / "map.template.html").read_text(encoding="utf-8")
+        self.assertEqual(len(re.findall(r"(?i)</script", html)), len(re.findall(r"(?i)</script", tpl)))
+        self.assertEqual(html.count("<!--"), tpl.count("<!--"))
+
+    def test_a_missing_placeholder_is_an_error(self):
+        from bp.views import render
+        from bp.views.context import build_context
+        self.write_plan(v2_plan())
+        loaded = quiet(bplan.load_plan, self.root)[0]
+        state = bplan.load_state(self.root)
+        ctx = build_context(self.root, loaded, state)
+        tpl = (S.SKILL / "assets" / "map.template.html").read_text(encoding="utf-8")
+        for name in ("__APP_NAME__", "__BLUEPRINT_DATA__", "/*__MINDMAP_JS__*/", "/*__TABS_JS__*/"):
+            with self.subTest(name=name):
+                broken = self.root / "broken.html"
+                broken.write_text(tpl.replace(name, ""), encoding="utf-8")
+                with mock.patch.object(render, "find_template", lambda: broken):
+                    with self.assertRaisesRegex(RuntimeError, re.escape(name)):
+                        render.render_map(loaded, state, ctx["comp"], ctx)
+
+    def test_render_py_holds_no_literal_line_separators(self):
+        text = (S.SCRIPTS / "bp" / "views" / "render.py").read_text(encoding="utf-8")
+        self.assertNotIn(" ", text)
+        self.assertNotIn(" ", text)
+
+
+NETWORK = [r"https?://", r"(?<![:\w])//[A-Za-z0-9.-]+\.[A-Za-z]{2,}", r"@import", r"@font-face", r"url\(\s*['\"]?(?![#'\")]|data:)",
+           r"\bsrcset\b", r"\bfetch\(", r"XMLHttpRequest", r"WebSocket", r"sendBeacon", r"EventSource",
+           r"<link\b", r"\b(?:pre(?:connect|fetch|load)|dns-prefetch)\b", r"\bsrc\s*="]
+
+
+def network_uses(text):
+    """Every match of a pattern a browser could load something through, minus the SVG namespace identifier and the
+    template's own `url(#arr)` marker reference."""
+    text = text.replace(SVG_NS, "")
+    return sorted({m.group(0) for rx in NETWORK for m in re.finditer(rx, text)})
+
+
+class NoNetworkTest(CliTestBase):
+    """Review of #16, N2: the map and every asset load nothing, by any route the browser offers."""
+
+    def test_assets_and_page(self):
+        for p in sorted((S.SKILL / "assets").iterdir()):
+            if p.suffix in (".html", ".js", ".css"):
+                with self.subTest(asset=p.name):
+                    self.assertEqual(network_uses(p.read_text(encoding="utf-8")), [])
+        html = MapSafetyTest.render(self, v2_plan())
+        plan_text = {s["docs"] for s in v2_plan()["stack"]}
+        page = html
+        for t in plan_text:
+            page = page.replace(t, "")
+        self.assertEqual(network_uses(page), [])
+
+    def test_the_check_catches_each_route(self):  # every injected route is found
+        for bad in ("@import url('//fonts.googleapis.com/css2');", "@font-face { src: url(//fonts.gstatic.com/x.woff2) }",
+                    "<link rel=\"preconnect\" href=\"x\">", "<img srcset=\"a.png 1x\">", "fetch('/x')", "new XMLHttpRequest()",
+                    "new WebSocket('ws://x')", "navigator.sendBeacon('/x')", "new EventSource('/x')",
+                    "<link rel=dns-prefetch>", "background: url(img.png)", "<img src=x>", "//cdn.example.com/a.js"):
+            with self.subTest(bad=bad):
+                self.assertNotEqual(network_uses(bad), [])
+        self.assertEqual(network_uses("marker-end: url(#arr); a = 'b' // comment"), [])
+
+
+LINE_BREAKS = "\r\n\x0b\x0c\x1c\x1d\x1e\x85  "
+
+
+class StatusRoundOneTest(CliTestBase):
+    """Review of #16, round 1: line breaks only (M1), the fallback errors read as the modules' (N8), selectors are
+    checked before any output (N7), a malformed ctx["blocked"] never crashes --next (N9), and the two surviving
+    mutations of the blocked-files skip."""
+
+    UNKNOWNS = '''
+        import os
+        def context(root, plan, state, ctx):
+            ctx["blocked"]["files"] = os.environ["BP_TEST_BLOCKED"].split(",")
+    '''
+
+    def test_only_line_breaks_are_replaced(self):
+        plan = v2_plan()
+        plan["app"]["name"] = "Snag  Desk\tA" + "".join(f"{i}{c}" for i, c in enumerate(LINE_BREAKS)) + "Z"
+        plan["phases"][0]["name"] = "Walking\t\tskeleton  two"
+        self.write_plan(plan)
+        code, out, err = self.run_("status")
+        self.assertEqual(code, 0, err)
+        self.assertIn("Snag  Desk\tA0 1 2 3 4 5 6 7 8 9 Z: ", out)  # CRLF and the run count as one break each
+        self.assertIn("Walking\t\tskeleton  two", out)
+
+    def test_fallback_errors_read_as_the_modules(self):
+        plan = v2_plan()
+        plan["milestones"].append({"id": "M2", "name": "Two", "goal": "g"})
+        self.write_plan(plan)
+        quiet_modules = {"features.py": "def status_json(ctx):\n    return {}\n\ndef status_card(ctx, f):\n    return []\n",
+                         "roadmap.py": "def status_json(ctx):\n    return {}\n"}
+        with extension(quiet_modules):
+            code, out, _ = self.run_("status", "--json", "--feature", "F-nope")
+            err = json.loads(out)["error"]
+            self.assertEqual((code, err["message"], err["next"]), (1, "feature F-nope is not in the plan", "blueprint.py status --features"))
+            code, out, _ = self.run_("status", "--json", "--milestone", "M9")
+            err = json.loads(out)["error"]
+            self.assertEqual((code, err["message"], err["next"]),
+                             (1, "'M9' is not a milestone in the plan (milestones: M1, M2)", "python .blueprint/bin/blueprint.py status"))
+
+    def test_selectors_are_checked_before_any_output(self):
+        exts = {"roadmap.py": '''
+                    from bp.core import BlueprintError
+                    def status_json(ctx):
+                        return {}
+                    def status_lines(ctx, args):
+                        if getattr(args, "milestone", None) == "M9":
+                            raise BlueprintError("unknown-milestone", "no M9")
+                        return []
+                '''}
+        with extension(exts):
+            code, out, err = self.run_("status", "--milestone", "M9")
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertIn("no M9", err)
+
+    def test_a_malformed_blocked_value_never_crashes_next(self):
+        for value in ("None", "'x'", "[1, 2]", "{'phases': 5, 'files': 7}", "{'phases': None, 'files': None}", "5"):
+            with self.subTest(blocked=value):
+                with extension({"unknowns.py": f"def context(root, plan, state, ctx):\n    ctx['blocked'] = {value}\n"}):
+                    code, out, err = self.run_("status", "--next")
+                self.assertEqual(code, 0, err)
+                self.assertIn("Ready to build next:", out)
+
+    def ready(self, blocked):
+        with extension({"unknowns.py": self.UNKNOWNS}), mock.patch.dict(os.environ, {"BP_TEST_BLOCKED": ",".join(blocked)}):
+            code, out, err = self.run_("status", "--next")
+        self.assertEqual(code, 0, err)
+        return out.split("Ready to build next:")[1]
+
+    def test_a_file_that_depends_on_a_blocked_file_is_not_offered(self):
+        plan = v2_plan()
+        dep = next(f for f in plan["files"] if f.get("dependsOn"))
+        ready = self.ready([dep["dependsOn"][0]])
+        self.assertNotIn(dep["path"] + "  (", ready, "a file waits for a dependency that is blocked")
+
+    def test_the_count_is_of_files_that_would_be_offered(self):
+        plan = v2_plan()
+        later = next(f["path"] for f in plan["files"] if f["phase"] != plan["phases"][0]["id"])
+        waiting = next(f["path"] for f in plan["files"] if f.get("dependsOn") and f["phase"] == plan["phases"][0]["id"])
+        offered = "apps/web/src/Inbox.tsx"
+        ready = self.ready([later, waiting, offered])
+        self.assertIn("(1 file(s) skipped: blocked by an open unknown; see status --unknowns)", ready)
+
+
+class FrozenStatusTest(unittest.TestCase):
+    """Review of #16, M1: a valid version 1 plan with double spaces and tabs prints exactly as 1.3.0 printed it."""
+
+    def run_both(self, mutate, args_list):
+        outs = []
+        for tool in (S.FROZEN, S.LAUNCHER):
+            root = Path(tempfile.mkdtemp(prefix="bp-frozen-"))
+            self.addCleanup(shutil.rmtree, root, True)
+            (root / ".blueprint").mkdir()
+            plan = v1_plan()
+            mutate(plan)
+            (root / ".blueprint" / "blueprint.json").write_text(json.dumps(plan, indent=2), encoding="utf-8")
+            target = plan["files"][0]["path"]
+            r = S.run_script(tool, ["mark", target, "blocked", "--by", "lead", "--force", "--note", "waits  on\tinfra", "--root", root], root)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            got = []
+            for args in args_list:
+                r = S.run_script(tool, args + ["--root", root], root)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                got.append(r.stdout)
+            outs.append(got)
+        return outs
+
+    def test_double_spaces_and_tabs(self):
+        def mutate(plan):
+            plan["app"]["name"] = "Snag  Desk\tv1"
+            plan["phases"][0]["name"] = "Walking\tskeleton  one"
+        old, new = self.run_both(mutate, [["status"], ["status", "--next"]])
+        strip = lambda s: s.split("\nSchema version 1:")[0]  # noqa: E731 - the 1.5 row d line, after the 1.x output
+        self.assertEqual([strip(x) for x in new], [strip(x) for x in old])
+        self.assertIn("Snag  Desk\tv1", new[0])
+        self.assertIn("waits  on\tinfra", new[0])
 
 
 class EndToEndExtensionTest(unittest.TestCase):
