@@ -114,14 +114,18 @@ def _label(u, i):
     return uid if isinstance(uid, str) and uid and not any(c.isspace() for c in uid) else f"unknowns[{i}]"
 
 
-def _run(root, args, needs=None):
+def _run(root, args, needs=None, portable=False):
     """A command line that runs as printed (as commands/migrate.py does): the project's own copy when it has the
-    command (`needs` is the module of the copy that provides it), else this tool with --root."""
+    command (`needs` is the module of the copy that provides it), else this tool with --root. portable=True is for
+    text stored in a project file (the map): no machine-specific path, so without a copy it is the placeholder form
+    `python <skill>/scripts/blueprint.py ... --root .`."""
     if root is None:
         return f"python .blueprint/bin/blueprint.py {args}"
     copy = Path(bp_dir(Path(root))) / "bin"
     if (copy / "blueprint.py").is_file() and (needs is None or (copy / "bp" / needs).is_file()):
         return f"python .blueprint/bin/blueprint.py {args}"
+    if portable:
+        return f"python <skill>/scripts/blueprint.py {args} --root ."
     return f'python "{TOOL_HOME / "blueprint.py"}" {args} --root "{root}"'
 
 
@@ -512,16 +516,16 @@ def context(root, plan, state, ctx):
                        for i, u in enumerate(items if isinstance(items, list) else []) if isinstance(u, dict)]
 
 
-def _next_step(ctx):
+def _next_step(ctx, portable=False):
     """The one command to run when there are no unknowns: render, or migrate for a version 1 plan."""
     root, plan = ctx.get("root"), ctx.get("plan")
     if isinstance(plan, dict) and plan.get("_from") == 1:
-        return "run: " + _run(root, "migrate", "commands/migrate.py")
-    return "run: " + _run(root, "render")
+        return "run: " + _run(root, "migrate", "commands/migrate.py", portable)
+    return "run: " + _run(root, "render", None, portable)
 
 
 def map_payload(ctx):
-    return {"unknowns": ctx.get("unknowns") or [], "unknownsNext": _next_step(ctx)}
+    return {"unknowns": ctx.get("unknowns") or [], "unknownsNext": _next_step(ctx, portable=True)}  # stored in map.html: nothing machine-specific
 
 
 def status_json(ctx):

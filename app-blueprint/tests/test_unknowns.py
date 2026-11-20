@@ -1169,6 +1169,51 @@ class NextCommandTest(unittest.TestCase):
             self.assertNotIn("python .blueprint/bin/blueprint.py migrate", r.stdout)
 
 
+class NoMachinePathsTest(unittest.TestCase):
+    """What render stores in a project file (map.html) holds nothing specific to this machine."""
+    DRIVE = re.compile(r"(?<![A-Za-z0-9])[A-Za-z]:[\\/]")
+    ROOTED = re.compile(r"(?<![\w.:<>-])/(?:home|tmp|Users|var|mnt|private|opt|usr)/")
+
+    def payload_of(self, p):
+        r = p.cli("render")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        html = (p.root / ".blueprint" / "map.html").read_text(encoding="utf-8")
+        text = re.search(r'<script id="bp" type="application/json">(.*?)</script>', html, re.S).group(1)
+        return json.loads(text.replace("<\/", "</")), html
+
+    def assert_portable(self, text, p):
+        for bad in (str(p.root), str(p.root).replace("\\", "/"), str(p.root).replace("\\", "\\\\"), str(S.SCRIPTS),
+                    str(S.SCRIPTS).replace("\\", "/"), str(S.SCRIPTS).replace("\\", "\\\\"), os.path.expanduser("~")):
+            self.assertNotIn(bad, text)
+        self.assertIsNone(self.DRIVE.search(text), self.DRIVE.search(text))
+        self.assertIsNone(self.ROOTED.search(text), self.ROOTED.search(text))
+
+    def test_the_map_payload_without_a_project_copy(self):
+        for plan in (with_unknowns(), v2_plan(), v1_plan()):
+            with TempProject(plan) as p:
+                payload, html = self.payload_of(p)
+                self.assertTrue(payload["unknownsNext"].startswith("run: python <skill>/scripts/blueprint.py "))
+                self.assertTrue(payload["unknownsNext"].endswith(" --root ."))
+                self.assert_portable(json.dumps(payload), p)
+                self.assert_portable(html, p)
+
+    def test_the_map_payload_with_a_project_copy(self):
+        with TempProject(with_unknowns()) as p:
+            NextCommandTest().make_copy(p, "unknowns.py")
+            payload, _ = self.payload_of(p)
+            self.assertEqual(payload["unknownsNext"], "run: python .blueprint/bin/blueprint.py render")
+            self.assert_portable(json.dumps(payload["unknowns"]) + payload["unknownsNext"], p)
+
+    def test_status_json_and_the_context_carry_no_paths(self):
+        with TempProject() as p:
+            out = p.cli("status", "--json").stdout
+            self.assert_portable(json.dumps(json.loads(out)["unknowns"]), p)
+            ctx = {}
+            unknowns.context(p.root, p.loaded(), {}, ctx)
+            self.assert_portable(json.dumps(ctx["unknowns"]), p)
+            self.assert_portable(json.dumps(unknowns.status_json(ctx)), p)
+
+
 class ReviewNitsTest(unittest.TestCase):
     def test_n1_a_resolved_unknown_without_its_decision_keeps_blocking(self):
         for decisions, dec in (([], DROP), ([], "D-offline"), ([decision()], "D-other"), ([decision()], ""),
@@ -1264,10 +1309,14 @@ class ReviewNitsTest(unittest.TestCase):
     def test_n9_the_payload_carries_the_next_step_for_the_tab(self):
         with TempProject() as p:
             ctx = {"root": p.root, "plan": p.loaded()}
-            self.assertTrue(unknowns.map_payload(ctx)["unknownsNext"].endswith(f'render --root "{p.root}"'))
+            self.assertEqual(unknowns.map_payload(ctx)["unknownsNext"],
+                             "run: python <skill>/scripts/blueprint.py render --root .")
+            NextCommandTest().make_copy(p, "unknowns.py")
+            self.assertEqual(unknowns.map_payload(ctx)["unknownsNext"], "run: python .blueprint/bin/blueprint.py render")
         with TempProject(v1_plan()) as p:
             ctx = {"root": p.root, "plan": p.loaded()}
-            self.assertIn("migrate", unknowns.map_payload(ctx)["unknownsNext"])
+            self.assertEqual(unknowns.map_payload(ctx)["unknownsNext"],
+                             "run: python <skill>/scripts/blueprint.py migrate --root .")
         self.assertIsInstance(unknowns.map_payload({})["unknownsNext"], str)
 
 
