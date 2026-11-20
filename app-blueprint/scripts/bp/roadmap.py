@@ -10,6 +10,7 @@ that did not come through load_plan: a wrongly typed value is skipped, never a c
 import datetime
 import json
 import re
+from pathlib import Path
 
 from bp.core import BlueprintError, append_log, copy_json, now_iso
 from bp.plan import load_state, save_state
@@ -434,10 +435,30 @@ def progress_text(m):
     return " · ".join(parts) or "nothing in it yet"
 
 
+def roadmap_next(ctx):
+    """The empty state of the Roadmap tab, stored in map.html, so no path of this machine: the project's own copy of the
+    tool when it has one (and, for migrate, one that has the command), else the placeholder form with a literal <skill>."""
+    root, v1 = ctx.get("root"), (ctx.get("plan") or {}).get("_from") == 1
+    copy = None
+    try:
+        if root is not None:
+            copy = Path(root) / ".blueprint" / "bin"
+            if not (copy / "blueprint.py").is_file() or (v1 and not (copy / "bp" / "commands" / "migrate.py").is_file()):
+                copy = None
+    except (OSError, ValueError, TypeError):
+        copy = None
+    verb = "migrate" if v1 else "render"
+    run = f"python .blueprint/bin/blueprint.py {verb}" if copy is not None else f"python <skill>/scripts/blueprint.py {verb} --root ."
+    if v1:
+        return ("This blueprint is schema version 1 and has no milestones or tasks. Run: " + run
+                + ", then add milestones[] and tasks[] to blueprint.json.")
+    return "No milestones or tasks yet. Add milestones[] and tasks[] to blueprint.json (see references/schema.md), then run: " + run
+
+
 def map_payload(ctx):
     """milestones and tasks (8.5), plus `roadmap`: what the Roadmap tab needs to tell the story ROADMAP.md tells with or
     without the features and unknowns modules (plan-based membership and totals, the open questions)."""
-    return {"milestones": ctx.get("milestones") or [], "tasks": ctx.get("tasks") or [],
+    return {"milestones": ctx.get("milestones") or [], "tasks": ctx.get("tasks") or [], "roadmapNext": roadmap_next(ctx),
             "roadmap": {"counts": counts(ctx), "features": copy_json(feature_rows(ctx.get("plan") or {}, ctx)),
                         "unknowns": copy_json(open_questions(ctx))}}
 

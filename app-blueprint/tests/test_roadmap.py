@@ -5,6 +5,7 @@ of the task ladder (who may set what, the owner-action rule, a note for blocked)
 is removed. The features module is stood in for by a stub ctx["features"] (the contract's W1-R acceptance), so these
 tests do not depend on which other workstreams have merged.
 """
+import atexit
 import contextlib
 import copy
 import io
@@ -25,7 +26,47 @@ from bp.views import roadmap_md
 from bp.views.context import merged
 from bp.views.render import render_all, render_map
 
-from test_validate import V2_EXAMPLE, TempRoot, quiet, v2_plan
+from test_validate import V2_EXAMPLE, TempRoot, extension, hermetic_skill, quiet, v2_plan
+
+OWN_FILES = ("roadmap.py", "views/roadmap_md.py", "commands/roadmap.py")  # under bp/: this workstream's modules
+
+
+def own_sources():
+    """This module's files as stand-ins for the hermetic package: with them given, extension() hides every other later
+    module (features, unknowns, records, evidence ...) and runs these, so a test of this module holds whichever
+    siblings exist."""
+    return {rel: (S.PACKAGE / rel).read_text(encoding="utf-8") for rel in OWN_FILES}
+
+
+_ISOLATED = {}
+
+
+def isolated_launcher():
+    """The launcher of a copy of the skill holding the core plus this module only (made once per test process)."""
+    if "launcher" not in _ISOLATED:
+        base = Path(tempfile.mkdtemp(prefix="bp-roadmap-skill-"))
+        atexit.register(shutil.rmtree, base, True)
+        launcher = hermetic_skill(base / "skill")
+        for rel in OWN_FILES:
+            target = launcher.parent / "bp" / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(S.PACKAGE / rel, target)
+        shutil.copyfile(S.SKILL / "assets" / "tab-roadmap.js", launcher.parent.parent / "assets" / "tab-roadmap.js")
+        _ISOLATED["launcher"] = launcher
+    return _ISOLATED["launcher"]
+
+
+class Isolated:
+    """Mixin: the test sees the core and this module only, in process and through the CLI."""
+
+    def setUp(self):
+        super().setUp()
+        stack = contextlib.ExitStack()
+        stack.enter_context(extension(own_sources()))
+        self.addCleanup(stack.close)
+
+    def launcher(self):
+        return isolated_launcher()
 
 VALUES = [None, 5, True, "x", [], {}, ["a"], [5], [{}], [None]]
 
@@ -64,7 +105,7 @@ def add_task(p, **fields):
     return t
 
 
-class CodeTest(unittest.TestCase):
+class CodeTest(Isolated, unittest.TestCase):
     """Each code of 2.3 and 2.4: a plan that triggers it and the nearest plan that does not."""
 
     def assertTriggers(self, code, plan, near):
@@ -233,7 +274,7 @@ class CodeTest(unittest.TestCase):
         self.assertEqual(errors, [])
 
 
-class MalformedTest(TempRoot):
+class MalformedTest(Isolated, TempRoot):
     def test_wrong_types_are_load_errors_with_exit_1(self):
         base = v2_plan()
         cases = []
@@ -308,7 +349,7 @@ class MalformedTest(TempRoot):
             self.assertTrue(row["by"] is None or isinstance(row["by"], str))
 
 
-class TaskLadderTest(TempRoot):
+class TaskLadderTest(Isolated, TempRoot):
     """set_task: who may set what (4.2, 4.4). Each test names the rule it guards."""
 
     def setUp(self):
@@ -423,7 +464,7 @@ class TaskLadderTest(TempRoot):
         self.assertEqual(self.state_task("T-api-keys")["status"], "doing")
 
 
-class TaskCliTest(TempRoot):
+class TaskCliTest(Isolated, TempRoot):
     """The command through the real CLI: output, --json, exit codes (7.2)."""
 
     def setUp(self):
@@ -554,7 +595,7 @@ def stub_features(**status):
              "statusText": "verified, 1 criterion awaits evaluation" if status.get("inbox", "verified") == "verified" else status.get("inbox")}]
 
 
-class ViewTest(TempRoot):
+class ViewTest(Isolated, TempRoot):
     def setUp(self):
         super().setUp()
         self.plan_json = v2_plan()
@@ -773,8 +814,8 @@ class ViewTest(TempRoot):
     def test_payload_shapes(self):
         ctx = self.ctx(state={"tasks": {"T-domain": {"status": "done", "by": "owner", "at": "2027-01-01T00:00:00Z", "note": "ok"}}})
         payload = roadmap.map_payload(ctx)
-        self.assertEqual(set(payload), {"milestones", "tasks", "roadmap"})
-        self.assertEqual(roadmap.status_json(ctx), {k: payload[k] for k in ("milestones", "tasks")})
+        self.assertEqual(set(payload), {"milestones", "tasks", "roadmap", "roadmapNext"})
+        self.assertEqual(roadmap.status_json(ctx), {k: payload[k] for k in ("milestones", "tasks")})  # no roadmap, no roadmapNext
         m, t = payload["milestones"][0], payload["tasks"][0]
         self.assertEqual(set(m), {"id", "name", "goal", "due", "exit", "features", "tasks", "progress", "done", "overdue", "blockedBy"})
         self.assertEqual(set(m["progress"]), {"features", "accepted", "tasks", "done"})
@@ -804,7 +845,7 @@ class ViewTest(TempRoot):
         self.assertEqual(ctx["milestones"][0]["blockedBy"], ["U-offline"])
 
 
-class RenderTest(TempRoot):
+class RenderTest(Isolated, TempRoot):
     """The view through render_all with the real registry (whatever other modules are built)."""
 
     def test_render_writes_and_tracks_roadmap_md(self):
@@ -955,7 +996,7 @@ class TabSourceTest(unittest.TestCase):
         self.assertTrue(any("id: 'roadmap'" in t for t in tab_scripts()))
 
 
-class ModuleShapeTest(unittest.TestCase):
+class ModuleShapeTest(Isolated, unittest.TestCase):
     def test_hooks_and_imports(self):
         for name in ("CODES", "CODE_EXAMPLES", "validate", "context", "roster_sections", "map_payload", "status_lines", "status_json", "set_task"):
             self.assertTrue(hasattr(roadmap, name), name)
@@ -975,7 +1016,7 @@ class ModuleShapeTest(unittest.TestCase):
         self.assertEqual((ns.task, ns.status, ns.by, ns.force, ns.json), ("T-x", "done", "owner", True, True))
 
     def test_help_lists_task(self):
-        r = S.run_script(S.LAUNCHER, ["task", "--help"], Path.cwd(), env=S.tool_env())
+        r = S.run_script(self.launcher(), ["task", "--help"], Path.cwd(), env=S.tool_env())
         self.assertEqual(r.returncode, 0)
         self.assertIn("--by", r.stdout)
         self.assertIn("--force", r.stdout)
@@ -989,7 +1030,7 @@ class ModuleShapeTest(unittest.TestCase):
 PREFIX = "python .blueprint/bin/blueprint.py"
 
 
-class ReviewRoundOneTest(TempRoot):
+class ReviewRoundOneTest(Isolated, TempRoot):
     """The fixes of review round 1 (M1 to M3, N1 to N7)."""
     ctx = ViewTest.ctx
 
@@ -1167,6 +1208,7 @@ class TabRoundOneTest(TabRunTest):
     def test_same_numbers_without_features_and_unknowns(self):
         helper = ViewTest("test_deterministic")
         helper.setUp()
+        self.addCleanup(helper.doCleanups)
         self.addCleanup(helper.tearDown)
         ctx = helper.ctx(features=[], unknowns=[])
         d = dict(roadmap.map_payload(ctx), features=[], unknowns=[], syncedAt=None)
@@ -1193,7 +1235,7 @@ class TabRoundOneTest(TabRunTest):
         self.assertNotIn("function", out["text"])
 
 
-class ReviewRoundTwoTest(TempRoot):
+class ReviewRoundTwoTest(Isolated, TempRoot):
     """Review round 2: the plan decides what is a draft, duplicates fail closed, escaping, copies, plan-fix nexts."""
     ctx = ViewTest.ctx
 
@@ -1372,7 +1414,7 @@ def leaks(text, machine=()):
     return found
 
 
-class NoMachineSpecificTextTest(TempRoot):
+class NoMachineSpecificTextTest(Isolated, TempRoot):
     """Files in .blueprint/ are committed and shared: none may carry an absolute path or this machine's folders."""
 
     def test_the_scanner_catches_leaks_and_passes_clean_text(self):
@@ -1421,6 +1463,87 @@ class NoMachineSpecificTextTest(TempRoot):
             rm.set_task(self.root, loaded, "T-nope", "done", "owner")
         self.assertNotIn(str(S.SCRIPTS), cm.exception.next)
         self.assertNotIn(str(self.root), cm.exception.next)
+
+
+class RoadmapNextTest(Isolated, TempRoot):
+    """The empty state of the tab is stored in map.html: portable, and the right command for the plan."""
+
+    def next_for(self, plan, copy=None):
+        self.write_plan(plan)
+        folder = self.root / ".blueprint" / "bin"
+        if copy:
+            for rel in copy:
+                (folder / rel).parent.mkdir(parents=True, exist_ok=True)
+                (folder / rel).write_text("x" + chr(10), encoding="utf-8")
+        return roadmap.roadmap_next({"root": self.root, "plan": bplan.load_plan(self.root)})
+
+    def test_without_a_copy_it_is_the_placeholder_form(self):
+        text = self.next_for(v2_plan())
+        self.assertTrue(text.endswith("run: python <skill>/scripts/blueprint.py render --root ."), text)
+        for bad in (str(self.root), self.root.as_posix(), str(S.SKILL), S.SKILL.as_posix()):
+            self.assertNotIn(bad, text)
+
+    def test_with_a_copy_it_is_the_project_form(self):
+        text = self.next_for(v2_plan(), copy=["blueprint.py"])
+        self.assertTrue(text.endswith("run: python .blueprint/bin/blueprint.py render"), text)
+
+    def test_a_version_1_plan_is_told_to_migrate(self):
+        v1 = json.loads(S.EXAMPLE.read_text(encoding="utf-8"))
+        text = self.next_for(v1)
+        self.assertIn("schema version 1", text)
+        self.assertIn("python <skill>/scripts/blueprint.py migrate --root .", text)
+        self.assertNotIn("render", text)
+        # a copy that has no migrate command cannot run it: still the placeholder
+        self.assertIn("<skill>", self.next_for(v1, copy=["blueprint.py"]))
+        self.assertIn("python .blueprint/bin/blueprint.py migrate", self.next_for(v1, copy=["blueprint.py", "bp/commands/migrate.py"]))
+
+    def test_it_is_in_the_map_payload_and_the_tab_shows_it(self):
+        self.plan_json = v2_plan()
+        ctx = ViewTest.ctx(self, features=[], unknowns=[])
+        text = roadmap.map_payload(ctx)["roadmapNext"]
+        self.assertIn("python <skill>/scripts/blueprint.py render --root .", text)
+        json.dumps(roadmap.map_payload(ctx))
+
+    def test_a_root_that_is_not_a_path_is_still_portable(self):
+        for root in (None, 5, "", chr(0)):
+            text = roadmap.roadmap_next({"root": root, "plan": {}})
+            self.assertIn("<skill>", text)
+
+
+@unittest.skipUnless(shutil.which("node"), "node is not installed")
+class TabNextTest(TabRunTest):
+    def test_the_empty_state_shows_the_payloads_next_text(self):
+        d = {"milestones": [], "tasks": [], "roadmapNext": "NEXT python <skill>/scripts/blueprint.py render --root ."}
+        out, plain = self.run_tab([d, {"milestones": [], "tasks": []}])
+        self.assertIn("NEXT python <skill>/scripts/blueprint.py render --root .", out["text"])
+        self.assertIn("blueprint.py render", plain["text"])
+
+
+class WithTheRealSiblingsTest(TempRoot):
+    """What depends on the features and unknowns modules: the real tree, not isolated, only when both are built."""
+
+    def setUp(self):
+        if not (registry.exists("features") and registry.exists("unknowns")):
+            self.skipTest("the features and unknowns modules are not built here")
+        super().setUp()
+
+    def test_roadmap_md_shows_the_real_status_texts_and_open_questions(self):
+        from bp.views.context import build_context
+        self.write_plan(v2_plan())
+        for f in v2_plan()["files"]:
+            self.touch(f["path"])
+        loaded = bplan.load_plan(self.root)
+        state = bplan.load_state(self.root)
+        ctx = build_context(self.root, loaded, state)
+        text = roadmap_md.views(ctx)["ROADMAP.md"]
+        for f in ctx["features"]:
+            self.assertIn(f"| {f['id']} {f['title']} | {f.get('statusText') or f['status']} |", text)
+        self.assertEqual([u["id"] for u in roadmap.open_questions(ctx)], [u["id"] for u in ctx["unknowns"] if u["status"] not in ("resolved", "dropped")])
+        self.assertIn("U-offline", text)
+        self.assertIn("Open blocking questions: 1", text)
+        self.assertEqual(roadmap.counts(ctx)["features"], len(ctx["features"]))
+        quiet(render_all, self.root, loaded, state, quiet=True)
+        self.assertTrue((self.root / ".blueprint" / "ROADMAP.md").is_file())
 
 
 if __name__ == "__main__":

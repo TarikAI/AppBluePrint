@@ -44,7 +44,7 @@
     tasks.forEach(function (t) { if (t && typeof t.id === 'string') taskById[t.id] = t; });
 
     if (!milestones.length && !tasks.length) {
-      host.appendChild(el('p', { cls: 'empty', text: 'No milestones or tasks yet. Add milestones[] and tasks[] to .blueprint/blueprint.json (see references/schema.md), then run: blueprint.py validate, then blueprint.py render.' }));
+      host.appendChild(el('p', { cls: 'empty', text: typeof D.roadmapNext === 'string' && D.roadmapNext ? D.roadmapNext : 'No milestones or tasks yet. Add milestones[] and tasks[] to .blueprint/blueprint.json (see references/schema.md), then run: blueprint.py render' }));
       return;
     }
 
