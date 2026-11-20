@@ -1459,11 +1459,16 @@ class ReviewHookTest(ProjectBase):
         self.assertNotIn("render", nxt)
 
     def test_status_json_with_feature_is_the_cores_business(self):
-        """`status --json --feature F` prints the whole object: cmd_status in bp/commands/progress.py answers --json
-        before it looks at --feature, and the status_json hook gets no arguments."""
+        """`status --json --feature F` honours the selector as the text form does (core, PR #16): an unknown id is the
+        unknown-feature failure envelope (exit 1) with this module's wording; a known id lists only that feature."""
         code, out, err = self.run_("status", "--json", "--feature", "F-ghost")
+        self.assertEqual(code, 1, err)
+        env = json.loads(out)
+        self.assertEqual((env["ok"], env["error"]["code"], env["error"]["message"]),
+                         (False, "unknown-feature", "feature F-ghost is not in the plan"))
+        code, out, err = self.run_("status", "--json", "--feature", "F-inbox")
         self.assertEqual(code, 0, err)
-        self.assertIn("features", json.loads(out))
+        self.assertEqual([f["id"] for f in json.loads(out)["features"]], ["F-inbox"])
 
 
 class PerformanceTest(TempRoot):
