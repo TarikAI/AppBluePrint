@@ -15,7 +15,7 @@ def cmd_db_check(args):
     from bp.status import change_state, load_state, repo_files
     root = find_root(args.root)
     plan = load_plan(root)
-    state = load_state(root)
+    state = load_state(root, ("data.live",))  # db-check rewrites data.live: damage confined to it is repaired
     if args.sqlite:
         src = Path(args.sqlite)
         if not src.is_file():
@@ -53,7 +53,7 @@ def cmd_db_check(args):
         cur["live"] = live_rec
         fresh["data"] = cur
         return [{"event": "db-check", "source": label, "liveOnly": len(live_only), "notApplied": len(not_applied)}]
-    state = change_state(root, change)
+    state = change_state(root, change, ("data.live",))
     print(f"Live schema from {label}: {len(live)} tables and views; migrations create {len(migrated)}.")
     for title, items in (("In the live database but in no migration", live_only), ("In migrations but not in the live database", not_applied)):
         if items:

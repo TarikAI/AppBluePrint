@@ -759,18 +759,24 @@ def _data_damage(raw):
     for i, issue in enumerate(d.get("issues", [])):
         if not isinstance(issue, dict) or "type" not in issue or "detail" not in issue:
             return f'"data.issues[{i}]" must be an object with "type" and "detail"'
-    live = d.get("live")
-    if live:
-        if not isinstance(live, dict):
-            return f'"data.live" must be an object or null (got {_json_kind(live)})'
-        for key in ("source", "at", "tables", "liveOnly", "notApplied"):
-            if key not in live:
-                return f'"data.live" has no "{key}"'
-        if not isinstance(live["tables"], list):
-            return f'"data.live.tables" must be a list (got {_json_kind(live["tables"])})'
-        for key in ("liveOnly", "notApplied"):
-            if not isinstance(live[key], list) or not all(isinstance(x, str) for x in live[key]):
-                return f'"data.live.{key}" must be a list of names'
+    return _live_damage(d.get("live"))
+
+
+def _live_damage(live):
+    """data.live (written by db-check): null or empty, or an object with source, at, tables (a list) and liveOnly and
+    notApplied (lists of names)."""
+    if not live:
+        return None
+    if not isinstance(live, dict):
+        return f'"data.live" must be an object or null (got {_json_kind(live)})'
+    for key in ("source", "at", "tables", "liveOnly", "notApplied"):
+        if key not in live:
+            return f'"data.live" has no "{key}"'
+    if not isinstance(live["tables"], list):
+        return f'"data.live.tables" must be a list (got {_json_kind(live["tables"])})'
+    for key in ("liveOnly", "notApplied"):
+        if not isinstance(live[key], list) or not all(isinstance(x, str) for x in live[key]):
+            return f'"data.live.{key}" must be a list of names'
     return None
 
 
@@ -787,6 +793,9 @@ def _damage(raw, owned=()):
     "files" and "patterns" are empty (filled in here). A key in `owned` (one the calling command rewrites wholesale,
     as sync does patterns) is repaired to its empty value in place instead, as 1.3.0's rewrite did; files is never
     owned. Anything 1.3.0 read without crashing is still read."""
+    d = raw.get("data")
+    if "data.live" in owned and isinstance(d, dict) and _live_damage(d.get("live")):
+        d["live"] = None  # db-check rewrites data.live wholesale: damage confined to it is repaired, as 1.3.0 did
     for key, (check, empty) in _STATE_CHECKS.items():
         why = check(raw)
         if why and key in owned and key != "files":
