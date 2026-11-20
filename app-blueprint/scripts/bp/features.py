@@ -13,7 +13,7 @@ import json
 import re
 from pathlib import Path
 
-from bp.core import BlueprintError, norm
+from bp.core import BlueprintError, norm, run_hint
 from bp.globs import pattern_instance_rx
 from bp.plan import GLYPH, STATES, features_of, owner_of, section_index
 
@@ -767,7 +767,8 @@ def status_card(ctx, fid):
     f = next((x for x in _list(ctx.get("features")) if x["id"] == fid), None)
     if f is None:
         raise BlueprintError("unknown-feature", f"feature {fid} is not in the plan", entry=f"feature {fid}",
-                             next="blueprint.py status --features")
+                             next=run_hint(ctx["root"], "status --features", "features") if ctx.get("root") is not None
+                             else "python .blueprint/bin/blueprint.py status --features")
     lines = [f"{f['id']}  {f['title']}", f"  Status: {FEATURE_GLYPH[f['status']]} {f['statusText']}"]
     if f["statement"]:
         lines.append(f"  {f['statement']}")
