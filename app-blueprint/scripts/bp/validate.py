@@ -15,8 +15,8 @@ from bp import data as _data, registry, rules
 # none may register.
 CODES = [(r"^blueprint\.json is schema version 1\b", "schema-v1"),
          (r"(?s)^[a-z ]+ id '.*' has the wrong form", "bad-id"),  # (?s): an invalid id may hold a newline
-         (r"(?s)^(file|pattern) .*: (not a portable name on Windows: |differs from file .* only by case; )",
-          "file-path-alias")]
+         (r"(?s)^(file|pattern) .*: (not a portable name on Windows: |'.*' is the Windows device name |"
+          r"differs from file .* only by case; )", "file-path-alias")]
 CODE_EXAMPLES = {"schema-v1": "blueprint.json is schema version 1; it still works.",
                  "file-path-alias": "file 'src/a.ts.': not a portable name on Windows: Windows drops the trailing "
                                     "dots and spaces, so it names the same file as 'src/a.ts'",
@@ -103,73 +103,89 @@ def validate_findings(plan, team=None, evidence_ids=None, root=None):
     vctx = validation_context(plan, team, evidence_ids, root)
     registry.collect("validate", plan, E, W, vctx)
     if not from_v1:  # a version 1 plan validates as in 1.3.0
-        path_aliases(plan, E)
+        path_aliases(plan, E, W)
     rules.validate_team(plan, team, E)
     return findings
 
 
 WINDOWS_DEVICES = {"CON", "PRN", "AUX", "NUL"} | {f"{d}{n}" for d in ("COM", "LPT") for n in range(1, 10)}
 GLOB_CHARS = set("*?[]{}")
+DEVICE_NEXT = "the plan cannot be checked out on Windows as written: rename it"
 
 
 def windows_name_problem(path, glob=False):
-    """(reason, plain) for the first segment of `path` that Windows cannot store as written, else None. plain is the
-    path Windows would use instead, or None when there is none (review of #16, N4: say only what Windows does):
-    - ':' starts a stream name;
-    - a device name (CON, PRN, AUX, NUL, COM1-9, LPT1-9, with or without an extension) names the device;
-    - a trailing dot or space is dropped from the last segment, so it names the plain file; a folder name ending in
-      one cannot be stored as written;
-    - an empty or '.' segment.
+    """(level, reason, plain) for `path` on Windows, or None (review of #16, N4: say only what Windows does). plain is
+    the path Windows would use instead, or None when there is none.
+    - error, the first segment Windows cannot store as written or stores as another name: ':' starts a stream name; a
+      trailing dot or space is dropped from the last segment, so it names the plain file; a folder name ending in one
+      cannot be stored as written; an empty or '.' segment;
+    - else warning, a device name (CON, PRN, AUX, NUL, COM1-9, LPT1-9, with or without an extension) as a segment:
+      legitimate on a Linux-only project, but Git for Windows cannot check it out (R2-2).
     With glob=True only the literal segments (no glob characters) are checked."""
     segs = str(path).split("/")
-    for i, seg in enumerate(segs):
-        if glob and GLOB_CHARS & set(seg):
-            continue
-        last = i == len(segs) - 1
+    literal = [(i, seg) for i, seg in enumerate(segs) if not (glob and GLOB_CHARS & set(seg))]
+    for i, seg in literal:
         if ":" in seg:
-            return f"':' in {seg!r} starts a stream name on Windows", None
-        stem = seg.split(".", 1)[0].rstrip(" ").upper()
-        if stem in WINDOWS_DEVICES:
-            return f"{seg!r} is the Windows device name {stem}", None
+            return "error", f"':' in {seg!r} starts a stream name on Windows", None
         if seg in ("", "."):
-            return "it has an empty or '.' segment", None
+            return "error", "it has an empty or '.' segment", None
         if seg.endswith((".", " ")):
             kept = seg.rstrip(". ")
-            if last and kept:
+            if i == len(segs) - 1 and kept:
                 plain = "/".join(segs[:-1] + [kept])
-                return f"Windows drops the trailing dots and spaces, so it names the same file as {plain!r}", plain
-            return f"the folder name {seg!r} ends in a dot or a space, which Windows cannot store as written", None
+                return "error", f"Windows drops the trailing dots and spaces, so it names the same file as {plain!r}", plain
+            return "error", f"the folder name {seg!r} ends in a dot or a space, which Windows cannot store as written", None
+    for i, seg in literal:
+        stem = seg.split(".", 1)[0].rstrip(" ").upper()
+        if stem in WINDOWS_DEVICES:
+            return "warning", f"{seg!r} is the Windows device name {stem}", None
     return None
 
 
-def path_aliases(plan, E):
-    """file-path-alias (version 2 plans, core-owned): a planned path, or a literal segment of a pattern glob, that
-    Windows cannot store as written (windows_name_problem), and two planned paths that differ only by case (one file
-    on Windows and macOS). A plan is shared, so this fires on every OS. Paths 1.x already rejects (absolute, '..', a
-    drive) are left to the file-path error; dependsOn and other path fields are not checked (review of #16, N5)."""
+def case_key(path):
+    """The key two names share when NTFS (and the default macOS volume) see one file: each character upper-cased
+    only where that gives one character, as NTFS's upcase table does; casefold() would also pair 'strasse' with
+    'straße' and 'K' with the Kelvin sign, which NTFS keeps apart (review of #16, R2-1)."""
+    return "".join(c.upper() if len(c.upper()) == 1 else c for c in path)
+
+
+def path_aliases(plan, E, W):
+    """file-path-alias (version 2 plans, core-owned; a plan is shared, so it fires on every OS):
+    - error: a planned path, or a literal segment of a pattern glob, that Windows cannot store as written or stores
+      as another name (windows_name_problem);
+    - warning (never blocks): a Windows device name as a segment, and two planned paths that differ only by case
+      (case_key): both are legitimate on a Linux-only project, but the plan cannot be checked out on Windows (or
+      macOS) as written (review of #16, R2-2).
+    Paths 1.x already rejects (absolute, '..', a drive) are left to the file-path error; dependsOn and other path
+    fields are not checked (N5)."""
     first = {}
     for f in plan.get("files") or []:
         path = f.get("path") if isinstance(f, dict) else None
         if not isinstance(path, str) or not path or path.startswith("/") or ".." in path.split("/") \
                 or re.match(r"[A-Za-z]:", path):
             continue
-        problem = windows_name_problem(path)
-        if problem:
-            why, plain = problem
-            E(f"file {path!r}: not a portable name on Windows: {why}", code="file-path-alias", entry=f"file {path}",
-              next=f"write the path as {plain!r} in files[]" if plain else "rename it in files[]")
-        twin = first.setdefault(path.casefold(), path)
+        _report(E, W, f"file {path!r}", f"file {path}", windows_name_problem(path), "files[]")
+        twin = first.setdefault(case_key(path), path)
         if twin != path:
-            E(f"file {path!r}: differs from file {twin!r} only by case; Windows and macOS see one file",
-              code="file-path-alias", entry=f"file {path}", next="give the two files names that differ by more than case")
+            W(f"file {path!r}: differs from file {twin!r} only by case; the plan cannot be checked out on Windows or "
+              "macOS as written: rename one of them", code="file-path-alias", entry=f"file {path}",
+              next="give the two files names that differ by more than case")
     for p in plan.get("patterns") or []:
         glob, pid = (p.get("glob"), p.get("id")) if isinstance(p, dict) else (None, None)
         if not isinstance(glob, str) or not glob or glob.startswith("/") or ".." in glob.split("/"):
             continue
-        problem = windows_name_problem(glob, glob=True)
-        if problem:
-            E(f"pattern {pid!r}: not a portable name on Windows: {problem[0]}", code="file-path-alias",
-              entry=f"pattern {pid}", next="rename it in the pattern's glob")
+        _report(E, W, f"pattern {pid!r}", f"pattern {pid}", windows_name_problem(glob, glob=True), "the pattern's glob")
+
+
+def _report(E, W, label, entry, problem, where):
+    if not problem:
+        return
+    level, why, plain = problem
+    if level == "error":
+        E(f"{label}: not a portable name on Windows: {why}", code="file-path-alias", entry=entry,
+          next=f"write the path as {plain!r} in {where}" if plain else f"rename it in {where}")
+    else:
+        W(f"{label}: {why}; {DEVICE_NEXT}", code="file-path-alias", entry=entry, next=f"rename it in {where}")
 
 
 def validate_plan(plan, team=None, evidence_ids=None, root=None):

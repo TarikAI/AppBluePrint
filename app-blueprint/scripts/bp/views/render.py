@@ -14,7 +14,8 @@ from pathlib import Path
 
 from bp.version import TOOL_VERSION
 from bp import registry
-from bp.core import TOOL_HOME, BlueprintError, bp_dir, copy_json, find_asset, write_text_if_changed
+from bp.core import TOOL_HOME, BlueprintError, bp_dir, find_asset, write_text_if_changed
+from bp.core import copy_json
 from bp.plan import GLYPH, LABEL, STATES, save_state
 from bp.data import data_view
 from bp.status import compute
