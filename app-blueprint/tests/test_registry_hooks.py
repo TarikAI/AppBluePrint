@@ -1468,14 +1468,23 @@ class StatusSelectorsTest(CliTestBase):
                 def status_json(ctx):
                     return {"features": [{"id": f["id"]} for f in ctx["plan"]["features"]]}
 
+                from bp.core import BlueprintError
+
                 def status_card(ctx, fid):
+                    if fid not in [f["id"] for f in ctx["plan"]["features"]]:
+                        raise BlueprintError("unknown-feature", "stand-in: no feature " + fid, next="module next")
                     return ["card " + fid]
             ''',
             "roadmap.py": '''
                 def status_json(ctx):
                     return {"milestones": [{"id": m["id"]} for m in ctx["plan"]["milestones"]]}
 
+                from bp.core import BlueprintError
+
                 def status_lines(ctx, args):
+                    want = getattr(args, "milestone", None)
+                    if want and want not in [m["id"] for m in ctx["plan"]["milestones"]]:
+                        raise BlueprintError("unknown-milestone", "stand-in: no milestone " + want, next="module next")
                     return []
             '''}
 
@@ -1496,10 +1505,19 @@ class StatusSelectorsTest(CliTestBase):
                     self.assertEqual(code, 1, err)
                     env = json.loads(out)
                     self.assertEqual((env["ok"], env["error"]["code"]), (False, error))
-                    self.assertIn(argv[1], env["error"]["message"])
+                    # the module's own error, as the text form gives it (its wording and next, not the core's)
+                    self.assertEqual((env["error"]["message"], env["error"]["next"]),
+                                     ("stand-in: no " + argv[0][2:] + " " + argv[1], "module next"))
                     code, out, err = self.run_("status", *argv)
                     self.assertEqual(code, 1)
-                    self.assertIn(argv[1], err)
+                    self.assertIn("stand-in: no " + argv[0][2:] + " " + argv[1], err)
+        quiet_modules = {"features.py": "def status_json(ctx):\n    return {}\n\ndef status_card(ctx, f):\n    return []\n",
+                         "roadmap.py": "def status_json(ctx):\n    return {}\n"}
+        for argv, error in ((["--feature", "F-nope"], "unknown-feature"), (["--milestone", "M9"], "unknown-milestone")):
+            with self.subTest(argv=argv, modules="that do not check"):  # the core's check is the fallback
+                with extension(quiet_modules):
+                    code, out, err = self.run_("status", "--json", *argv)
+                self.assertEqual((code, json.loads(out)["error"]["code"]), (1, error))
 
 
 class ViewNameTest(CliTestBase):
