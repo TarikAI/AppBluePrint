@@ -10,8 +10,8 @@ import sys
 from pathlib import Path
 
 from bp.version import TOOL_VERSION
-from bp.core import (append_log, bp_dir, die, emit, ensure_gitignore, find_root, norm, read_json, state_lock, write_json,
-                     write_state)
+from bp.core import (BlueprintError, append_log, bp_dir, die, emit, ensure_gitignore, find_root, norm, read_json,
+                     state_lock, write_json, write_state)
 from bp.learn import _copy_version, _file_tool_version
 from bp.migrate import plan_version, upgrade_state
 from bp.plan import SECTIONS_V2, SKELETON, load_plan, owner_of
@@ -246,7 +246,11 @@ def cmd_init(args):
         old = (_file_tool_version(launcher) if single else None) or _copy_version(bin_dir) or "unknown"
         if not copy_tool(root):
             return  # run from the project's own copy: copy_tool said what to run instead
-        ensure_gitignore(root)  # state.lock and *.tmp are never project changes
+        try:  # under the lock, so it never races a first lock adding the same lines
+            with state_lock(root):
+                ensure_gitignore(root)  # state.lock and *.tmp are never project changes
+        except BlueprintError:  # busy or no lock here: the tool is refreshed; the lines are still worth adding
+            ensure_gitignore(root)
         if single:
             print(f"Upgraded .blueprint/bin from the single-file tool {old} to the package tool {TOOL_VERSION}.")
         else:
@@ -267,8 +271,8 @@ def cmd_init(args):
     plan["app"]["name"] = args.name or root.name
     plan["app"]["preset"] = args.preset or ""
     write_json(plan_path, plan)
-    ensure_gitignore(root)  # state.lock and *.tmp are never project changes
     with state_lock(root):
+        ensure_gitignore(root)  # state.lock and *.tmp are never project changes
         write_state(root, upgrade_state({"files": {}, "patterns": {}, "unplanned": [], "syncedAt": None, "head": None}))
     (d / "log.jsonl").touch()
     copy_tool(root)

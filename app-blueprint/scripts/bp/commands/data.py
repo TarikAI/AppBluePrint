@@ -3,7 +3,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from bp.core import die, find_root, now_iso
+from bp.core import BlueprintError, die, find_root, now_iso
 from bp.plan import load_plan
 from bp.validate import validate_plan
 from bp.views.render import render_all
@@ -62,6 +62,9 @@ def cmd_db_check(args):
         print("  The live schema matches the migrations.")
     errors, _ = validate_plan(plan)
     if not errors:
-        render_all(root, plan, state, quiet=True)
+        try:  # data.live is saved: a busy lock here only leaves the views as they were (contract 8)
+            render_all(root, plan, state, quiet=True)
+        except BlueprintError as e:
+            print(f"views not refreshed: {e.message}" + (f"; {e.next}" if e.next else ""), file=sys.stderr)
     if args.strict and (live_only or not_applied):
         sys.exit(1)

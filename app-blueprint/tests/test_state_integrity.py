@@ -678,7 +678,7 @@ class DamagedState(unittest.TestCase):
         self.path.write_text(json.dumps({"files": {"src/f1.txt": "built"}}) + "\n", encoding="utf-8")
         before = self.path.read_bytes()
         for args in self.COMMANDS + (["status"], ["claim", "src/f2.txt", "--by", "o2"], ["export", "json"],
-                                     ["render", "--check"], ["contracts"], ["verify", "--run", "--owner", "o1"]):
+                                     ["render", "--check", "--force"], ["contracts"], ["verify", "--run", "--owner", "o1"]):
             code, out, err = self.run_cmd(args)
             self.assertEqual(code, 1, (args, err))
             self.assertIn('.blueprint/state.json is damaged: files["src/f1.txt"] must be an object (got string)',
@@ -730,7 +730,8 @@ class DamagedState(unittest.TestCase):
 
         with ThreadPoolExecutor(int(os.environ.get("BP_FUZZ_WORKERS", "6"))) as ex:
             problems = [x for found in ex.map(one, cases) for x in found]
-        self.assertEqual(problems, [], f"{len(cases)} cases")
+        if problems:
+            self.fail(f"{len(problems)} problem(s) in {len(cases)} cases:\n" + "\n".join(problems))
 
     @staticmethod
     def hook_post_for(p):
@@ -892,12 +893,12 @@ class LockFileHazards(IntegrityChecks, unittest.TestCase):
 
     def test_32_parallel_log_writers_give_32_intact_lines(self):
         before = self.p.log_lines()
-        notes = {f"n{i}-" + ("x" * 30000) for i in range(32)}
+        notes = {f"n{i} " + ("word " * 6000) for i in range(32)}
         res = finish([self.p.start(["feedback", "--kind", "guidance", "--note", n, "--by", "o1"]) for n in notes], self)
         self.assert_all_ok(res, "feedback")
         new = self.p.log_lines()[len(before):]
         got = [json.loads(line)["note"] for line in new]  # a torn or merged line fails here
-        self.assertEqual(sorted(n.split("-")[0] for n in got), sorted(n.split("-")[0] for n in notes))
+        self.assertEqual(sorted(n.split(" ")[0] for n in got), sorted(n.split(" ")[0] for n in notes))
 
 
 class ScopeAndApi(unittest.TestCase):

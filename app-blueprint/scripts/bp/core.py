@@ -12,7 +12,7 @@ import os
 import random
 import re
 import secrets
-import shlex
+import stat
 import subprocess
 import sys
 import time
@@ -435,42 +435,57 @@ def find_asset(name):
 STATE_LOCK = "state.lock"
 LOCK_TIMEOUT_ENV = "BLUEPRINT_LOCK_TIMEOUT"
 LOCK_TIMEOUT = 15.0
+LOCK_TIMEOUT_MAX = 600.0
 GITIGNORE_LINES = ("state.lock", "*.tmp")
+STALE_TMP_SECONDS = 3600
+AGAIN = "run the same command again"
+_STATE_TMP = re.compile(r"^state\.json\.\d+-[0-9a-f]{8}\.tmp$")  # write_json's temp names for state.json, only
 _HELD = set()  # the lock files this process holds: the lock is never nested, so a second take is a bug
 
 
-def run_hint(root, args):
-    """A command line that runs as printed: the project's own copy when it has one, else this tool with --root."""
-    if (bp_dir(root) / "bin" / "blueprint.py").is_file():
+def run_hint(root, args, module=None):
+    """A command line that runs as printed: `python .blueprint/bin/blueprint.py <args>` when the project's copy has
+    the command (module, e.g. "commands/roadmap", names the file it needs; None: any copy), else this running tool
+    with --root."""
+    copy = bp_dir(root) / "bin"
+    if (copy / "blueprint.py").is_file() and (module is None or (copy / "bp" / (module + ".py")).is_file()):
         return f"python .blueprint/bin/blueprint.py {args}"
     return f'python "{TOOL_HOME / "blueprint.py"}" {args} --root "{root}"'
 
 
-def _this_command():
-    """The command being run, as a line the user can run again (best effort; tests call handlers directly)."""
-    argv = list(sys.argv)
-    if argv and Path(argv[0]).name == "blueprint.py":
-        argv = ["python"] + argv
-        return subprocess.list2cmdline(argv) if os.name == "nt" else " ".join(shlex.quote(a) for a in argv)
-    return "the same blueprint.py command"
+def _bad_state(why, next, name="state.json"):  # noqa: A002 (next is the contract's name)
+    return BlueprintError("bad-state", f".blueprint/{name} {why}", entry=f".blueprint/{name}", next=next)
 
 
-def _bad_state(why, next):  # noqa: A002 (next is the contract's name)
-    return BlueprintError("bad-state", f".blueprint/state.json {why}", entry=".blueprint/state.json", next=next)
+def _rule_names(line):
+    """The name a .gitignore line is about, for the lines this tool adds: 'state.lock' for state.lock, /state.lock,
+    **/state.lock and !state.lock (a negation is the user's choice too); None for comments and blank lines."""
+    s = line.strip()
+    if not s or s.startswith("#"):
+        return None
+    s = s.lstrip("!")
+    for prefix in ("**/", "/"):
+        if s.startswith(prefix):
+            s = s[len(prefix):]
+    return s
 
 
 def ensure_gitignore(root):
     """.blueprint/.gitignore lists state.lock and *.tmp, so the lock file and temp files never show up as project
-    changes. Creates the file, or appends only the missing lines; a user's other lines are never rewritten. Best
-    effort: returns False when the file cannot be read or written."""
+    changes. Creates the file, or appends only the patterns no line of it already names in any form (a negation such
+    as !state.lock included, so the user's choice stands), with the file's own line ending; a user's lines are never
+    rewritten, and a final newline is added only when something is appended. Best effort: False when the file cannot
+    be read or written."""
     path = bp_dir(root) / ".gitignore"
     try:
         old = path.read_bytes() if path.exists() else b""
-        have = {line.strip() for line in old.decode("utf-8", "replace").splitlines()}
-        missing = [line for line in GITIGNORE_LINES if line not in have]
+        text = old.decode("utf-8", "replace")
+        named = {_rule_names(line) for line in text.splitlines()}
+        missing = [p for p in GITIGNORE_LINES if p not in named]
         if not missing:
             return True
-        add = ("\n" if old and not old.endswith(b"\n") else "") + "".join(line + "\n" for line in missing)
+        eol = "\r\n" if "\r\n" in text else "\n"
+        add = (eol if old and not old.endswith(b"\n") else "") + "".join(p + eol for p in missing)
         with path.open("ab") as f:
             f.write(add.encode("utf-8"))
         return True
@@ -479,14 +494,24 @@ def ensure_gitignore(root):
 
 
 def _lock_timeout():
-    try:
-        return max(0.0, float(os.environ.get(LOCK_TIMEOUT_ENV, LOCK_TIMEOUT)))
-    except ValueError:
+    """$BLUEPRINT_LOCK_TIMEOUT in seconds, at most 600; a value that is not a finite number of at least 0 means the
+    default (15), with one warning on stderr."""
+    raw = os.environ.get(LOCK_TIMEOUT_ENV)
+    if raw is None:
         return LOCK_TIMEOUT
+    try:
+        value = float(raw)
+    except ValueError:
+        value = None
+    if value is None or value != value or value in (float("inf"), float("-inf")) or value < 0:
+        print(f"warning: {LOCK_TIMEOUT_ENV}={raw!r} is not a number of seconds (0 or more); "
+              f"using {LOCK_TIMEOUT:g}", file=sys.stderr)
+        return LOCK_TIMEOUT
+    return min(value, LOCK_TIMEOUT_MAX)
 
 
 def _try_lock(fd):
-    """Take the advisory lock on an open lock file without blocking; OSError when it is held or cannot be taken."""
+    """Take the advisory lock on an open file without blocking; OSError when it is held or cannot be taken."""
     if msvcrt is not None:
         os.lseek(fd, 0, os.SEEK_SET)
         msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
@@ -494,78 +519,140 @@ def _try_lock(fd):
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
-def _unlock(fd):
-    try:
-        if msvcrt is not None:
-            os.lseek(fd, 0, os.SEEK_SET)
-            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-        else:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-    except OSError:
-        pass  # closing the file releases it anyway
-    finally:
-        os.close(fd)
+def _unlock(fds):
+    for fd in reversed(fds):
+        try:
+            if msvcrt is not None:
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass  # closing the file releases it anyway
+        finally:
+            os.close(fd)
 
 
 _BUSY = {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK, getattr(errno, "EDEADLK", -1), getattr(errno, "EDEADLOCK", -1)}
 
 
-def _acquire(root):
+def _open_lock_file(root):
+    """The lock file, opened (created when missing). A link or anything but a regular file is bad-state, and a link's
+    target is never created (O_NOFOLLOW on POSIX; an lstat check first on Windows)."""
     path = bp_dir(root) / STATE_LOCK
-    new = not os.path.lexists(path)
-    again = f"run the same command again: {_this_command()}"
     try:
-        fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o666)
+        st = os.lstat(path)
+    except FileNotFoundError:
+        st = None
     except OSError as e:
-        try:
-            fd = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0)) if path.is_file() else None
+        raise _lock_error(f"cannot be opened ({e.strerror or e})")
+    if st is not None and (not stat.S_ISREG(st.st_mode) or getattr(st, "st_file_attributes", 0) & 0x400):
+        raise _lock_error("is not a regular file (a link, a folder or something else)")
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        return os.open(path, flags, 0o666), st is None
+    except OSError as e:
+        if e.errno == getattr(errno, "ELOOP", None):
+            raise _lock_error("is not a regular file (a link, a folder or something else)")
+        try:  # a read-only lock file still locks
+            return os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)), False
         except OSError:
-            fd = None
-        if fd is None:
-            raise _bad_state(f"cannot be written: the lock file .blueprint/{STATE_LOCK} cannot be opened "
-                             f"({e.strerror or e})",
-                             f"make the folder .blueprint writable (and .blueprint/{STATE_LOCK} a file), then {again}")
+            raise _lock_error(f"cannot be opened ({e.strerror or e})")
+
+
+def _lock_error(why):
+    return _bad_state(f"{why}, so .blueprint/state.json cannot be written safely",
+                      f"make .blueprint/{STATE_LOCK} a plain file (or remove it) and the folder .blueprint writable, "
+                      f"then {AGAIN}", name=STATE_LOCK)
+
+
+def _same_file(fd, path):
+    """POSIX: the open lock file is still the one at its path (not removed or replaced since it was opened)."""
+    try:
+        a, b = os.fstat(fd), os.stat(path)
+    except OSError:
+        return False
+    return (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
+
+
+def _try_acquire(root):
+    """One attempt: the fds held, or None when another process holds the lock. On POSIX the lock is flock on
+    state.lock, checked to still be the file at that path, plus flock on the .blueprint folder itself, so deleting
+    state.lock while it is held (git clean -X, a person) never lets a second writer in."""
+    fd, new = _open_lock_file(root)
+    fds = [fd]
+    try:
+        _try_lock(fd)
+        if fcntl is not None:
+            if not _same_file(fd, bp_dir(root) / STATE_LOCK):
+                _unlock(fds)
+                return None, new
+            fds.append(os.open(bp_dir(root), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)))
+            _try_lock(fds[-1])
+        return fds, new
+    except OSError as e:
+        _unlock(fds)
+        if e.errno not in _BUSY:
+            raise _lock_error(f"cannot be locked ({e.strerror or e}); this file system may not support file locks")
+        return None, new
+
+
+def _remove_stale_temp_files(root):
+    """Remove state.json.<pid>-<hex>.tmp files (write_json's names for state.json, nothing else) older than an hour:
+    what a killed writer leaves behind. Called holding the lock."""
+    cutoff = time.time() - STALE_TMP_SECONDS
+    try:
+        entries = list(os.scandir(bp_dir(root)))
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            if _STATE_TMP.match(entry.name) and entry.is_file(follow_symlinks=False) and \
+                    entry.stat(follow_symlinks=False).st_mtime < cutoff:
+                os.unlink(entry.path)
+        except OSError:
+            pass
+
+
+def _acquire(root):
     timeout = _lock_timeout()
     deadline = time.monotonic() + timeout
     delay = 0.005
+    created = False
     while True:
-        try:
-            _try_lock(fd)
+        fds, new = _try_acquire(root)
+        created = created or new
+        if fds is not None:
             break
-        except OSError as e:
-            if e.errno not in _BUSY:
-                os.close(fd)
-                raise _bad_state(f"cannot be written: the lock on .blueprint/{STATE_LOCK} cannot be taken "
-                                 f"({e.strerror or e}); this file system may not support file locks",
-                                 f"move the project to a local disk, then {again}")
-            if time.monotonic() >= deadline:
-                os.close(fd)
-                raise BlueprintError("state-busy", f"another blueprint command is writing .blueprint/state.json "
-                                     f"(waited {timeout:g} s for .blueprint/{STATE_LOCK})",
-                                     entry=".blueprint/state.json", next=again)
-            time.sleep(delay * (0.5 + random.random()))
-            delay = min(delay * 2, 0.05)
-    if new:
+        if time.monotonic() >= deadline:
+            raise BlueprintError("state-busy", f"another blueprint command is writing .blueprint/state.json "
+                                 f"(waited {timeout:g} s for .blueprint/{STATE_LOCK})",
+                                 entry=".blueprint/state.json", next=AGAIN)
+        time.sleep(delay * (0.5 + random.random()))
+        delay = min(delay * 2, 0.05)
+    if created:
         ensure_gitignore(root)  # the first lock: keep the lock and temp files out of the project's changes
-    return fd
+    _remove_stale_temp_files(root)
+    return fds
 
 
 @contextlib.contextmanager
 def state_lock(root):
-    """The one lock on state.json and log.jsonl: an OS advisory lock on .blueprint/state.lock (msvcrt on Windows,
-    flock on POSIX), so a process that dies never leaves the project locked. Waits up to $BLUEPRINT_LOCK_TIMEOUT
-    seconds (default 15), then raises state-busy. Never nested and never held across a subprocess: hold it only to
-    read, change and write state, append log lines and write views."""
+    """The one lock on state.json and log.jsonl: an OS advisory lock on .blueprint/state.lock (msvcrt on Windows;
+    flock on POSIX, on the lock file and the .blueprint folder), so a process that dies never leaves the project
+    locked. Waits up to $BLUEPRINT_LOCK_TIMEOUT seconds (default 15, at most 600), then raises state-busy. Never
+    nested (a second take in one process is a RuntimeError) and never held across a subprocess: hold it only to read,
+    change and write state, append log lines and write views. Windows and WSL processes do not share it."""
     key = os.path.normcase(os.path.abspath(bp_dir(root) / STATE_LOCK))
     if key in _HELD:
         raise RuntimeError("the state lock is already held by this process; it is never nested")
-    fd = _acquire(root)
+    fds = _acquire(root)
     _HELD.add(key)
     try:
         yield
     finally:
         _HELD.discard(key)
-        _unlock(fd)
+        _unlock(fds)
 
 
 def _holding(root):
@@ -573,13 +660,48 @@ def _holding(root):
 
 
 def state_default():
+    """The state of a project with no state.json (1.x's default)."""
     return {"files": {}, "patterns": {}, "unplanned": [], "syncedAt": None, "head": None}
+
+
+def _damage(raw):
+    """The first part of a parsed state that the commands cannot use, as words for bad-state, or None. Missing or null
+    "files" and "patterns" are empty (filled in here). Only shapes the commands dereference are checked, the ones on
+    which 1.3.0 crashed: anything 1.3.0 read without crashing is still read."""
+    if raw.get("files") is None:
+        raw["files"] = {}
+    if not isinstance(raw["files"], dict):
+        return f'"files" must be an object (got {_json_kind(raw["files"])})'
+    for p, rec in raw["files"].items():
+        if not isinstance(rec, dict):
+            return f"files[{json.dumps(p, ensure_ascii=False)}] must be an object (got {_json_kind(rec)})"
+    if "patterns" in raw and raw["patterns"] is None:
+        raw["patterns"] = {}
+    pats = raw.get("patterns", {})
+    if not isinstance(pats, dict):
+        return f'"patterns" must be an object (got {_json_kind(pats)})'
+    for pid, entry in pats.items():
+        where = f"patterns[{json.dumps(pid, ensure_ascii=False)}]"
+        if not isinstance(entry, dict):
+            return f"{where} must be an object (got {_json_kind(entry)})"
+        inst = entry.get("instances", [])
+        if not isinstance(inst, (list, str, dict)):
+            return f"{where}.instances must be a list (got {_json_kind(inst)})"
+        bad = [x for x in inst if not isinstance(x, str)] if isinstance(inst, list) else []
+        if bad:
+            return f"{where}.instances must hold paths (got {_json_kind(bad[0])})"
+    for key, ok, kind in (("unplanned", (list, str), "a list"), ("data", (dict,), "an object")):
+        v = raw.get(key)
+        if v and not isinstance(v, ok):
+            return f'"{key}" must be {kind} (got {_json_kind(v)})'
+    return None
 
 
 def read_state(root, prepare=None):
     """state.json as a dict (the 1.x default when there is none), then prepare(state) if given (the in-memory upgrade).
-    A state.json that cannot be used is error bad-state (exit 1), and the file is left as it is: a folder, unreadable,
-    not UTF-8, not JSON, not an object, or "files" not an object. A missing or null "files" is an empty one."""
+    A state.json that cannot be used is error bad-state (exit 1), raised before the command writes anything, and the
+    file is left as it is: a folder, unreadable, not UTF-8, not JSON (a UTF-8 BOM included, as in 1.3.0), not an
+    object, or damaged (_damage: "files" or a file record not an object, and the like)."""
     path = bp_dir(root) / "state.json"
     fix = f"fix .blueprint/state.json or move it away (progress is then tracked from scratch), then run: " \
           f"{run_hint(root, 'sync')}"
@@ -603,10 +725,9 @@ def read_state(root, prepare=None):
                              "(nested too deeply)", fix) from None
         if not isinstance(raw, dict):
             raise _bad_state(f"must be a JSON object (got {_json_kind(raw)})", fix)
-        if raw.get("files") is None:
-            raw["files"] = {}
-        elif not isinstance(raw["files"], dict):
-            raise _bad_state(f'is damaged: "files" must be an object (got {_json_kind(raw["files"])})', fix)
+        why = _damage(raw)
+        if why:
+            raise _bad_state(f"is damaged: {why}", fix)
     return prepare(raw) if prepare is not None else raw
 
 
@@ -616,21 +737,29 @@ def _json_kind(v):
 
 
 def write_state(root, state):
-    """Write state.json atomically (call it holding state_lock). A file that cannot be written is bad-state."""
+    """Write state.json atomically; call it holding state_lock. On Windows, a file another program keeps open past
+    write_json's retries is state-busy; a file or folder that cannot be written is bad-state."""
     path = bp_dir(root) / "state.json"
     try:
         write_json(path, state)
+    except PermissionError as e:
+        if os.name == "nt" and path.is_file() and os.access(path, os.W_OK) and os.access(path.parent, os.W_OK):
+            raise BlueprintError("state-busy", ".blueprint/state.json is open in another program (Windows refuses to "
+                                 "replace it while it is open); nothing was written", entry=".blueprint/state.json",
+                                 next=f"close it, then {AGAIN}") from None
+        raise _bad_state(f"cannot be written ({e.strerror or e})",
+                         f"make .blueprint/state.json and the folder .blueprint writable, then {AGAIN}") from None
     except OSError as e:
         raise _bad_state(f"cannot be written ({e.strerror or e})",
-                         f"make .blueprint/state.json and the folder .blueprint writable, then run the same command "
-                         f"again: {_this_command()}") from None
+                         f"make .blueprint/state.json and the folder .blueprint writable, then {AGAIN}") from None
 
 
 def update_state(root, change, prepare=None):
     """The one way to change state.json: take state_lock, re-read state.json inside it (prepare upgrades it), apply
     change(state) in place, write it atomically, append the log events change returned (one line each), release.
     Compute before calling this; change only sets the keys and entries its command owns, so another writer's
-    different entries survive and the same entry is last-writer-wins. Returns the state written."""
+    different entries survive and the same entry is last-writer-wins. change may raise to write nothing; it must not
+    call update_state or state_lock (never nested), but may call append_log. Returns the state written."""
     with state_lock(root):
         state = read_state(root, prepare)
         events = change(state) or ()
