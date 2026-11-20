@@ -1122,6 +1122,13 @@
       "module": "references",
       "phase": "W0",
       "purpose": "The version 1 example plan"
+    },
+    {
+      "path": "app-blueprint/tests/test_state_integrity.py",
+      "action": "create",
+      "module": "tests",
+      "phase": "W0",
+      "purpose": "Tests of state locking, atomic writes and a broken state.json"
     }
   ],
   "patterns": [
@@ -1305,11 +1312,11 @@
     },
     {
       "pattern": "/app-blueprint/scripts/bp/__init__.py",
-      "owner": "W0-A1"
+      "owner": "W0-A2"
     },
     {
       "pattern": "/app-blueprint/scripts/bp/api.py",
-      "owner": "W0-A1"
+      "owner": "W0-A2"
     },
     {
       "pattern": "/app-blueprint/scripts/bp/cli.py",
@@ -1317,11 +1324,11 @@
     },
     {
       "pattern": "/app-blueprint/scripts/bp/commands/__init__.py",
-      "owner": "W0-A1"
+      "owner": "W0-A2"
     },
     {
       "pattern": "/app-blueprint/scripts/bp/commands/data.py",
-      "owner": "W0-A1"
+      "owner": "W0-A2"
     },
     {
       "pattern": "/app-blueprint/scripts/bp/commands/evidence.py",
@@ -1369,7 +1376,7 @@
     },
     {
       "pattern": "/app-blueprint/scripts/bp/export.py",
-      "owner": "W0-A1"
+      "owner": "W0-A2"
     },
     {
       "pattern": "/app-blueprint/scripts/bp/features.py",
@@ -1377,15 +1384,15 @@
     },
     {
       "pattern": "/app-blueprint/scripts/bp/globs.py",
-      "owner": "W0-A1"
+      "owner": "W0-A2"
     },
     {
       "pattern": "/app-blueprint/scripts/bp/install.py",
-      "owner": "W0-A1"
+      "owner": "W0-A2"
     },
     {
       "pattern": "/app-blueprint/scripts/bp/learn.py",
-      "owner": "W0-A1"
+      "owner": "W0-A2"
     },
     {
       "pattern": "/app-blueprint/scripts/bp/migrate.py",
@@ -1517,7 +1524,7 @@
     },
     {
       "pattern": "/app-blueprint/scripts/bp/views/__init__.py",
-      "owner": "W0-A1"
+      "owner": "W0-A2"
     },
     {
       "pattern": "/app-blueprint/scripts/bp/views/context.py",
@@ -1553,7 +1560,7 @@
     },
     {
       "pattern": "/app-blueprint/tests/data/v1/",
-      "owner": "W0-A1"
+      "owner": "W0-A2"
     },
     {
       "pattern": "/app-blueprint/tests/fixtures_archives.py",
@@ -1565,7 +1572,7 @@
     },
     {
       "pattern": "/app-blueprint/tests/support.py",
-      "owner": "W0-A1"
+      "owner": "W0-A2"
     },
     {
       "pattern": "/app-blueprint/tests/test_agents.py",
@@ -1573,15 +1580,15 @@
     },
     {
       "pattern": "/app-blueprint/tests/test_blueprint.py",
-      "owner": "W0-A1"
+      "owner": "W0-A2"
     },
     {
       "pattern": "/app-blueprint/tests/test_contracts_module.py",
-      "owner": "W0-A1"
+      "owner": "W0-A2"
     },
     {
       "pattern": "/app-blueprint/tests/test_data_and_learning.py",
-      "owner": "W0-A1"
+      "owner": "W0-A2"
     },
     {
       "pattern": "/app-blueprint/tests/test_docs.py",
@@ -1609,7 +1616,7 @@
     },
     {
       "pattern": "/app-blueprint/tests/test_ignore_anchor.py",
-      "owner": "W0-A1"
+      "owner": "W0-A2"
     },
     {
       "pattern": "/app-blueprint/tests/test_migrate.py",
@@ -1617,15 +1624,15 @@
     },
     {
       "pattern": "/app-blueprint/tests/test_owner_anchor.py",
-      "owner": "W0-A1"
+      "owner": "W0-A2"
     },
     {
       "pattern": "/app-blueprint/tests/test_package.py",
-      "owner": "W0-A1"
+      "owner": "W0-A2"
     },
     {
       "pattern": "/app-blueprint/tests/test_plan_fuzz.py",
-      "owner": "W0-A1"
+      "owner": "W0-A2"
     },
     {
       "pattern": "/app-blueprint/tests/test_plan_fuzz_v2.py",
@@ -1633,11 +1640,11 @@
     },
     {
       "pattern": "/app-blueprint/tests/test_plan_shapes.py",
-      "owner": "W0-A1"
+      "owner": "W0-A2"
     },
     {
       "pattern": "/app-blueprint/tests/test_presets.py",
-      "owner": "W0-A1"
+      "owner": "W0-A2"
     },
     {
       "pattern": "/app-blueprint/tests/test_records.py",
@@ -1766,6 +1773,10 @@
     {
       "pattern": "/maintainers/tests/test_learn.py",
       "owner": "W3-L"
+    },
+    {
+      "pattern": "/app-blueprint/tests/test_state_integrity.py",
+      "owner": "W0-A2"
     }
   ],
   "roster": [
@@ -2008,6 +2019,12 @@
       "decision": "The tool copy in .blueprint/bin is not committed.",
       "why": "The repository is the tool; a copy would go stale at every version bump.",
       "source": "W0-C"
+    },
+    {
+      "id": "D5",
+      "decision": "The files of the finished W0-A1 workstream pass to W0-A2, which maintains the core.",
+      "why": "W0-A1 is merged and closed; later core fixes touch its files and must pass the ownership check.",
+      "source": "orchestrator"
     }
   ],
   "ignore": [],
