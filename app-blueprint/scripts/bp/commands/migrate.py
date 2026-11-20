@@ -195,6 +195,7 @@ def _read_plan(root):
     """(original bytes, parsed plan): blueprint.json is read once and both the backup and the upgrade
     come from those bytes. A file that does not parse is reported by load_raw_plan with the 1.x text."""
     path = bp_dir(root) / "blueprint.json"
+    load_raw_plan(root)  # the one place a plan is refused (bad-json: unreadable, or a value it cannot write back)
     try:
         original = path.read_bytes()
         return original, json.loads(original.decode("utf-8"), object_pairs_hook=_object)
@@ -320,6 +321,10 @@ def cmd_migrate(args):
     # From here state.json is read again and replaced under the state lock (core.state_lock), so a change another
     # command made meanwhile is kept; the log line is appended inside it. Nothing above writes or locks anything.
     with state_lock(root):
+        if _now_version_2(root):  # another migrate finished since our read: its plan stays (review of #14)
+            emit(args, "migrate", {"from": 2, "to": 2, "written": [], "dryRun": False},
+                 ["blueprint.json is already schema version 2. Nothing to do."])
+            return
         state_bytes, state_why = _state_out(*_read_state(root))
         backup, backup_written = _backup(root, original)  # step 4
         for key in repeated:
@@ -351,6 +356,16 @@ def cmd_migrate(args):
     emit(args, "migrate", {"from": 1, "to": 2, "written": written, "dryRun": False},
          [f"Migrated blueprint.json to schema version 2. Backup: {backup}. Next: add milestones and features "
           f"(see references/schema.md in the skill), then run: {_run(root, 'validate')}"])
+
+
+def _now_version_2(root):
+    """True when blueprint.json, read again under the state lock, is a version 2 plan; a file that cannot be read or
+    parsed now is not (the migration goes on with the bytes it read and checked before the lock)."""
+    try:
+        raw = json.loads((bp_dir(root) / "blueprint.json").read_bytes().decode("utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return False
+    return isinstance(raw, dict) and plan_version(raw) == 2
 
 
 def _render_quietly(root):

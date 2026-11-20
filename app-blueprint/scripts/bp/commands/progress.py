@@ -17,7 +17,7 @@ from pathlib import Path
 from bp import registry
 from bp.version import TOOL_VERSION
 from bp.core import (BlueprintError, bp_dir, die, emit, find_root, git_head, norm, now_iso, path_key,
-                     project_path)
+                     project_path, run_hint)
 from bp.globs import pattern_instance_rx
 from bp.learn import record_incident
 from bp.plan import GLYPH, LABEL, STATES, load_plan, owner_of, planned_file
@@ -265,15 +265,15 @@ def _check_selectors(ctx, args):
     fid = getattr(args, "feature", None)
     if fid and fid not in section_index(plan, "features"):
         raise BlueprintError("unknown-feature", f"feature {fid} is not in the plan", entry=f"feature {fid}",
-                             next="blueprint.py status --features")
+                             next=run_hint(ctx["root"], "status --features", "features"))
     mid = getattr(args, "milestone", None)
     if mid and mid not in section_index(plan, "milestones"):
         known = list(section_index(plan, "milestones"))
-        bp = "python .blueprint/bin/blueprint.py"
         raise BlueprintError("unknown-milestone", f"{_flat(mid)!r} is not a milestone in the plan"
                              + (" (milestones: " + ", ".join(_flat(m) for m in known) + ")" if known else ""),
                              entry=f"milestone {_flat(mid)}",
-                             next=f"{bp} migrate" if plan.get("_from") == 1 else f"{bp} status")
+                             next=run_hint(ctx["root"], "migrate", "commands/migrate") if plan.get("_from") == 1
+                             else run_hint(ctx["root"], "status"))
 
 
 def _blocked(ctx, key):
@@ -404,8 +404,7 @@ def cmd_claim(args):
         if got:  # a message, or (message, error, next) from the hook (review N5)
             msg, error, nxt = (tuple(got) + (None, None))[:3] if isinstance(got, (tuple, list)) else (got, None, None)
             raise BlueprintError(error or "blocked-by-unknown", str(msg), entry=f"file {path}", code=3,
-                                 next=nxt or "blueprint.py status --unknowns (or claim again with --force if the "
-                                             "lead says so)")
+                                 next=nxt or run_hint(root, "status --unknowns", "unknowns"))
     set_file_state(root, path, "claimed", args.by, args.note)
     print(f"{args.by} claimed {path}")
 
@@ -447,27 +446,32 @@ def cmd_verify(args):
     """verify --run runs each check without the lock, then records that group's proofs (its own files' "verified")
     and its log line on the state as it is under the lock; the lock is never held while a check runs."""
     from bp.status import change_state, load_state
-    from bp.verify import record_file_proofs, run_check, verify_groups
+    from bp.verify import record_file_proofs, run_check, stale_instances, verify_groups
     feature = getattr(args, "feature", None)
     with_feature = {"--criterion": getattr(args, "criterion", None), "--repeat": getattr(args, "repeat", None),
                     "--by": getattr(args, "by", None), "--json": getattr(args, "json", False) or None}
     used = [k for k, v in with_feature.items() if v is not None]
+    root = find_root(args.root)  # never fails: the usage errors below name a command that runs as printed
     if used and not feature:
         raise BlueprintError("usage", f"{', '.join(used)} go{'es' if len(used) == 1 else ''} with --feature F",
-                             next="blueprint.py verify --feature F --run", code=64)
+                             next=run_hint(root, "verify --feature F --run"), code=64)
     if getattr(args, "repeat", None) is not None and args.repeat < 1:
-        raise BlueprintError("usage", "--repeat must be 1 or more", next="blueprint.py verify --feature F --run --repeat 3",
+        raise BlueprintError("usage", "--repeat must be 1 or more", next=run_hint(root, "verify --feature F --run --repeat 3"),
                              code=64)
-    root = find_root(args.root)
     plan = load_plan(root)
     if feature:
         _verify_feature(args, root, plan)
         return
     only = None
+    # a version 2 plan also proves the pattern instances recorded in state (option B); version 1 keeps 1.x's groups
+    state = load_state(root) if plan.get("_from") != 1 else None
     if getattr(args, "stale", False):  # files whose last proof passed but no longer holds (contract 4.7)
         from bp.status import compute
-        only = {r["path"] for r in compute(root, plan, load_state(root))["rows"] if r["stale"]}
-    groups = verify_groups(plan, phase=args.phase, owner=args.owner, only=only)
+        current = state if state is not None else load_state(root)
+        only = {r["path"] for r in compute(root, plan, current)["rows"] if r["stale"]}
+        if state is not None:
+            only |= stale_instances(root, plan, state)
+    groups = verify_groups(plan, phase=args.phase, owner=args.owner, only=only, state=state)
     if not groups:
         print("No verify commands in scope.")
         return
@@ -511,10 +515,11 @@ def cmd_verify(args):
                 event["notSaved"] = sorted(reset)  # the files whose proof this line does not stand for
             return [event]
         state = change_state(root, change)
-        for p, (st, by, _) in sorted(reset.items()):
-            what = "marked planned" if st == "planned" else "claimed"
-            print(f"  {p}: not verified: it was {what} by {by} while the check ran; verify it again when it is built")
-        failed += 1 if reset else 0
+        if ok:  # a failed check is already reported (and fails the command) once: its reset files are not again
+            for p, (st, by, _) in sorted(reset.items()):
+                what = "marked planned" if st == "planned" else "claimed"
+                print(f"  {p}: not verified: it was {what} by {by} while the check ran; verify it again when it is built")
+            failed += 1 if reset else 0
     _render_after(args, root, plan, state)
     sys.exit(1 if failed else 0)
 

@@ -9,7 +9,7 @@ import sys
 
 from bp.version import SCHEMA_VERSION
 from bp import core
-from bp.core import BlueprintError, bp_dir, die, json_depth, norm, read_json
+from bp.core import BlueprintError, bp_dir, die, json_depth, norm, read_json, run_hint, unusable_json
 from bp.globs import glob_match
 from bp.migrate import upgrade_plan, upgrade_state
 
@@ -265,11 +265,16 @@ def normalize_plan(plan):
 FIX_NEXT = "fix .blueprint/blueprint.json, then run: python .blueprint/bin/blueprint.py validate"
 
 
+def fix_next(root):
+    """The next of a plan load error: fix the file, then validate, in a form that runs as printed (core.run_hint)."""
+    return f"fix .blueprint/blueprint.json, then run: {run_hint(root, 'validate')}"
+
+
 def _load_error(error, msg, next):  # noqa: A002
     """A plan load error: the 1.x text on stderr (exactly what die() printed), then a BlueprintError (exit 1) that
     already counts as printed, so --json callers still get the 7.1 failure envelope and guard can fail closed."""
     print(msg, file=sys.stderr)
-    e = BlueprintError(error, msg, next=next)
+    e = BlueprintError(error, msg, entry="blueprint.json", next=next)  # the file the error is about
     e.printed = True
     raise e
 
@@ -279,19 +284,23 @@ def load_raw_plan(root):
     path = bp_dir(root) / "blueprint.json"
     if not path.exists():
         _load_error("no-blueprint", f"No blueprint at {path}. Run: blueprint.py init --name \"App name\"",
-                    'blueprint.py init --name "App name"')
+                    run_hint(root, 'init --name "App name"'))
     try:
-        return read_json(path)
+        raw = read_json(path)
     except json.JSONDecodeError as e:
-        _load_error("bad-json", f"blueprint.json is not valid JSON: {e}", FIX_NEXT)
+        _load_error("bad-json", f"blueprint.json is not valid JSON: {e}", fix_next(root))
     except UnicodeDecodeError as e:  # review R2-M1: unreadable is a load error too (bad-json), never a crash
-        _load_error("bad-json", f"blueprint.json is not UTF-8 text: {e}", FIX_NEXT)
+        _load_error("bad-json", f"blueprint.json is not UTF-8 text: {e}", fix_next(root))
     except ValueError as e:  # review R3-N1: e.g. an integer literal over Python's digit limit
-        _load_error("bad-json", f"blueprint.json cannot be read as JSON: {e}", FIX_NEXT)
+        _load_error("bad-json", f"blueprint.json cannot be read as JSON: {e}", fix_next(root))
     except RecursionError:
-        _load_error("bad-json", "blueprint.json is nested too deeply to read", FIX_NEXT)
+        _load_error("bad-json", "blueprint.json is nested too deeply to read", fix_next(root))
     except OSError as e:
-        _load_error("bad-json", f"blueprint.json cannot be read: {e.strerror or e}", FIX_NEXT)
+        _load_error("bad-json", f"blueprint.json cannot be read: {e.strerror or e}", fix_next(root))
+    bad = unusable_json(raw)  # a value no write could keep: every command refuses the plan here, migrate included
+    if bad:
+        _load_error("bad-json", f"blueprint.json cannot be used: {bad[0]} holds {bad[1]}", fix_next(root))
+    return raw
 
 
 def load_plan(root):
@@ -299,13 +308,13 @@ def load_plan(root):
     with every message at once; a version other than 1 or 2 raises schema-too-new. Never writes blueprint.json."""
     raw = load_raw_plan(root)
     try:
-        return _load_checked(raw)
+        return _load_checked(raw, root)
     except RecursionError:
         # The one place the load path maps a nesting too deep for one of its steps (bad-json), and only when the plan
         # really is deep: a RecursionError on a shallow plan is a bug and stays an incident (review P10-3).
         if json_depth(raw) < NESTING_ERROR_DEPTH:
             raise
-        _load_error("bad-json", "blueprint.json is nested too deeply to read", FIX_NEXT)
+        _load_error("bad-json", "blueprint.json is nested too deeply to read", fix_next(root))
 
 
 # Below this nesting depth a RecursionError while loading cannot come from the plan's nesting: Python's default
@@ -315,13 +324,15 @@ def load_plan(root):
 NESTING_ERROR_DEPTH = 200
 
 
-def _load_checked(raw):
+def _load_checked(raw, root=None):
     """load_plan after reading: the checks, the in-memory upgrade and normalisation."""
     if not isinstance(raw, dict):
-        _load_error("bad-shape", f"blueprint.json must be an object (got {json_kind(raw)})" + SHAPE_FOOTER, FIX_NEXT)
+        _load_error("bad-shape", f"blueprint.json must be an object (got {json_kind(raw)})" + SHAPE_FOOTER,
+                    fix_next(root) if root is not None else FIX_NEXT)
     bad = _shape_problems_1x(raw) + _shape_problems_2x(raw)
     if bad:
-        _load_error("bad-shape", "\n".join("blueprint.json: " + b for b in bad) + SHAPE_FOOTER, FIX_NEXT)
+        _load_error("bad-shape", "\n".join("blueprint.json: " + b for b in bad) + SHAPE_FOOTER,
+                    fix_next(root) if root is not None else FIX_NEXT)
     plan = upgrade_plan(raw)
     plan.pop("_from", None)  # an in-memory marker only: a "_from" in the file is ignored (dropped from the plan)
     if raw["version"] == 1:

@@ -5,6 +5,7 @@ the 1.x team check. Each finding is {"level", "code", "entry", "message", "next"
 the code its message classifies as. validate_plan keeps the 1.x return: (error messages, warning messages).
 """
 import re
+from pathlib import Path
 
 from bp.learn import project_ident, store_append
 from bp.migrate import upgrade_plan
@@ -99,7 +100,7 @@ def validate_findings(plan, team=None, evidence_ids=None, root=None):
         migrate_built = registry.command_built("migrate")  # the hint only once the command exists (1.5 row d)
         W("blueprint.json is schema version 1; it still works."
           + (" To use milestones, features, tasks and unknowns, run: blueprint.py migrate" if migrate_built else ""),
-          code="schema-v1", entry="blueprint.json", next="blueprint.py migrate" if migrate_built else None)
+          code="schema-v1", entry="blueprint.json", next=_migrate_next(root) if migrate_built else None)
     vctx = validation_context(plan, team, evidence_ids, root)
     registry.collect("validate", plan, E, W, vctx)
     if not from_v1:  # a version 1 plan validates as in 1.3.0
@@ -186,6 +187,15 @@ def _report(E, W, label, entry, problem, where):
           next=f"write the path as {plain!r} in {where}" if plain else f"rename it in {where}")
     else:
         W(f"{label}: {why}; {DEVICE_NEXT}", code="file-path-alias", entry=entry, next=f"rename it in {where}")
+
+
+def _migrate_next(root):
+    """The schema-v1 finding's next. A finding is data (validate --json, and modules may keep it), so it names no path
+    of this machine: the project's copy when it has migrate, else the portable form with the <skill> placeholder."""
+    copy = None if root is None else Path(root) / ".blueprint" / "bin"
+    if copy is not None and (copy / "blueprint.py").is_file() and (copy / "bp" / "commands" / "migrate.py").is_file():
+        return "python .blueprint/bin/blueprint.py migrate"
+    return "python <skill>/scripts/blueprint.py migrate --root ."
 
 
 def validate_plan(plan, team=None, evidence_ids=None, root=None):

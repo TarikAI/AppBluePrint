@@ -81,11 +81,42 @@ def md_cell(s):
     return str(s if s is not None else "").replace("|", "\\|").replace("\n", " ")
 
 
+def text_cell(s):
+    """A plain table cell for a version 2 plan: one line; '&' and '<' as entities (as the module views write them, so no
+    plan text becomes HTML); the backslash escaped before the pipe, so a value ending in one cannot escape the cell's
+    closing pipe. A version 1 plan keeps 1.3.0's bytes (md_cell, or the raw value where 1.3.0 wrote it raw)."""
+    text = one_line(s if s is not None else "").replace("&", "&amp;").replace("<", "&lt;")
+    return text.replace("\\", "\\\\").replace("|", "\\|")
+
+
+def code_cell(s):
+    """Text inside a code span of a version 2 table cell: as text_cell, without the entities (Markdown shows a code
+    span's text as it is and never reads HTML in it)."""
+    return one_line(s if s is not None else "").replace("\\", "\\\\").replace("|", "\\|")
+
+
+def cells(plan):
+    """(plain, code, raw) cell functions for the core's tables: 1.3.0's (md_cell, md_cell, as is) for a version 1
+    plan; text_cell, code_cell, text_cell for a version 2 plan (item 6 of the core follow-up)."""
+    if plan.get("_from") == 1 or plan.get("version") == 1:
+        return md_cell, md_cell, (lambda s: s)
+    return text_cell, code_cell, text_cell
+
+
+def codes(cell, items):
+    """A list of code spans in one cell: 1.3.0's form for a version 1 plan (the joined text through md_cell), each
+    item through code_cell for a version 2 plan."""
+    if cell is md_cell:
+        return md_cell(", ".join("`" + x + "`" for x in items))
+    return ", ".join("`" + code_cell(x) + "`" for x in items)
+
+
 def render_structure(plan, state, comp, ctx=None):
     """STRUCTURE.md. With ctx (render_all), the file_tags hooks tag tree lines and, when the plan has features, a
     re-verify line follows the counts (contract 8.3); a plan without features renders exactly as in 1.3.0."""
     app = plan["app"]
     rows, pats = comp["rows"], comp["patterns"]
+    P, C, R = cells(plan)
     tags = file_tags(ctx) if ctx is not None else None
     n_stale = sum(1 for r in rows if r.get("stale")) if ctx is not None and plan.get("features") else 0
     module_by_path = {norm(m.get("path", "")).rstrip("/"): m for m in plan["modules"] if m.get("path")}
@@ -104,7 +135,7 @@ def render_structure(plan, state, comp, ctx=None):
     if plan["stack"]:
         w("## Stack\n\n| Part | Choice | Version | Docs | Checked |\n|---|---|---|---|---|\n")
         for s in plan["stack"]:
-            w(f"| {md_cell(s.get('part'))} | {md_cell(s.get('choice'))} | {md_cell(s.get('version'))} | {md_cell(s.get('docs'))} | {md_cell(s.get('verified'))} |\n")
+            w(f"| {P(s.get('part'))} | {P(s.get('choice'))} | {P(s.get('version'))} | {P(s.get('docs'))} | {P(s.get('verified'))} |\n")
         w("\n")
     ap = plan.get("approach") or {}
     if ap:
@@ -124,7 +155,7 @@ def render_structure(plan, state, comp, ctx=None):
                 w(f"  {re.sub(r'[^A-Za-z0-9_]', '_', m['id'])} --> {re.sub(r'[^A-Za-z0-9_]', '_', d)}\n")
         w("```\n\n| Module | Path | Layer | Purpose | Depends on | Verify |\n|---|---|---|---|---|---|\n")
         for m in plan["modules"]:
-            w(f"| {m['id']} | `{md_cell(m.get('path'))}` | {md_cell(m.get('layer'))} | {md_cell(m.get('purpose'))} | {md_cell(', '.join(m.get('dependsOn', [])))} | `{md_cell(m.get('verify'))}` |\n")
+            w(f"| {R(m['id'])} | `{C(m.get('path'))}` | {P(m.get('layer'))} | {P(m.get('purpose'))} | {P(', '.join(m.get('dependsOn', [])))} | `{C(m.get('verify'))}` |\n")
         w("\n")
     if plan["stores"] or plan["resources"]:
         dv = data_view(plan, state)
@@ -132,13 +163,13 @@ def render_structure(plan, state, comp, ctx=None):
         if dv["stores"]:
             w("| Store | Kind | Schema files | Purpose |\n|---|---|---|---|\n")
             for s in dv["stores"]:
-                w(f"| {s.get('id')} | {s.get('kind')} | {md_cell(', '.join('`' + g + '`' for g in s.get('schema', [])))} | {md_cell(s.get('purpose'))} |\n")
+                w(f"| {R(s.get('id'))} | {R(s.get('kind'))} | {codes(P, s.get('schema', []))} | {P(s.get('purpose'))} |\n")
             w("\n")
         if dv["resources"]:
             w("| Resource | Kind | Store | Defined in | Owner | Read by | Written by |\n|---|---|---|---|---|---|---|\n")
             for r in dv["resources"]:
-                w(f"| {r['id']} | {r['kind']} | {md_cell(r['store'])} | {('`' + r['definedIn'] + '`') if r['definedIn'] else ''} | {md_cell(r['owner'])} | "
-                  f"{md_cell(', '.join('`' + x + '`' for x in r['readers']))} | {md_cell(', '.join('`' + x + '`' for x in r['writers']))} |\n")
+                w(f"| {R(r['id'])} | {R(r['kind'])} | {P(r['store'])} | {('`' + (C(r['definedIn']) if P is not md_cell else r['definedIn']) + '`') if r['definedIn'] else ''} | {P(r['owner'])} | "
+                  f"{codes(P, r['readers'])} | {codes(P, r['writers'])} |\n")
             w("\n```mermaid\nflowchart LR\n")
             mods_used = {}
             files_mod = {f["path"]: f.get("module") for f in plan["files"]}

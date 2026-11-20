@@ -1264,10 +1264,10 @@ def _key(plan):
 
 UNUSABLE = [  # (label, change to the plan dict, the key path the error names, the message's description)
     ("lone surrogate", _put(["app", "name"], "Snag \ud800 Desk"), "app.name",
-     "an unpaired surrogate (\\ud800), which UTF-8 text cannot hold"),
+     "an unpaired surrogate (\\ud800), which is not valid Unicode"),
     ("low surrogate in a list", _put(["files", 1, "dependsOn"], ["\udfff"]), "files[1].dependsOn[0]",
-     "an unpaired surrogate (\\udfff), which UTF-8 text cannot hold"),
-    ("surrogate in a key", _key, "the key app.x\\udc80y", "an unpaired surrogate (\\udc80), which UTF-8 text cannot hold"),
+     "an unpaired surrogate (\\udfff), which is not valid Unicode"),
+    ("surrogate in a key", _key, "the key app.x\\udc80y", "an unpaired surrogate (\\udc80), which is not valid Unicode"),
     ("NaN", _put(["app", "extra"], [1, {"n": float("nan")}]), "app.extra[1].n",
      "a number that is not finite (NaN), which JSON does not have"),
     ("Infinity", _put(["app", "extra"], float("inf")), "app.extra",
@@ -1337,7 +1337,7 @@ class UnusableJsonTest(TempRoot):
     def test_the_same_values_in_state_are_bad_state(self):
         self.write_plan(v2_plan())
         cases = [('{"files": {"Cargo.toml": {"state": "built", "note": "a\\ud800"}}}',
-                  'files["Cargo.toml"].note', "an unpaired surrogate (\\ud800), which UTF-8 text cannot hold"),
+                  'files["Cargo.toml"].note', "an unpaired surrogate (\\ud800), which is not valid Unicode"),
                  ('{"files": {}, "syncedAt": NaN}', "syncedAt", "a number that is not finite (NaN), which JSON does not have"),
                  ('{"files": {}, "x": [1e999]}', "x[0]", "a number that is not finite (Infinity), which JSON does not have")]
         for text, where, what in cases:
@@ -1355,7 +1355,11 @@ class UnusableJsonTest(TempRoot):
                         self.assertEqual((shown["code"], shown["message"]), ("bad-state", msg))
                     else:
                         self.assertIn(msg, r.stderr)
-                    self.assertEqual(tree_bytes(self.root), before, "state.json is left as it is")
+                    # state.json and every other file are left as they are; taking the lock may add state.lock and
+                    # its .gitignore lines (core.state_lock), which are not project content
+                    lock = {"state.lock", ".gitignore"}
+                    self.assertEqual({k: v for k, v in tree_bytes(self.root).items() if k not in lock},
+                                     {k: v for k, v in before.items() if k not in lock}, "state.json is left as it is")
 
     def test_a_clean_plan_is_unchanged(self):  # the check costs nothing to a plan without such values
         self.write_plan(v2_plan())
@@ -1388,7 +1392,7 @@ class LoadNextTest(TempRoot):
         (self.root / ".blueprint" / "blueprint.json").write_text("{", encoding="utf-8")
         r = self.cli("status", "--json")
         self.assertEqual(json.loads(r.stdout)["error"]["next"], f"fix .blueprint/blueprint.json, then run: {self.hint('validate')}")
-        self.write_plan({"version": 2})
+        self.write_plan({"version": 2, "files": 5})
         r = self.cli("status", "--json")
         self.assertEqual(json.loads(r.stdout)["error"]["code"], "bad-shape")
         self.assertEqual(json.loads(r.stdout)["error"]["next"], f"fix .blueprint/blueprint.json, then run: {self.hint('validate')}")

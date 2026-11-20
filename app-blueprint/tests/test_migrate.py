@@ -626,7 +626,8 @@ class HintsTest(MigrateCase):
                       "To use milestones, features, tasks and unknowns, run: blueprint.py migrate", r.stdout)
         data = json.loads(self.cli("validate", "--json").stdout)["data"]
         w = [x for x in data["warnings"] if x["code"] == "schema-v1"][0]
-        self.assertEqual((w["entry"], w["next"]), ("blueprint.json", "blueprint.py migrate"))
+        # the finding's next runs as printed and names no path of this machine (core follow-up, item 2)
+        self.assertEqual((w["entry"], w["next"]), ("blueprint.json", "python <skill>/scripts/blueprint.py migrate --root ."))
 
     def test_status(self):
         r = self.cli("status")
@@ -761,7 +762,9 @@ class UnwritableContentTest(MigrateCase):
                 self.assertEqual(self.tmp_files(), [])
         human = self.migrate()
         self.assertEqual((human.returncode, human.stdout), (1, ""))
-        self.assertIn("error: blueprint.json contains text that is not valid Unicode", human.stderr)
+        # refused at load, as by every command (core follow-up, item 1), with the 1.x load-error form (no "error:")
+        self.assertIn("blueprint.json cannot be used: app.name holds an unpaired surrogate (\\ud800), which is not valid "
+                      "Unicode", human.stderr)
 
     def test_a_lone_surrogate_in_the_state_leaves_the_state_as_it_is(self):
         state = self.state()

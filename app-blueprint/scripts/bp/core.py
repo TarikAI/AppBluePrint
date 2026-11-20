@@ -8,6 +8,7 @@ import datetime as _dt
 import errno
 import hashlib
 import json
+import math
 import os
 import random
 import re
@@ -54,6 +55,49 @@ def read_json(path, default=None):
         return default
     with path.open(encoding="utf-8") as f:
         return json.load(f)
+
+
+_SURROGATE = re.compile("[\\ud800-\\udfff]")
+_PLAIN_KEY = re.compile(r"[^.\[\]\"]+")
+
+
+def _key_path(where, key):
+    """where + one key, as the load errors name it: a.b for a plain key, a["x.y"] for a key with '.', '[', ']' or '"'
+    (or an empty one); an unpaired surrogate is shown as its \\uXXXX escape, so the text prints anywhere."""
+    shown = key.encode("utf-8", "backslashreplace").decode("utf-8")
+    if _PLAIN_KEY.fullmatch(key):
+        return f"{where}.{shown}" if where else shown
+    return f'{where}["{shown}"]'
+
+
+def unusable_json(value):
+    """(key path, what) for the first value of parsed JSON that the tool could not write back faithfully, else None:
+    a string or key holding an unpaired surrogate (json reads the escape \\ud800 alone into one, and no UTF-8 file can
+    hold it), or a number that is not finite (NaN, Infinity, -Infinity, or a literal too large such as 1e400, which
+    Python's JSON reader accepts and JSON does not have). Walked without recursion, in document order."""
+    stack = [("", value)]
+    while stack:
+        where, v = stack.pop()
+        if isinstance(v, str):
+            m = _SURROGATE.search(v)
+            if m:
+                return where or "the top level", _surrogate(m.group(0))
+        elif isinstance(v, float) and not math.isfinite(v):
+            return where or "the top level", (f"a number that is not finite ({'NaN' if v != v else 'Infinity' if v > 0 else '-Infinity'}), "
+                                               "which JSON does not have")
+        elif isinstance(v, dict):
+            for k in v:
+                m = _SURROGATE.search(k) if isinstance(k, str) else None
+                if m:
+                    return "the key " + _key_path(where, k), _surrogate(m.group(0))
+            stack.extend((_key_path(where, k), x) for k, x in reversed(list(v.items())))
+        elif isinstance(v, list):
+            stack.extend((f"{where}[{i}]", x) for i, x in reversed(list(enumerate(v))))
+    return None
+
+
+def _surrogate(ch):
+    return f"an unpaired surrogate (\\u{ord(ch):04x}), which is not valid Unicode"
 
 
 def _retry_windows(fn, *args, budget=2.0):
@@ -836,6 +880,9 @@ def read_state(root, prepare=None, owned=()):
                              "(nested too deeply)", fix) from None
         if not isinstance(raw, dict):
             raise _bad_state(f"must be a JSON object (got {_json_kind(raw)})", fix)
+        bad = unusable_json(raw)  # a value no write could keep: refused, as a plan holding one is
+        if bad:
+            raise _bad_state(f"is damaged: {bad[0]} holds {bad[1]}", fix)
         why = _damage(raw, owned)
         if why:
             raise _bad_state(f"is damaged: {why}", fix)

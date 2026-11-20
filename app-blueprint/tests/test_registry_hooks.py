@@ -1740,12 +1740,14 @@ class MapRoundOneTest(CliTestBase):
     member cannot blank the page (M4), assets are escaped case-insensitively (N1), a template without a placeholder is
     a bug (N11), and render.py holds no literal line separators (N10)."""
 
-    def render_text(self, text, exts=None):
+    def render_text(self, text, exts=None, mutate=None):
         from bp.views import render
         from bp.views.context import build_context
         (self.root / ".blueprint" / "blueprint.json").write_text(text, encoding="utf-8")
         with extension(exts or {}):
             loaded = quiet(bplan.load_plan, self.root)[0]
+            if mutate:
+                mutate(loaded)
             state = bplan.load_state(self.root)
             ctx = build_context(self.root, loaded, state)
             with mock.patch.object(render, "tab_scripts", lambda: []):
@@ -1763,12 +1765,14 @@ class MapRoundOneTest(CliTestBase):
         for version in (1, 2):
             with self.subTest(version=version):
                 plan = v1_plan() if version == 1 else v2_plan()
-                plan["app"]["extra"] = [float("nan"), {"deep": [[float("inf")]]}, float("-inf"), 1.5]
-                plan["app"]["name"] = "A\ud800B\udfffC"
-                plan["files"][0]["purpose"] = "x\udc00"
-                text = json.dumps(plan, indent=2)  # NaN, Infinity and \ud800 escapes, as a hand-edited plan can hold
-                self.assertIn("NaN", text)
-                html = self.render_text(text)
+
+                def mutate(loaded):
+                    """A plan file holding these is refused at load (core follow-up, item 1); script_json still keeps
+                    anything embedded strict, from a plan built in memory or a hook's data."""
+                    loaded["app"]["extra"] = [float("nan"), {"deep": [[float("inf")]]}, float("-inf"), 1.5]
+                    loaded["app"]["name"] = "A\ud800B\udfffC"
+                    loaded["files"][0]["purpose"] = "x\udc00"
+                html = self.render_text(json.dumps(plan, indent=2), mutate=mutate)
                 html.encode("utf-8")  # no lone surrogate reaches the bytes of map.html
                 data = strict_json(MapSafetyTest.payload(html))
                 self.assertEqual(data["app"]["extra"], [None, {"deep": [[None]]}, None, 1.5])
