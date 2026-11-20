@@ -337,8 +337,8 @@ class TheLock(IntegrityChecks, unittest.TestCase):
                                     env=S.tool_env(BLUEPRINT_LOCK_TIMEOUT="1"))
         self.assertEqual(code, 1, err)
         self.assertIn("error: another blueprint command is writing .blueprint/state.json", err)
-        self.assertIn("next: run the same command again:", err)
-        self.assertIn("mark src/f1.txt built --by o1", err)
+        self.assertIn("  next: run the same command again\n", err)
+        self.assertNotIn("--by o1", err, "the next step never echoes the caller's arguments")
         self.assertEqual(self.p.state(), before)
         code, out, err = self.p.run("status", "--json", env=S.tool_env(BLUEPRINT_LOCK_TIMEOUT="1"))
         self.assertEqual(code, 0, "readers never wait for the lock")
@@ -600,7 +600,8 @@ class TempNamesAndGitignore(unittest.TestCase):
         self.gitignore().write_bytes(b"# mine\r\nnotes/\r\nstate.lock")
         self.fresh_lock()
         self.assertEqual(self.p.run("claim", "src/f1.txt", "--by", "o1")[0], 0)
-        self.assertEqual(self.gitignore().read_bytes(), b"# mine\r\nnotes/\r\nstate.lock\n*.tmp\n")
+        self.assertEqual(self.gitignore().read_bytes(), b"# mine\r\nnotes/\r\nstate.lock\r\n*.tmp\r\n",
+                         "appended with the file's own line ending")
 
     def test_a_complete_gitignore_is_not_touched(self):
         self.gitignore().write_bytes(b"*.tmp\nfoo\nstate.lock\n")
@@ -632,6 +633,359 @@ class TempNamesAndGitignore(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertNotIn("state.lock", out)
         self.assertEqual(self.p.state().get("unplanned"), [])
+
+
+# ---------------------------------------------------------------- review round 1 of PR #14
+
+FUZZ_VALUES = {"null": None, "true": True, "num": 5, "str": "x", "list": [], "list1": [1], "obj1": {"a": 1}}
+FUZZ_KEYS = ("stateVersion", "files", "patterns", "unplanned", "ignoredTracked", "missingModify", "syncedAt", "head",
+             "data", "tasks", "generatedViews")
+FUZZ_FIELDS = ("state", "by", "at", "note", "verified")
+
+
+class DamagedState(unittest.TestCase):
+    """Review M1: a file record that is not an object is bad-state, never an incident, and no command writes the file
+    before failing; the sweep sets every top-level key, every file record and record field, and the pattern entries to
+    each wrong type, and every state-using command must end 0 or 1, and leave the file as it was when it fails."""
+
+    def setUp(self):
+        self.p = Project(n=3, pad=0)
+        self.addCleanup(self.p.close)
+        self.path = self.p.bp / "state.json"
+        (self.p.root / "dump.sql").write_text("CREATE TABLE snags (id int);\n", encoding="utf-8")
+        plan = json.loads((self.p.bp / "blueprint.json").read_text(encoding="utf-8"))
+        plan["stores"] = [{"id": "db", "kind": "postgres", "schema": ["src/*.sql"]}]
+        plan["patterns"] = [{"id": "pat", "glob": "src/p-*.txt", "module": "core", "phase": "P1", "purpose": "x",
+                             "infrastructure": True}]
+        (self.p.bp / "blueprint.json").write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
+        code, _, err = self.p.run("sync", "--quiet")
+        self.assertEqual(code, 0, err)
+        self.base = self.p.state()
+
+    def hook_post(self):
+        payload = json.dumps({"tool_input": {"file_path": str(self.p.root / "src" / "f1.txt")}, "cwd": str(self.p.root)})
+        r = subprocess.run([S.PY, str(self.p.tool), "hook", "post"], cwd=str(self.p.root), input=payload,
+                           capture_output=True, text=True, encoding="utf-8", env=self.p.env(), timeout=300)
+        return r.returncode, r.stdout, r.stderr
+
+    COMMANDS = (["status", "--json"], ["sync", "--quiet"], ["mark", "src/f1.txt", "built", "--by", "o1"],
+                ["render", "--force"], ["db-check", "--schema-dump", "dump.sql"], "hook post")
+
+    def run_cmd(self, args):
+        return self.hook_post() if args == "hook post" else self.p.run(*args)
+
+    def test_a_file_record_that_is_not_an_object(self):
+        self.path.write_text(json.dumps({"files": {"src/f1.txt": "built"}}) + "\n", encoding="utf-8")
+        before = self.path.read_bytes()
+        for args in self.COMMANDS + (["status"], ["claim", "src/f2.txt", "--by", "o2"], ["export", "json"],
+                                     ["render", "--check"], ["contracts"], ["verify", "--run", "--owner", "o1"]):
+            code, out, err = self.run_cmd(args)
+            self.assertEqual(code, 1, (args, err))
+            self.assertIn('.blueprint/state.json is damaged: files["src/f1.txt"] must be an object (got string)',
+                          err + out, args)
+            self.assertEqual(self.path.read_bytes(), before, f"{args}: nothing is written by a command that fails")
+
+    def cases(self):
+        for key in FUZZ_KEYS:
+            for name, value in FUZZ_VALUES.items():
+                yield f"{key}={name}", dict(self.base, **{key: value})
+        for name, value in FUZZ_VALUES.items():
+            s = json.loads(json.dumps(self.base))
+            s["files"]["src/f1.txt"] = value
+            yield f"files[p]={name}", s
+            for field in FUZZ_FIELDS:
+                s = json.loads(json.dumps(self.base))
+                s["files"].setdefault("src/f1.txt", {})[field] = value
+                yield f"files[p].{field}={name}", s
+            for where in ("entry", "instances"):
+                s = json.loads(json.dumps(self.base))
+                s["patterns"]["pat"] = value if where == "entry" else {"instances": value}
+                yield f"patterns[pat].{where}={name}", s
+
+    def test_sweep_never_crashes_and_never_writes_on_failure(self):
+        from concurrent.futures import ThreadPoolExecutor
+        cases = list(self.cases())
+
+        def one(case):
+            label, state = case
+            p = Project(n=3, pad=0)
+            try:
+                shutil.copy2(self.p.bp / "blueprint.json", p.bp / "blueprint.json")
+                shutil.copy2(self.p.root / "dump.sql", p.root / "dump.sql")
+                found = []
+                for args in self.COMMANDS:
+                    p.bp.joinpath("state.json").write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+                    before = p.bp.joinpath("state.json").read_bytes()
+                    code, out, err = (DamagedState.hook_post_for(p) if args == "hook post" else p.run(*args))
+                    if code not in (0, 1):
+                        found.append(f"{label} {args}: exit {code}: {err.strip()[-200:]}")
+                    elif code == 1 and "bad-state" in out + err and p.bp.joinpath("state.json").read_bytes() != before:
+                        found.append(f"{label} {args}: failed with bad-state but wrote state.json")
+                    elif code == 1 and "error: .blueprint/state.json" in err and \
+                            p.bp.joinpath("state.json").read_bytes() != before:
+                        found.append(f"{label} {args}: failed on the state but wrote it")
+                return found
+            finally:
+                p.close()
+
+        with ThreadPoolExecutor(int(os.environ.get("BP_FUZZ_WORKERS", "6"))) as ex:
+            problems = [x for found in ex.map(one, cases) for x in found]
+        self.assertEqual(problems, [], f"{len(cases)} cases")
+
+    @staticmethod
+    def hook_post_for(p):
+        payload = json.dumps({"tool_input": {"file_path": str(p.root / "src" / "f1.txt")}, "cwd": str(p.root)})
+        r = subprocess.run([S.PY, str(p.tool), "hook", "post"], cwd=str(p.root), input=payload,
+                           capture_output=True, text=True, encoding="utf-8", env=p.env(), timeout=300)
+        return r.returncode, r.stdout, r.stderr
+
+    def test_a_bom_is_bad_state_as_in_1_3_0(self):
+        """frozen 1.3.0 crashed on a UTF-8 BOM (json.load does not accept one), so it is bad-state, not read."""
+        self.path.write_bytes(b"\xef\xbb\xbf" + self.path.read_bytes())
+        code, out, err = self.p.run("status")
+        self.assertEqual(code, 1, err)
+        self.assertIn("error: .blueprint/state.json is not valid JSON", err)
+
+
+class VerifyAndReset(unittest.TestCase):
+    """Review M2: a reset (mark planned) or a claim by another owner made while verify --run runs is not undone."""
+
+    def setUp(self):
+        self.p = Project(n=3, pad=0)
+        self.addCleanup(self.p.close)
+        for i in range(3):
+            self.assertEqual(self.p.run("mark", f"src/f{i}.txt", "built", "--by", f"o{i}")[0], 0)
+
+    def check_runs(self, *args):
+        """Set f0's verify command to run this tool with args, then exit 0."""
+        plan = json.loads((self.p.bp / "blueprint.json").read_text(encoding="utf-8"))
+        plan["files"][0]["verify"] = shell_cmd(S.PY, str(self.p.tool), *args, "--root", str(self.p.root))
+        (self.p.bp / "blueprint.json").write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
+
+    def test_mark_planned_during_the_check_wins(self):
+        self.check_runs("mark", "src/f0.txt", "planned", "--by", "o0")
+        code, out, err = self.p.run("verify", "--run", "--owner", "o0")
+        self.assertEqual(code, 1, "the file was not verified, so verify does not report success")
+        self.assertIn("src/f0.txt: not verified", out + err)
+        rec = self.p.state()["files"]["src/f0.txt"]
+        self.assertEqual(rec["state"], "planned")
+        self.assertNotIn("verified", rec, "the reset dropped the proof; verify must not put it back")
+        rows = {r["path"]: r["status"] for r in json.loads(self.p.run("status", "--json")[1])["rows"]}
+        self.assertNotEqual(rows["src/f0.txt"], "verified")
+
+    def test_a_claim_by_another_owner_during_the_check_wins(self):
+        self.check_runs("claim", "src/f0.txt", "--by", "o1", "--force")
+        code, out, err = self.p.run("verify", "--run", "--owner", "o0")
+        self.assertEqual(code, 1)
+        self.assertIn("src/f0.txt: not verified", out + err)
+        rec = self.p.state()["files"]["src/f0.txt"]
+        self.assertEqual((rec["state"], rec["by"]), ("claimed", "o1"))
+        self.assertNotIn("verified", rec)
+
+    def test_a_change_to_another_file_survives_and_the_proof_is_saved(self):
+        self.check_runs("mark", "src/f1.txt", "blocked", "--by", "o1", "--note", "during the check")
+        code, out, err = self.p.run("verify", "--run", "--owner", "o0")
+        self.assertEqual(code, 0, out + err)
+        files = self.p.state()["files"]
+        self.assertTrue(files["src/f0.txt"]["verified"]["ok"])
+        self.assertEqual((files["src/f1.txt"]["state"], files["src/f1.txt"]["note"]), ("blocked", "during the check"))
+
+
+class LockFileHazards(IntegrityChecks, unittest.TestCase):
+    """Review M3, M4 and the nits about the lock file, temp files and the timeout."""
+
+    def setUp(self):
+        self.p = Project(n=4, pad=0)
+        self.addCleanup(self.p.close)
+
+    def hold(self, seconds):
+        return TheLock.hold(self, seconds)
+
+    @unittest.skipIf(os.name == "nt", "Windows refuses to delete a file another process has open")
+    def test_deleting_the_lock_file_while_held_does_not_let_a_second_writer_in(self):
+        self.hold(120)
+        (self.p.bp / "state.lock").unlink()
+        before = self.p.state()
+        code, out, err = self.p.run("mark", "src/f1.txt", "built", "--by", "o1",
+                                    env=S.tool_env(BLUEPRINT_LOCK_TIMEOUT="1"))
+        self.assertEqual(code, 1, "a second writer entered while the first holds the lock")
+        self.assertIn("another blueprint command is writing", err)
+        self.assertEqual(self.p.state(), before)
+
+    @unittest.skipUnless(os.name == "nt", "Windows only: a reader's open handle blocks os.replace there")
+    def test_a_short_open_handle_is_waited_for(self):
+        import threading
+        state = core.read_state(self.p.root)
+        f = open(self.p.bp / "state.json", "rb")
+        timer = threading.Timer(0.6, f.close)
+        timer.start()
+        t0 = time.monotonic()
+        try:
+            with core.state_lock(self.p.root):
+                core.write_state(self.p.root, state)
+        finally:
+            timer.join()
+            f.close()
+        self.assertGreater(time.monotonic() - t0, 0.4, "the write must have waited for the handle")
+
+    @unittest.skipUnless(os.name == "nt", "Windows only: a reader's open handle blocks os.replace there")
+    def test_a_long_open_handle_is_state_busy(self):
+        state = core.read_state(self.p.root)
+        with open(self.p.bp / "state.json", "rb"):
+            with core.state_lock(self.p.root):
+                with self.assertRaises(core.BlueprintError) as cm:
+                    core.write_state(self.p.root, state)
+        e = cm.exception
+        self.assertEqual((e.error, e.code), ("state-busy", 1))
+        self.assertIn("open in another program", e.message)
+        self.assertEqual(e.next, "close it, then run the same command again")
+        self.assertEqual([n for n in os.listdir(self.p.bp) if n.endswith(".tmp")], [])
+
+    def test_lock_timeout_values(self):
+        cases = {"2": 2.0, "0": 0.0, "1e9": 600.0, "600": 600.0, "abc": 15.0, "": 15.0, "inf": 15.0, "nan": 15.0,
+                 "-1": 15.0, "1e309": 15.0}
+        for raw, want in cases.items():
+            err = io.StringIO()
+            with mock.patch.dict(os.environ, {core.LOCK_TIMEOUT_ENV: raw}), redirect_stderr(err):
+                self.assertEqual(core._lock_timeout(), want, raw)
+            lines = [line for line in err.getvalue().splitlines() if line]
+            self.assertEqual(len(lines), 0 if raw in ("2", "0", "1e9", "600") else 1, (raw, lines))
+
+    def test_stale_temp_files_are_removed_and_nothing_else(self):
+        old = time.time() - 2 * 3600
+        names = {"state.json.123-0a1b2c3d.tmp": True, "state.json.456-deadbeef.tmp": False,
+                 "state.json.tmp": False, "other.json.1-0a1b2c3d.tmp": False, "notes.tmp": False}
+        for name, is_old in names.items():
+            path = self.p.bp / name
+            path.write_text("x", encoding="utf-8")
+            if is_old or name in ("state.json.tmp", "other.json.1-0a1b2c3d.tmp", "notes.tmp"):
+                os.utime(path, (old, old))
+        os.utime(self.p.bp / "state.json.456-deadbeef.tmp", None)  # fresh: a writer may still be using it
+        self.assertEqual(self.p.run("mark", "src/f1.txt", "built", "--by", "o1")[0], 0)
+        left = sorted(n for n in os.listdir(self.p.bp) if n.endswith(".tmp"))
+        self.assertEqual(left, sorted(n for n in names if n != "state.json.123-0a1b2c3d.tmp"))
+
+    def test_a_lock_file_that_is_a_link_is_bad_state(self):
+        lock = self.p.bp / "state.lock"
+        lock.unlink()
+        target = self.p.root / "outside.lock"
+        try:
+            os.symlink(target, lock)
+        except (OSError, NotImplementedError):
+            self.skipTest("this account cannot create symbolic links")
+        code, out, err = self.p.run("mark", "src/f1.txt", "built", "--by", "o1")
+        self.assertEqual(code, 1, err)
+        self.assertIn(".blueprint/state.lock", err)
+        self.assertIn("regular file", err)
+        self.assertFalse(target.exists(), "a link's target is never created")
+
+    def test_gitignore_negations_and_other_forms_are_left_alone(self):
+        gi = self.p.bp / ".gitignore"
+        gi.write_bytes(b"!state.lock\n/*.tmp\n")
+        (self.p.bp / "state.lock").unlink()
+        self.assertEqual(self.p.run("claim", "src/f1.txt", "--by", "o1")[0], 0)
+        self.assertEqual(gi.read_bytes(), b"!state.lock\n/*.tmp\n")
+        gi.write_bytes(b"**/state.lock")
+        (self.p.bp / "state.lock").unlink()
+        self.assertEqual(self.p.run("claim", "src/f2.txt", "--by", "o2")[0], 0)
+        self.assertEqual(gi.read_bytes(), b"**/state.lock\n*.tmp\n", "a final newline only because a line was added")
+
+    def test_32_parallel_log_writers_give_32_intact_lines(self):
+        before = self.p.log_lines()
+        notes = {f"n{i}-" + ("x" * 30000) for i in range(32)}
+        res = finish([self.p.start(["feedback", "--kind", "guidance", "--note", n, "--by", "o1"]) for n in notes], self)
+        self.assert_all_ok(res, "feedback")
+        new = self.p.log_lines()[len(before):]
+        got = [json.loads(line)["note"] for line in new]  # a torn or merged line fails here
+        self.assertEqual(sorted(n.split("-")[0] for n in got), sorted(n.split("-")[0] for n in notes))
+
+
+class ScopeAndApi(unittest.TestCase):
+    """Review M5: the render step never changes a command's own exit code; sync logs in its state transaction; the
+    frozen API's load_state and save_state go through the checked read and the lock."""
+
+    def setUp(self):
+        self.p = Project(n=3, pad=0)
+        self.addCleanup(self.p.close)
+
+    def main(self, *argv):
+        from bp import cli
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err), mock.patch.dict(os.environ, S.tool_env()):
+            try:
+                cli.main(list(argv) + ["--root", str(self.p.root)])
+                code = 0
+            except SystemExit as e:
+                code = e.code
+        return code, out.getvalue(), err.getvalue()
+
+    def busy(self):
+        return core.BlueprintError("state-busy", "another blueprint command is writing .blueprint/state.json",
+                                   next="run the same command again")
+
+    def test_sync_and_verify_keep_their_exit_code_when_the_render_step_fails(self):
+        from bp.commands import progress
+        with mock.patch.object(progress, "render_all", side_effect=self.busy()):
+            code, out, err = self.main("sync", "--quiet")
+            self.assertEqual(code, 0, err)
+            self.assertIn("views not refreshed", err)
+            self.assertEqual(self.main("mark", "src/f1.txt", "built", "--by", "o1")[0], 0)
+            code, out, err = self.main("verify", "--run", "--owner", "o1")
+            self.assertEqual(code, 0, err)
+            self.assertIn("views not refreshed", err)
+        self.assertTrue(self.p.state()["files"]["src/f1.txt"]["verified"]["ok"], "the proof is saved")
+
+    def test_hook_post_keeps_its_exit_code_when_the_render_step_fails(self):
+        from bp.commands import progress
+        payload = json.dumps({"tool_input": {"file_path": str(self.p.root / "src" / "f1.txt")}, "cwd": str(self.p.root)})
+        with mock.patch.object(progress, "render_all", side_effect=self.busy()), \
+                mock.patch.object(sys, "stdin", io.StringIO(payload)):
+            code, out, err = self.main("hook", "post")
+        self.assertEqual(code, 0, err)
+
+    def test_sync_logs_in_the_same_lock_transaction(self):
+        real, taken = core.state_lock, []
+
+        def counting(root):
+            taken.append(root)
+            return real(root)
+
+        with mock.patch.object(core, "state_lock", counting):
+            code, out, err = self.main("sync", "--quiet", "--no-render")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(taken), 1, "one lock for the state write and the log line")
+        self.assertEqual(json.loads(self.p.log_lines()[-1])["event"], "sync")
+
+    def test_plan_load_state_is_checked(self):
+        from bp import plan as bplan
+        (self.p.bp / "state.json").write_text("[]", encoding="utf-8")
+        with self.assertRaises(core.BlueprintError) as cm:
+            bplan.load_state(self.p.root)
+        self.assertEqual(cm.exception.error, "bad-state")
+
+    def test_plan_save_state_takes_the_lock(self):
+        from bp import plan as bplan
+        state = bplan.load_state(self.p.root)
+        state["files"]["src/f1.txt"] = {"state": "built", "by": "o1", "at": "x"}
+        with core.state_lock(self.p.root):
+            bplan.save_state(self.p.root, state)  # held by this process: writes without taking it again
+        holder = TheLock.hold(self, 120)
+        with mock.patch.dict(os.environ, {core.LOCK_TIMEOUT_ENV: "0.5"}):
+            with self.assertRaises(core.BlueprintError) as cm:
+                bplan.save_state(self.p.root, state)
+        self.assertEqual(cm.exception.error, "state-busy")
+        holder.kill()
+
+    def test_no_module_calls_save_state(self):
+        import re
+        callers = []
+        for path in sorted(S.PACKAGE.rglob("*.py")):
+            rel = path.relative_to(S.PACKAGE).as_posix()
+            for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if re.search(r"\bsave_state\b", line) and not (rel == "plan.py" and line.startswith("def save_state"))\
+                        and rel != "api.py":
+                    callers.append(f"{rel}:{n}: {line.strip()}")
+        self.assertEqual(callers, [], "change state with core.update_state / status.change_state")
 
 
 if __name__ == "__main__":
