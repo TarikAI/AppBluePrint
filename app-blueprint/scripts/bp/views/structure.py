@@ -66,6 +66,17 @@ def file_tags(ctx):
     return out
 
 
+_LINE_BREAKS = re.compile("[\x0d\x0a\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]+")
+
+
+def one_line(value):
+    """Plan or state text as status prints it: each run of line-break characters (CR, LF, VT, FF, FS, GS, RS, NEL,
+    U+2028, U+2029) becomes one space, and every other character, tabs and repeated spaces included, is printed as
+    1.3.0 printed it (review of #16, M1). An invalid plan can hold a multi-line id, name or path; status never lets
+    one break a line of its own output."""
+    return _LINE_BREAKS.sub(" ", str(value))
+
+
 def md_cell(s):
     return str(s if s is not None else "").replace("|", "\\|").replace("\n", " ")
 

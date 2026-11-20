@@ -1101,5 +1101,53 @@ class Round2Test(MigrateCase):
         self.assertTrue(next_().endswith("then run: python .blueprint/bin/blueprint.py migrate"))
 
 
+class StateLockTest(MigrateCase):
+    """state.json is read again and replaced under the state lock (core.state_lock), through a temp name unique to the
+    process (state.json.<pid>-<hex>.tmp, as core.write_json), so a command running meanwhile loses nothing."""
+
+    def run_in_process(self):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                cmd.cmd_migrate(Namespace(root=str(self.root), dry_run=False, force=True, json=True))
+                return 0, err.getvalue()
+            except SystemExit as e:
+                return e.code, err.getvalue()
+
+    def test_the_state_is_written_under_the_lock_with_a_unique_temp_name(self):
+        seen = []
+        real = os.replace
+
+        def spy(src, dst, *a, **k):
+            if Path(dst).name == "state.json":
+                seen.append((Path(src).name, core._holding(self.root)))
+            return real(src, dst, *a, **k)
+
+        with mock.patch.object(cmd.os, "replace", spy):
+            code, err = self.run_in_process()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(seen), 1, seen)
+        name, held = seen[0]
+        self.assertTrue(held, "state.json is replaced while the state lock is held")
+        self.assertRegex(name, r"^state\.json\.\d+-[0-9a-f]{8}\.tmp$")
+        self.assertEqual(self.state()["stateVersion"], 2)
+
+    def test_a_claim_made_while_migrate_reads_the_plan_is_kept(self):
+        """The state is read again under the lock: a record written after migrate's first read survives."""
+        real = cmd._check_writable
+
+        def check_then_claim(root, targets):
+            s = json.loads(self.state_path.read_text(encoding="utf-8"))
+            s["files"]["apps/web/src/api.ts"] = {"state": "claimed", "by": "frontend-dev", "at": "x"}
+            self.state_path.write_text(json.dumps(s, indent=2) + "\n", encoding="utf-8")  # another writer, meanwhile
+            return real(root, targets)
+
+        with mock.patch.object(cmd, "_check_writable", check_then_claim):
+            code, err = self.run_in_process()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.state()["files"]["apps/web/src/api.ts"]["state"], "claimed")
+        self.assertEqual(self.state()["stateVersion"], 2)
+
+
 if __name__ == "__main__":
     unittest.main()

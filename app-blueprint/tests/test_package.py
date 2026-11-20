@@ -102,7 +102,11 @@ class NamesAndVersionTest(unittest.TestCase):
         package = VERSION_LINE.search((S.PACKAGE / "version.py").read_text(encoding="utf-8")).group(1)
         self.assertEqual(launcher, package)
         self.assertEqual(bp.TOOL_VERSION, package)
-        self.assertTrue(package.startswith("1.9."), package)
+        # not pinned to a release line (the orchestrator raises it, 2.0.0 included): any version that reads schema 2
+        def nums(v):
+            return tuple(int(x) for x in v.split(".")[:3])
+        from bp import version
+        self.assertGreaterEqual(nums(package), nums(version.MIN_SCHEMA2_TOOL))
 
     def test_import_order(self):
         """A module imports only modules above it (1.2); commands import domain modules inside handlers only."""
@@ -646,14 +650,38 @@ class ManifestTest(CopyTestBase):
         """registry: absent from the skill = not built (optional); listed in the copy's MANIFEST and absent = an
         incomplete copy, even if the start-up check were bypassed."""
         from bp import install, registry
-        self.assertIsNone(registry.load("records"))  # the skill folder has no MANIFEST: not built
-        self.assertFalse(registry.exists("records"))
-        with mock.patch.object(install, "listed_missing", lambda name, home=None: name == "records"):
-            with self.assertRaisesRegex(ImportError, "listed in this copy's MANIFEST"):
-                registry.load("records")
-            with self.assertRaisesRegex(ImportError, "listed in this copy's MANIFEST"):
-                registry.exists("records")
-            self.assertIsNone(registry.load("roadmap"))
+        from test_validate import extension  # hermetic: holds whichever later modules the real skill has (W0-A2)
+        with extension({}):
+            self.assertIsNone(registry.load("records"))  # the skill folder has no MANIFEST: not built
+            self.assertFalse(registry.exists("records"))
+            with mock.patch.object(install, "listed_missing", lambda name, home=None: name == "records"):
+                with self.assertRaisesRegex(ImportError, "listed in this copy's MANIFEST"):
+                    registry.load("records")
+                with self.assertRaisesRegex(ImportError, "listed in this copy's MANIFEST"):
+                    registry.exists("records")
+                self.assertIsNone(registry.load("roadmap"))
+
+    def test_the_manifest_lists_a_later_module(self):  # mutation: MANIFEST leaves out a later module
+        from test_validate import hermetic_skill
+        launcher = hermetic_skill(self.base / "skill manifest")
+        (launcher.parent / "bp" / "records.py").write_text("X = 1\n", encoding="utf-8")
+        (launcher.parent / "bp" / "views" / "notes_md.py").write_text("X = 1\n", encoding="utf-8")
+        r = S.run_script(launcher, ["init", "--name", "M", "--root", self.root], self.elsewhere, env=self.env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        files = self.manifest()[1]
+        on_disk = sorted("bp/" + p.relative_to(launcher.parent / "bp").as_posix()
+                         for p in (launcher.parent / "bp").rglob("*.py") if "__pycache__" not in p.parts)
+        self.assertEqual([f for f in files if f.startswith("bp/")], on_disk)
+        self.assertIn("bp/records.py", files)
+        self.assertIn("bp/views/notes_md.py", files)
+
+    def test_listed_missing_reads_the_copy(self):  # mutation: listed_missing forced False (no mock of it)
+        from bp import install
+        self.init_package_copy()
+        install.write_manifest(self.bin, self.manifest()[1] + ["bp/records.py"])
+        install._REQUIRED.pop(self.bin, None)
+        self.assertTrue(install.listed_missing("records", home=self.bin))
+        self.assertFalse(install.listed_missing("zz_never_a_module", home=self.bin))  # not listed: may be absent
 
     def test_required_modules_rule(self):
         from bp import install

@@ -8,7 +8,8 @@ import json
 import sys
 
 from bp.version import SCHEMA_VERSION
-from bp.core import BlueprintError, bp_dir, die, json_depth, norm, read_json, write_json
+from bp import core
+from bp.core import BlueprintError, bp_dir, die, json_depth, norm, read_json
 from bp.globs import glob_match
 from bp.migrate import upgrade_plan, upgrade_state
 
@@ -337,13 +338,24 @@ def _load_checked(raw):
 
 
 def load_state(root):
-    """state.json at stateVersion 2 (a 1.x state is upgraded in memory; the next save writes it, contract 3.2)."""
-    return upgrade_state(read_json(bp_dir(root) / "state.json", {"files": {}, "patterns": {}, "unplanned": [],
-                                                                  "syncedAt": None, "head": None}))
+    """state.json at stateVersion 2 (a 1.x state is upgraded in memory; the next save writes it, contract 3.2),
+    through core.read_state: a state.json that cannot be used is bad-state, never a crash."""
+    return core.read_state(root, upgrade_state)
 
 
 def save_state(root, state):
-    write_json(bp_dir(root) / "state.json", state)
+    """The 1.x name, kept for 1.x callers: writes state as given, under the state lock (taken here unless this process
+    holds it). Do not use it in modules: it writes what the caller read, so another command's change made meanwhile
+    is lost. Change state with core.update_state (status.change_state), which re-reads it under the lock. Called from
+    inside an update_state change it is a RuntimeError: that write would be overwritten by update_state's own."""
+    if core.in_change(root):
+        raise RuntimeError("plan.save_state was called inside core.update_state's change: a module returns its change "
+                           "from the callback (it edits the state it is given) instead of writing state behind it")
+    if core._holding(root):
+        core.write_state(root, state)
+        return
+    with core.state_lock(root):
+        core.write_state(root, state)
 
 
 def owner_of(plan, path):

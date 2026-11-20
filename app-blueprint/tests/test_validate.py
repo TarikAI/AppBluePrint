@@ -3,15 +3,19 @@ codes (1.4, 7.4), BlueprintError and the output envelope (7.1, 7.3).
 
 Run: python -m unittest discover -s app-blueprint/tests
 """
+import atexit
 import contextlib
 import copy
 import hashlib
+import importlib
 import io
 import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
+import textwrap
 import time
 import unittest
 from pathlib import Path
@@ -19,9 +23,142 @@ from unittest import mock
 
 import support as S
 
-from bp import core, migrate, plan as bplan, version
+import bp
+import bp.cli  # noqa: F401 - its start-up check runs on the real tree, before any hermetic package
+import bp.commands
+import bp.views
+from bp import core, migrate, plan as bplan, registry, version
 
 frozen = S.load_frozen("blueprint_frozen_for_validate")
+
+# The W0 foundations: the modules every build has. Everything else under bp/ (the wave 1 to 3 domain, view and command
+# modules, signals, study/*) belongs to a later workstream and may or may not be present in the tree under test.
+# A new core module (one every build has, written by a W0 workstream) must be added here, or the hermetic package and
+# skill copy would hide it as a later module (review of #15, N3); test_hermetic_skill_has_only_the_core then fails
+# loudly. In process, "not built" is simulated with sys.modules[name] = None; the real "file absent" path is covered by
+# the hermetic skill copy that the subprocess tests run (N4).
+CORE_MODULES = frozenset("bp." + m for m in (
+    "version", "core", "globs", "learn", "migrate", "plan", "rules", "data", "status", "verify", "registry", "validate",
+    "views", "views.context", "views.structure", "views.roster", "views.render", "export", "install", "api", "cli",
+    "commands", "commands.plan", "commands.progress", "commands.data", "commands.learn")) | {"bp"}
+
+
+def later_modules():
+    """Every non-core module name the tests must control: those the registry names, and those present on disk."""
+    from bp import install
+    named = {"bp." + n for n in registry.DOMAIN + registry.VIEWS} | {"bp." + m for m in registry.COMMAND_TABLE.values()}
+    named |= {"bp.signals", "bp.evidence", "bp.study"}
+    return sorted((named | set(install.package_modules())) - CORE_MODULES)
+
+
+@contextlib.contextmanager
+def extension(files, hermetic=True):
+    """A hermetic package for the duration: every later workstream's module is hidden (sys.modules[name] = None, so it
+    reads as not built), except the stand-ins given as "rel/path.py": source, which are written to a temp folder put
+    FIRST on the package path, so a stand-in shadows a real module of the same name. Everything is restored after,
+    so no stand-in or hidden module leaks into another test (test_extension_is_hermetic_and_restored). With
+    hermetic=False (tests about the real tree, like test_plan_fuzz_v2) nothing is hidden and the stand-ins go LAST on
+    the package path, so a real module always wins over a stand-in."""
+    tmp = Path(tempfile.mkdtemp(prefix="bp-ext-"))
+    names, added = set(), []
+    hidden = later_modules() if hermetic else []  # not hermetic: real modules win, stand-ins only fill the gaps
+    for rel in files:
+        names.add("bp." + ".".join(Path(rel).with_suffix("").parts))
+    touched = set(hidden) | names
+    saved = {n: sys.modules[n] for n in list(sys.modules) if n in touched or n.startswith("bp.study.")}
+    # the attribute the import system sets on the parent package (bp.features, bp.views.x, ...): a from-import reads
+    # it before sys.modules, so it is saved, removed for the block and put back after (review of #15, M1)
+    attrs = {}
+    for n in touched:
+        parent, _, leaf = n.rpartition(".")
+        pkg = sys.modules.get(parent)
+        if pkg is not None:
+            attrs[n] = (pkg, leaf, pkg.__dict__.get(leaf, _MISSING))
+    try:
+        for rel, src in files.items():
+            p = tmp / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(textwrap.dedent(src), encoding="utf-8")
+        for n, (pkg, leaf, _) in attrs.items():
+            if hermetic or n in names and n not in sys.modules:
+                pkg.__dict__.pop(leaf, None)
+        for n in hidden:
+            sys.modules.pop(n, None)
+            if n not in names:
+                sys.modules[n] = None  # not built in this hermetic package
+        for n in names:
+            if hermetic or n not in sys.modules:
+                sys.modules.pop(n, None)
+        for pkg, folder in ((bp, tmp), (bp.views, tmp / "views"), (bp.commands, tmp / "commands")):
+            if folder.is_dir():
+                pkg.__path__.insert(0 if hermetic else len(pkg.__path__), str(folder))
+                added.append((pkg, str(folder)))
+        importlib.invalidate_caches()
+        yield tmp
+    finally:
+        for pkg, folder in added:
+            pkg.__path__.remove(folder)
+        for n in touched:
+            sys.modules.pop(n, None)
+        for n in [k for k in sys.modules if k.startswith("bp.study.") and k not in saved]:
+            sys.modules.pop(n, None)
+        sys.modules.update(saved)
+        for n, (pkg, leaf, value) in attrs.items():
+            if value is _MISSING:
+                pkg.__dict__.pop(leaf, None)
+            else:
+                pkg.__dict__[leaf] = value
+        importlib.invalidate_caches()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+_MISSING = object()
+
+
+def hermetic_skill(dest):
+    """A copy of the skill (scripts and assets) holding only the core: every later workstream's module file and tab
+    script is removed. Subprocess tests that assert "not built" or empty results run the launcher from here, so they
+    hold whatever modules the real skill has."""
+    shutil.copytree(S.SCRIPTS, dest / "scripts", ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copytree(S.SKILL / "assets", dest / "assets")
+    pkg = dest / "scripts" / "bp"
+    for p in sorted(pkg.rglob("*.py"), reverse=True):
+        rel = p.relative_to(pkg).with_suffix("").parts
+        name = ".".join(("bp",) + (rel[:-1] if rel[-1] == "__init__" else rel))
+        if name not in CORE_MODULES:
+            p.unlink()
+    for folder in sorted((d for d in pkg.rglob("*") if d.is_dir() and d.name != "__pycache__"), reverse=True):
+        if not any(folder.rglob("*.py")):
+            shutil.rmtree(folder, ignore_errors=True)
+    for tab in (dest / "assets").glob("tab-*.js"):
+        tab.unlink()
+    return dest / "scripts" / "blueprint.py"
+
+
+
+class Hermetic:
+    """Mixin: every test runs in a hermetic package (extension({})) and, through the CLI, from a hermetic copy of the
+    skill, so what it asserts does not depend on which later workstreams' modules exist. A test that is about the
+    real tree says so and does not use this mixin."""
+
+    def setUp(self):
+        super().setUp()
+        stack = contextlib.ExitStack()  # closes cleanly even when a test is interrupted (review of #15, N1)
+        stack.enter_context(extension({}))
+        self.addCleanup(stack.close)
+
+
+_HERMETIC = {}
+
+
+def hermetic_launcher():
+    """The launcher of a hermetic skill copy, made once per test process."""
+    if "launcher" not in _HERMETIC:
+        base = Path(tempfile.mkdtemp(prefix="bp-hermetic-skill-"))
+        atexit.register(shutil.rmtree, base, True)  # removed when the test process ends (review of #15, N1)
+        _HERMETIC["launcher"] = hermetic_skill(base / "skill")
+    return _HERMETIC["launcher"]
+
 
 # Contract 2.10, verbatim: the smallest plan that uses all four new sections. Other 2.0 tests import it from here.
 V2_EXAMPLE = r'''
@@ -104,7 +241,14 @@ def quiet(fn, *args, **kw):
 
 
 class TempRoot(unittest.TestCase):
+    """A temp project for CLI tests against the real tree (other workstreams' tests build on it). The W0-A2 tests use
+    HermeticRoot below."""
+
+    def launcher(self):
+        return S.LAUNCHER
+
     def setUp(self):
+        super().setUp()
         self.root = Path(tempfile.mkdtemp(prefix="bp v2 "))
         (self.root / ".blueprint").mkdir()
 
@@ -126,7 +270,7 @@ class TempRoot(unittest.TestCase):
     def cli(self, *args, stdin=None, **env):
         """Run the launcher on this project; --root is added to every command but hook (which reads cwd)."""
         argv = list(args) if args[0] == "hook" else list(args) + ["--root", self.root]
-        return S.run_script(S.LAUNCHER, argv, self.root, stdin=stdin, env=S.tool_env(**env))
+        return S.run_script(self.launcher(), argv, self.root, stdin=stdin, env=S.tool_env(**env))
 
     def load_exit(self, plan):
         """load_plan on plan: (exit code or None, stderr)."""
@@ -141,6 +285,15 @@ class TempRoot(unittest.TestCase):
         return None, err.getvalue()
 
 
+
+
+class HermeticRoot(Hermetic, TempRoot):
+    """TempRoot in a hermetic package and CLI (see Hermetic): what these tests assert holds whichever later modules
+    exist."""
+
+    def launcher(self):
+        return hermetic_launcher()
+
 # ---------------------------------------------------------------------------------------------------- versions
 
 class VersionTest(unittest.TestCase):
@@ -149,7 +302,10 @@ class VersionTest(unittest.TestCase):
         self.assertEqual(version.SUPPORTED_SCHEMAS, (1, 2))
         self.assertEqual(version.STATE_VERSION, 2)
         self.assertEqual(version.MIN_SCHEMA2_TOOL, "1.9.1")
-        self.assertEqual(version.TOOL_VERSION, "1.9.1")
+        # not pinned (the orchestrator raises it): any release that reads schema 2, compared on its numbers
+        def nums(v):
+            return tuple(int(x) for x in v.split(".")[:3])
+        self.assertGreaterEqual(nums(version.TOOL_VERSION), nums(version.MIN_SCHEMA2_TOOL))
 
     def test_skeleton_is_version_2(self):
         sk = bplan.SKELETON
@@ -264,7 +420,7 @@ class UpgradeStateTest(unittest.TestCase):
 
 # ---------------------------------------------------------------------------------------------------- load_plan
 
-class LoadPlanTest(TempRoot):
+class LoadPlanTest(HermeticRoot):
     def test_v1_file_is_upgraded_in_memory_only(self):
         self.write_plan(v1_plan())
         before = (self.root / ".blueprint" / "blueprint.json").read_bytes()
@@ -442,7 +598,7 @@ class LoadPlanTest(TempRoot):
 
 # ---------------------------------------------------------------------------------------------------- state
 
-class StateVersionTest(TempRoot):
+class StateVersionTest(HermeticRoot):
     def test_load_state_upgrades_and_the_next_save_writes_it(self):
         self.write_plan(v1_plan())
         (self.root / ".blueprint" / "state.json").write_text(json.dumps(UpgradeStateTest.V1), encoding="utf-8")
@@ -473,9 +629,9 @@ class InitTest(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.base, ignore_errors=True)
 
-    def init(self, root, script=S.LAUNCHER):
+    def init(self, root, script=None):
         root.mkdir(parents=True, exist_ok=True)
-        r = S.run_script(script, ["init", "--name", "New", "--root", root], self.base, env=self.env)
+        r = S.run_script(script or hermetic_launcher(), ["init", "--name", "New", "--root", root], self.base, env=self.env)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         return r
 
@@ -488,7 +644,7 @@ class InitTest(unittest.TestCase):
         self.assertEqual(keys[keys.index("ignore") + 1:], list(NEW))
         state = json.loads((root / ".blueprint" / "state.json").read_text(encoding="utf-8"))
         self.assertEqual((state["stateVersion"], state["tasks"]), (2, {}))
-        r = S.run_script(S.LAUNCHER, ["status", "--root", root], self.base, env=self.env)
+        r = S.run_script(hermetic_launcher(), ["status", "--root", root], self.base, env=self.env)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("Schema version", r.stdout)
 
@@ -505,25 +661,25 @@ class InitTest(unittest.TestCase):
         root = self.base / "old"
         self.init(root)
         (root / ".blueprint" / "blueprint.json").write_text(json.dumps(v1_plan()), encoding="utf-8")
-        r = S.run_script(S.LAUNCHER, ["init", "--refresh-tool", "--root", root], self.base, env=self.env)
+        r = S.run_script(hermetic_launcher(), ["init", "--refresh-tool", "--root", root], self.base, env=self.env)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("Your blueprint is schema version 1. It keeps working.", r.stdout)
-        self.assertEqual("migrate" in r.stdout, (S.PACKAGE / "commands" / "migrate.py").is_file())  # the hint appears once bp/commands/migrate.py exists (W0-B)
-        r = S.run_script(S.LAUNCHER, ["status", "--root", root], self.base, env=self.env)
+        self.assertNotIn("migrate", r.stdout)  # the core-only tree has no migrate command: no hint (test_migrate has the rest)
+        r = S.run_script(hermetic_launcher(), ["status", "--root", root], self.base, env=self.env)
         self.assertEqual(r.returncode, 0, r.stderr)
         last = r.stdout.rstrip().splitlines()[-1]
         self.assertTrue(last.startswith("Schema version 1"), last)
-        self.assertEqual("migrate" in last, (S.PACKAGE / "commands" / "migrate.py").is_file())
+        self.assertNotIn("migrate", last)
 
     def test_doctor_compares_the_copy_with_min_schema2_tool(self):
         root = self.base / "doc"
         self.init(root)
         (root / ".blueprint" / "bin" / "VERSION").write_text("1.9.0\n", encoding="utf-8")
-        r = S.run_script(S.LAUNCHER, ["doctor", "--root", root], self.base, env=self.env)
+        r = S.run_script(hermetic_launcher(), ["doctor", "--root", root], self.base, env=self.env)
         self.assertIn("blueprint.json schema: 2", r.stdout)
         self.assertIn(f"older than {version.MIN_SCHEMA2_TOOL} and cannot read schema version 2", r.stdout)
         (root / ".blueprint" / "bin" / "VERSION").write_text(version.TOOL_VERSION + "\n", encoding="utf-8")
-        r = S.run_script(S.LAUNCHER, ["doctor", "--strict", "--root", root], self.base, env=self.env)
+        r = S.run_script(hermetic_launcher(), ["doctor", "--strict", "--root", root], self.base, env=self.env)
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertNotIn("cannot read schema version 2", r.stdout)
 
@@ -654,7 +810,7 @@ class ProofDigestTest(unittest.TestCase):
         self.assertTrue(reads and all(0 < n <= CHUNK for n in reads), reads[:5])
 
 
-class ProofTest(TempRoot):
+class ProofTest(HermeticRoot):
     """status.Hasher, proof_inputs, proof_current (contract 4.5)."""
 
     def setUp(self):
@@ -742,7 +898,7 @@ OK_CMD = f'"{S.PY}" -c "pass"'
 FAIL_CMD = f'"{S.PY}" -c "import sys; sys.exit(3)"'
 
 
-class VerifyProofTest(TempRoot):
+class VerifyProofTest(HermeticRoot):
     """verify --run writes 2.0 proofs; an edited dependency makes its dependents stale; verify --stale (4.5, 4.7)."""
 
     def plan(self, cmd=OK_CMD):
@@ -852,7 +1008,7 @@ class VerifyProofTest(TempRoot):
 
 # ---------------------------------------------------------------------------------------------------- findings and codes
 
-class FindingsTest(TempRoot):
+class FindingsTest(HermeticRoot):
     def setUp(self):
         super().setUp()
         from bp import validate
@@ -883,7 +1039,7 @@ class FindingsTest(TempRoot):
                 first = found[0]
                 self.assertEqual((first["level"], first["code"], first["entry"]), ("warning", "schema-v1", "blueprint.json"))
                 self.assertTrue(first["message"].startswith("blueprint.json is schema version 1; it still works"))
-                self.assertEqual("migrate" in first["message"], (S.PACKAGE / "commands" / "migrate.py").is_file())  # only once bp/commands/migrate.py exists (1.5 row d)
+                self.assertEqual("migrate" in first["message"], registry.command_built("migrate"))  # 1.5 row d (hermetic: no)
                 self.assertEqual([f for f in found if f["level"] == "error"], [])
         self.assertEqual(self.v.validate_findings(v2_plan()), [])
         self.assertEqual(self.v.validate_findings(self.load(v2_plan())), [])
@@ -899,6 +1055,103 @@ class FindingsTest(TempRoot):
                 raw["version"] = bad
                 errs = [f for f in self.v.validate_findings(raw) if f["level"] == "error"]
                 self.assertEqual((errs[0]["message"], errs[0]["code"]), ("version must be 1 or 2", "version"))
+
+    def test_windows_alias_paths(self):
+        """file-path-alias errors (version 2 only): names Windows cannot store as written, or stores as another name.
+        Every message says what Windows really does (review of #16, N4)."""
+        cases = {
+            "apps/web/y.ts.": "Windows drops the trailing dots and spaces, so it names the same file as 'apps/web/y.ts'",
+            "apps/web/y2.ts ..": "Windows drops the trailing dots and spaces, so it names the same file as 'apps/web/y2.ts'",
+            "apps/web../a.ts": "the folder name 'web..' ends in a dot or a space, which Windows cannot store as written",
+            "apps/web /b.ts": "the folder name 'web ' ends in a dot or a space, which Windows cannot store as written",
+            "apps/z.ts::$DATA": "':' in 'z.ts::$DATA' starts a stream name on Windows",
+            "src:x/a.ts": "':' in 'src:x' starts a stream name on Windows",
+        }
+        plan = v2_plan()
+        for path in cases:
+            plan["files"].append(dict(plan["files"][1], path=path, dependsOn=[]))
+        found = [f for f in self.v.validate_findings(self.load(plan)) if f["code"] == "file-path-alias"]
+        self.assertEqual([(f["level"], f["entry"]) for f in found], [("error", f"file {p}") for p in cases])
+        for f, (path, why) in zip(found, cases.items()):
+            with self.subTest(path=path):
+                self.assertEqual(f["message"], f"file {path!r}: not a portable name on Windows: {why}")
+                self.assertEqual(self.v.classify_error(f["message"]), "file-path-alias")
+        self.assertEqual([f["code"] for f in self.v.validate_findings(self.load(v2_plan()))], [])
+        fine = v2_plan()  # names close to the rules that are fine
+        for path in ("src/console.ts", "src/com10.ts", "src/.env", "src/a.b.c", "src/com.ts", "src/nul1.ts"):
+            fine["files"].append(dict(fine["files"][1], path=path, dependsOn=[]))
+        self.assertEqual([f["message"] for f in self.v.validate_findings(self.load(fine))], [])
+        v1 = v1_plan()
+        v1["files"].append(dict(v1["files"][1], path="apps/web/y.ts.", dependsOn=[]))
+        v1["files"].append(dict(v1["files"][1], path="src/con.ts", dependsOn=[]))
+        self.assertNotIn("file-path-alias", [f["code"] for f in self.v.validate_findings(self.load(v1))],
+                         "a version 1 plan validates as in 1.3.0")
+
+    def test_device_names_and_case_twins_are_warnings(self):
+        """file-path-alias warnings (version 2 only, never blocking; review of #16, R2-2): device names and case-only
+        twins are legitimate on a Linux-only project, but such a plan cannot be checked out on Windows (or macOS)."""
+        plan = v2_plan()
+        first = plan["files"][1]["path"]
+        twin = first.upper()
+        for path in (twin, "src/con.ts", "lpt9/a.ts", "src/Aux"):
+            plan["files"].append(dict(plan["files"][1], path=path, dependsOn=[]))
+        plan["patterns"].append({"id": "pat-alias", "glob": "src/aux/*.ts", "module": plan["modules"][0]["id"],
+                                 "phase": plan["phases"][0]["id"], "purpose": "p", "instance": "one file", "verify": "true"})
+        found = [f for f in self.v.validate_findings(self.load(plan)) if f["code"] == "file-path-alias"]
+        dev = "the plan cannot be checked out on Windows as written: rename it"
+        self.assertEqual([(f["level"], f["entry"], f["message"]) for f in found], [
+            ("warning", f"file {twin}", f"file {twin!r}: differs from file {first!r} only by case; the plan cannot be "
+                                        "checked out on Windows or macOS as written: rename one of them"),
+            ("warning", "file src/con.ts", f"file 'src/con.ts': 'con.ts' is the Windows device name CON; {dev}"),
+            ("warning", "file lpt9/a.ts", f"file 'lpt9/a.ts': 'lpt9' is the Windows device name LPT9; {dev}"),
+            ("warning", "file src/Aux", f"file 'src/Aux': 'Aux' is the Windows device name AUX; {dev}"),
+            ("warning", "pattern pat-alias", f"pattern 'pat-alias': 'aux' is the Windows device name AUX; {dev}"),
+        ])
+        for f in found:
+            self.assertEqual(self.v.classify_error(f["message"]), "file-path-alias")
+
+    def test_case_twins_are_simple_upper_case_pairs(self):
+        """NTFS folds case one character at a time (simple upper case): A/a pair, but ß/ss and the Kelvin sign do not
+        (review of #16, R2-1)."""
+        plan = v2_plan()
+        for path in ("src/A.ts", "src/a.ts", "src/straße.ts", "src/strasse.ts", "src/K.ts", "src/K.ts"):
+            plan["files"].append(dict(plan["files"][1], path=path, dependsOn=[]))
+        found = [f for f in self.v.validate_findings(self.load(plan)) if f["code"] == "file-path-alias"]
+        self.assertEqual([f["entry"] for f in found], ["file src/a.ts"])
+
+    def test_bad_id_is_registered_once_in_the_core(self):
+        """Contract 7.4: bad-id is a cross-section code; the core registers it, domain modules only emit it."""
+        self.assertIn((r"(?s)^[a-z ]+ id '.*' has the wrong form", "bad-id"), self.v.CODES)
+        self.assertEqual(self.v.classify_error("task id 'T-a\nb' has the wrong form; use T-"), "bad-id")  # multi-line id
+        self.assertIn("bad-id", self.v.CODE_EXAMPLES)
+        for msg in ("milestone id 'beta' has the wrong form; use M then 1 to 3 digits",
+                    "feature id 'Inbox' has the wrong form; use F- then lowercase letters",
+                    "criterion id 'F-x/c1' has the wrong form; use C then 1 to 3 digits"):
+            self.assertEqual(self.v.classify_error(msg), "bad-id")
+        from test_registry_hooks import extension as ext
+        with ext({"roadmap.py": "CODES = [(r'^[a-z ]+ id .* has the wrong form', 'bad-id')]\n"}):
+            with self.assertRaisesRegex(RuntimeError, "bad-id.*roadmap.*validate|bad-id.*validate.*roadmap"):
+                self.v.codes()
+            with self.assertRaises(RuntimeError):
+                self.v.classify_error("task id 'x' has the wrong form")
+
+    def test_module_examples_are_checked_against_the_core_codes(self):
+        """Review of #15, M2: a module's CODE_EXAMPLES message that a core regex claims first is refused, naming both
+        owners (here a stand-in roadmap example that bad-id would silently take)."""
+        from test_registry_hooks import extension as ext
+        src = ("CODES = [(r'is late$', 'task-late')]\n"
+               "CODE_EXAMPLES = {'task-late': \"task id 'T-a' has the wrong form and is late\"}\n")
+        with ext({"roadmap.py": src}):
+            with self.assertRaisesRegex(RuntimeError, "validate.*roadmap|roadmap.*validate"):
+                self.v.codes()
+        with ext({"roadmap.py": "CODES = [(r'^task \\S+ is late', 'task-late')]\n"
+                                "CODE_EXAMPLES = {'task-late': 'task T-a is late'}\n"}):
+            self.assertIn((r"^task \S+ is late", "task-late"), self.v.codes())
+
+    def test_the_core_examples_are_checked(self):  # mutation m19: the core example check switched off
+        with mock.patch.dict(self.v.CODE_EXAMPLES, {"bad-id": "nothing like an id error"}):
+            with self.assertRaisesRegex(RuntimeError, "core example"):
+                self.v.codes()
 
     def test_codes_lists(self):
         from bp import data, rules
