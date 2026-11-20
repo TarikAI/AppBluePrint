@@ -2,9 +2,10 @@
 W0-A2. Every test here adds throwaway modules under the names the contract gives the later workstreams (bp/unknowns.py,
 bp/features.py, bp/views/roadmap_md.py, bp/commands/migrate.py, assets/tab-*.js, ...) and checks they are picked up.
 
-In process, the modules are written to a temp folder that is appended to the package path (bp.__path__ and its
-subpackages'), so `import bp.<name>` finds them exactly as it would a file in scripts/bp, and nothing under scripts/
-changes. End to end, a temp copy of the skill gets the files and the real CLI runs from it.
+In process, the modules are written to a temp folder put first on the package path, with every other later
+module hidden and the parent-package attributes saved and restored (test_validate.extension), so `import bp.<name>`
+finds them exactly as it would a file in scripts/bp, and nothing under scripts/ changes. End to end, a core-only
+copy of the skill gets the files and the real CLI runs from it.
 """
 import contextlib
 import importlib
@@ -335,8 +336,6 @@ class SubcommandTest(CliTestBase):
         for argv, arrives in ((["migrate", "--dry-run"], "W0-B"), (["task", "T-domain", "done", "--by", "owner"], "W1-R"),
                               (["accept", "F-inbox", "--by", "evaluator", "--mode", "browser"], "W3-V"),
                               (["evidence", "list"], "W2-E"), (["study", "source", ".", "--own"], "W2-E")):
-            if argv[0] == "migrate" and registry.command_built("migrate"):
-                continue  # built since W0-B (tests/test_migrate.py)
             with self.subTest(argv=argv):
                 r = S.run_script(hermetic_launcher(), argv + ["--root", self.root], self.root)
                 self.assertEqual(r.returncode, 1, r.stdout + r.stderr)

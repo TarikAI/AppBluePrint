@@ -33,6 +33,13 @@ def codes():
         got = next((c for rx, c in full if re.search(rx, example)), "other")
         if got != code:
             raise RuntimeError(f"validation code overlap: the core example {example!r} ({code}) classifies as {got}")
+    core = {c for _, c in CODES}
+    for m in registry.modules("DOMAIN"):  # a module example the core claims first (review of #15, M2)
+        for code, example in (getattr(m, "CODE_EXAMPLES", None) or {}).items():
+            got = next((c for rx, c in full if re.search(rx, example)), "other")
+            if got != code and got in core:
+                raise RuntimeError(f"validation code overlap: the example {example!r} of {m.__name__[3:]} ({code}) is "
+                                   f"claimed by validate (the core, {got}) first; narrow the module's message or regex")
     return full
 
 

@@ -3,6 +3,7 @@ codes (1.4, 7.4), BlueprintError and the output envelope (7.1, 7.3).
 
 Run: python -m unittest discover -s app-blueprint/tests
 """
+import atexit
 import contextlib
 import copy
 import hashlib
@@ -32,6 +33,10 @@ frozen = S.load_frozen("blueprint_frozen_for_validate")
 
 # The W0 foundations: the modules every build has. Everything else under bp/ (the wave 1 to 3 domain, view and command
 # modules, signals, study/*) belongs to a later workstream and may or may not be present in the tree under test.
+# A new core module (one every build has, written by a W0 workstream) must be added here, or the hermetic package and
+# skill copy would hide it as a later module (review of #15, N3); test_hermetic_skill_has_only_the_core then fails
+# loudly. In process, "not built" is simulated with sys.modules[name] = None; the real "file absent" path is covered by
+# the hermetic skill copy that the subprocess tests run (N4).
 CORE_MODULES = frozenset("bp." + m for m in (
     "version", "core", "globs", "learn", "migrate", "plan", "rules", "data", "status", "verify", "registry", "validate",
     "views", "views.context", "views.structure", "views.roster", "views.render", "export", "install", "api", "cli",
@@ -57,19 +62,33 @@ def extension(files, hermetic=True):
     tmp = Path(tempfile.mkdtemp(prefix="bp-ext-"))
     names, added = set(), []
     hidden = later_modules() if hermetic else []  # not hermetic: real modules win, stand-ins only fill the gaps
-    saved = {n: sys.modules[n] for n in list(sys.modules) if n in hidden or n.startswith("bp.study.")}
+    for rel in files:
+        names.add("bp." + ".".join(Path(rel).with_suffix("").parts))
+    touched = set(hidden) | names
+    saved = {n: sys.modules[n] for n in list(sys.modules) if n in touched or n.startswith("bp.study.")}
+    # the attribute the import system sets on the parent package (bp.features, bp.views.x, ...): a from-import reads
+    # it before sys.modules, so it is saved, removed for the block and put back after (review of #15, M1)
+    attrs = {}
+    for n in touched:
+        parent, _, leaf = n.rpartition(".")
+        pkg = sys.modules.get(parent)
+        if pkg is not None:
+            attrs[n] = (pkg, leaf, pkg.__dict__.get(leaf, _MISSING))
     try:
         for rel, src in files.items():
             p = tmp / rel
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(textwrap.dedent(src), encoding="utf-8")
-            names.add("bp." + ".".join(Path(rel).with_suffix("").parts))
+        for n, (pkg, leaf, _) in attrs.items():
+            if hermetic or n in names and n not in sys.modules:
+                pkg.__dict__.pop(leaf, None)
         for n in hidden:
             sys.modules.pop(n, None)
             if n not in names:
                 sys.modules[n] = None  # not built in this hermetic package
         for n in names:
-            sys.modules.pop(n, None)
+            if hermetic or n not in sys.modules:
+                sys.modules.pop(n, None)
         for pkg, folder in ((bp, tmp), (bp.views, tmp / "views"), (bp.commands, tmp / "commands")):
             if folder.is_dir():
                 pkg.__path__.insert(0 if hermetic else len(pkg.__path__), str(folder))
@@ -79,11 +98,21 @@ def extension(files, hermetic=True):
     finally:
         for pkg, folder in added:
             pkg.__path__.remove(folder)
-        for n in set(hidden) | names:
+        for n in touched:
+            sys.modules.pop(n, None)
+        for n in [k for k in sys.modules if k.startswith("bp.study.") and k not in saved]:
             sys.modules.pop(n, None)
         sys.modules.update(saved)
+        for n, (pkg, leaf, value) in attrs.items():
+            if value is _MISSING:
+                pkg.__dict__.pop(leaf, None)
+            else:
+                pkg.__dict__[leaf] = value
         importlib.invalidate_caches()
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+_MISSING = object()
 
 
 def hermetic_skill(dest):
@@ -114,9 +143,9 @@ class Hermetic:
 
     def setUp(self):
         super().setUp()
-        ctx = extension({})
-        ctx.__enter__()
-        self.addCleanup(ctx.__exit__, None, None, None)
+        stack = contextlib.ExitStack()  # closes cleanly even when a test is interrupted (review of #15, N1)
+        stack.enter_context(extension({}))
+        self.addCleanup(stack.close)
 
 
 _HERMETIC = {}
@@ -126,6 +155,7 @@ def hermetic_launcher():
     """The launcher of a hermetic skill copy, made once per test process."""
     if "launcher" not in _HERMETIC:
         base = Path(tempfile.mkdtemp(prefix="bp-hermetic-skill-"))
+        atexit.register(shutil.rmtree, base, True)  # removed when the test process ends (review of #15, N1)
         _HERMETIC["launcher"] = hermetic_skill(base / "skill")
     return _HERMETIC["launcher"]
 
