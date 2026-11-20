@@ -14,7 +14,7 @@ from bp import data as _data, registry, rules
 # bad-id, the id-form error of every section (contract 2.2, 7.4), which many modules emit with code="bad-id" and
 # none may register.
 CODES = [(r"^blueprint\.json is schema version 1\b", "schema-v1"),
-         (r"^[a-z ]+ id '.*' has the wrong form", "bad-id")]
+         (r"(?s)^[a-z ]+ id '.*' has the wrong form", "bad-id")]  # (?s): an invalid id may hold a newline
 CODE_EXAMPLES = {"schema-v1": "blueprint.json is schema version 1; it still works.",
                  "bad-id": "feature id 'Inbox' has the wrong form; use F- then lowercase letters, digits and hyphens"}
 
