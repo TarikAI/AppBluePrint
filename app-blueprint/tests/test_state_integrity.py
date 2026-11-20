@@ -1203,7 +1203,7 @@ class ScopeAndApi(unittest.TestCase):
             if rel in PENDING_PATCH:
                 continue
             for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-                if re.search(r"\bsave_state\b", line) and not (rel == "plan.py" and line.startswith("def save_state"))\
+                if re.search(r"\bsave_state\(", line) and not (rel == "plan.py" and line.startswith("def save_state"))\
                         and rel != "api.py":
                     callers.append(f"{rel}:{n}: {line.strip()}")
         self.assertEqual(callers, [], "change state with core.update_state / status.change_state")

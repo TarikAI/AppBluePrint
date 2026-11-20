@@ -195,15 +195,19 @@ def cmd_sync(args):
     if plan["stores"] or plan["resources"]:
         data = state["data"] = scan_data(root, plan, state, disk)
         data_issues = data["issues"]
-    c = compute(root, plan, state)["counts"]  # before the lock, on the state as sync read it, with its own keys
+    scanned_files = state["files"]
+    counts = {"c": compute(root, plan, state)["counts"]}  # before the lock: this hashes the files
 
     def change(fresh):
         fresh.update(owned)
         if data is not None:
             fresh["data"] = dict(data, live=(fresh.get("data") or {}).get("live"))  # db-check's live, as it is now
-        return [{"event": "sync", "head": owned["head"], "counts": c, "unplanned": len(unplanned),
+        if fresh["files"] != scanned_files:  # a claim, mark or proof landed meanwhile: count the state written
+            counts["c"] = compute(root, plan, fresh)["counts"]  # (the hashes are cached, so this is quick)
+        return [{"event": "sync", "head": owned["head"], "counts": counts["c"], "unplanned": len(unplanned),
                  "dataIssues": len(data_issues)}]
     state = change_state(root, change, owned_keys)
+    c = counts["c"]
     if not args.quiet:
         print(f"Synced {len(disk)} files on disk against {len(plan['files'])} planned files and {len(plan['patterns'])} patterns.")
         print("  " + "  ".join(f"{GLYPH[s]} {LABEL[s]} {c[s]}" for s in STATES))
@@ -222,8 +226,8 @@ def cmd_sync(args):
                 print("    !", p)
         if state.get("data"):
             dt = state["data"]
-            print(f"  Data: {len(dt['tables'])} table(s) in schema files, {len(plan['resources'])} declared resource(s), "
-                  f"{len(dt['observed'])} file(s) touching data, {len(data_issues)} issue(s).")
+            print(f"  Data: {len(dt.get('tables') or [])} table(s) in schema files, {len(plan['resources'])} declared "
+                  f"resource(s), {len(dt.get('observed') or {})} file(s) touching data, {len(data_issues)} issue(s).")
             for i in data_issues[:12]:
                 print(f"    ~ [{i['type']}] {i['detail']}")
             if len(data_issues) > 12:
@@ -439,13 +443,16 @@ def cmd_verify(args):
             reset.clear()
             for p in paths:
                 rec = fresh["files"].setdefault(p, {})
-                now, was = _rec_key(rec), started.get(p)
-                if now != was and (now[0] == "planned" or (now[0] == "claimed" and now[1] != was[1])):
-                    reset[p] = now  # changed while the check ran: that change wins, the proof is not saved
+                if "verified" not in proofs.get(p, {}):
+                    continue  # no proof for this file (not on disk): nothing to save, nothing to undo
+                if _reset_since(started.get(p), _rec_key(rec)):
+                    reset[p] = _rec_key(rec)  # changed while the check ran: that change wins, the proof is not saved
                     continue
-                if "verified" in proofs.get(p, {}):
-                    rec["verified"] = proofs[p]["verified"]
-            return [{"event": "verify", "cmd": cmd, "ok": ok, "files": len(paths)}]
+                rec["verified"] = proofs[p]["verified"]
+            event = {"event": "verify", "cmd": cmd, "ok": ok, "files": len(paths)}
+            if reset:
+                event["notSaved"] = sorted(reset)  # the files whose proof this line does not stand for
+            return [event]
         state = change_state(root, change)
         for p, (st, by, _) in sorted(reset.items()):
             what = "marked planned" if st == "planned" else "claimed"
@@ -459,6 +466,17 @@ def _rec_key(rec):
     """(state, by, at) of a file record: what verify compares to see that it changed while a check ran."""
     rec = rec if isinstance(rec, dict) else {}
     return rec.get("state"), rec.get("by"), rec.get("at")
+
+
+def _reset_since(was, now):
+    """A file's record changed in a way that a proof from a check started at `was` must not undo: it went back to
+    planned, or it was claimed by a different owner than the one recorded then (no record then means no previous
+    owner to differ from, so a first claim, by anyone, is not a reset)."""
+    if now == was:
+        return False
+    if now[0] == "planned":
+        return True
+    return now[0] == "claimed" and was is not None and was[1] is not None and now[1] != was[1]
 
 
 def cmd_guard(args):

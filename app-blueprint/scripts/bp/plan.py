@@ -346,7 +346,11 @@ def load_state(root):
 def save_state(root, state):
     """The 1.x name, kept for 1.x callers: writes state as given, under the state lock (taken here unless this process
     holds it). Do not use it in modules: it writes what the caller read, so another command's change made meanwhile
-    is lost. Change state with core.update_state (status.change_state), which re-reads it under the lock."""
+    is lost. Change state with core.update_state (status.change_state), which re-reads it under the lock. Called from
+    inside an update_state change it is a RuntimeError: that write would be overwritten by update_state's own."""
+    if core.in_change(root):
+        raise RuntimeError("plan.save_state was called inside core.update_state's change: a module returns its change "
+                           "from the callback (it edits the state it is given) instead of writing state behind it")
     if core._holding(root):
         core.write_state(root, state)
         return

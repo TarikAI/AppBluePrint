@@ -574,15 +574,49 @@ def _try_acquire(root):
     fds = [fd]
     try:
         _try_lock(fd)
-        if fcntl is not None:
-            fds.append(os.open(bp_dir(root), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)))
-            _try_lock(fds[-1])
-        return fds, new
     except OSError as e:
         _unlock(fds)
         if e.errno not in _BUSY:
             raise _lock_error(f"cannot be locked ({e.strerror or e}); this file system may not support file locks")
         return None, new
+    if fcntl is not None:
+        locking = False
+        try:
+            dfd = os.open(bp_dir(root), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                locking = True
+                _try_lock(dfd)
+            except OSError:
+                os.close(dfd)
+                raise
+            fds.append(dfd)
+        except OSError as e:
+            if locking and e.errno in _BUSY:
+                _unlock(fds)
+                return None, new
+            try:
+                _folder_lock_unsupported(e)  # e.g. a network mount: the file lock alone
+            except BaseException:
+                _unlock(fds)
+                raise
+    return fds, new
+
+
+_FOLDER_LOCK_UNSUPPORTED = {getattr(errno, n) for n in ("ENOTSUP", "EOPNOTSUPP", "EINVAL", "ENOLCK", "EBADF", "ENOSYS")
+                            if hasattr(errno, n)}
+_WARNED = set()  # warnings printed once per process
+
+
+def _folder_lock_unsupported(e):
+    """The file system refuses flock on the .blueprint folder (some network mounts): the lock on state.lock alone is
+    used, which still serialises writers but not one that deleted state.lock while it was held. One warning per
+    process. Any other error is bad-state, as for the lock file."""
+    if e.errno not in _FOLDER_LOCK_UNSUPPORTED:
+        raise _lock_error(f"cannot be locked: the folder .blueprint cannot be locked ({e.strerror or e})")
+    if "folder-lock" not in _WARNED:
+        _WARNED.add("folder-lock")
+        print(f"warning: this file system cannot lock the folder .blueprint ({e.strerror or e}); using the lock on "
+              f".blueprint/{STATE_LOCK} alone, so do not delete that file while blueprint commands run", file=sys.stderr)
 
 
 def _remove_stale_temp_files(root):
@@ -643,8 +677,20 @@ def state_lock(root):
         _unlock(fds)
 
 
+def _lock_key(root):
+    return os.path.normcase(os.path.abspath(bp_dir(root) / STATE_LOCK))
+
+
 def _holding(root):
-    return os.path.normcase(os.path.abspath(bp_dir(root) / STATE_LOCK)) in _HELD
+    return _lock_key(root) in _HELD
+
+
+_CHANGING = set()  # projects whose update_state change callback is running in this process
+
+
+def in_change(root):
+    """True while an update_state change callback runs for this project in this process (plan.save_state refuses then)."""
+    return _lock_key(root) in _CHANGING
 
 
 def state_default():
@@ -657,6 +703,8 @@ def _files_damage(raw):
         raw["files"] = {}
     if not isinstance(raw["files"], dict):
         return f'"files" must be an object (got {_json_kind(raw["files"])})'
+    for p in [p for p, rec in raw["files"].items() if rec is None]:  # a null record (a hand edit) is missing
+        del raw["files"][p]
     for p, rec in raw["files"].items():
         if not isinstance(rec, dict):
             return f"files[{json.dumps(p, ensure_ascii=False)}] must be an object (got {_json_kind(rec)})"
@@ -689,11 +737,49 @@ def _kind_damage(key, ok, kind):
     return check
 
 
+def _data_damage(raw):
+    """data (written by sync and db-check) as its readers use it: tables a list of objects with a text name; observed
+    an object; issues a list of objects with type and detail; a non-empty live an object with source, at, tables (a
+    list) and liveOnly and notApplied (lists of text). A null tables, observed or issues is empty (filled in here).
+    Missing, null or empty data is nothing to read."""
+    d = raw.get("data")
+    if not d:
+        return None
+    if not isinstance(d, dict):
+        return f'"data" must be an object (got {_json_kind(d)})'
+    for key, empty in (("tables", list), ("observed", dict), ("issues", list)):
+        if key in d and d[key] is None:
+            d[key] = empty()
+    for key, ok, kind in (("tables", list, "a list"), ("observed", dict, "an object"), ("issues", list, "a list")):
+        if key in d and not isinstance(d[key], ok):
+            return f'"data.{key}" must be {kind} (got {_json_kind(d[key])})'
+    for i, t in enumerate(d.get("tables", [])):
+        if not isinstance(t, dict) or not isinstance(t.get("name"), str):
+            return f'"data.tables[{i}]" must be an object with a "name" (text)'
+    for i, issue in enumerate(d.get("issues", [])):
+        if not isinstance(issue, dict) or "type" not in issue or "detail" not in issue:
+            return f'"data.issues[{i}]" must be an object with "type" and "detail"'
+    live = d.get("live")
+    if live:
+        if not isinstance(live, dict):
+            return f'"data.live" must be an object or null (got {_json_kind(live)})'
+        for key in ("source", "at", "tables", "liveOnly", "notApplied"):
+            if key not in live:
+                return f'"data.live" has no "{key}"'
+        if not isinstance(live["tables"], list):
+            return f'"data.live.tables" must be a list (got {_json_kind(live["tables"])})'
+        for key in ("liveOnly", "notApplied"):
+            if not isinstance(live[key], list) or not all(isinstance(x, str) for x in live[key]):
+                return f'"data.live.{key}" must be a list of names'
+    return None
+
+
 # key -> (check, the empty value an owner that rewrites the key repairs it to). Only shapes the commands dereference
-# are checked, the ones on which 1.3.0 crashed.
+# are checked, the ones on which 1.3.0 crashed; the list comes from a grep of every read of state in bp/, one level
+# below each top-level key (test_state_integrity's sweeps set each of them to every wrong type).
 _STATE_CHECKS = {"files": (_files_damage, dict), "patterns": (_patterns_damage, dict),
                  "unplanned": (_kind_damage("unplanned", (list, str), "a list"), list),
-                 "data": (_kind_damage("data", (dict,), "an object"), dict)}
+                 "data": (_data_damage, dict)}
 
 
 def _damage(raw, owned=()):
@@ -774,10 +860,16 @@ def update_state(root, change, prepare=None, owned=()):
     Compute before calling this; change only sets the keys and entries its command owns, so another writer's
     different entries survive and the same entry is last-writer-wins. owned: the keys change rewrites wholesale, whose
     damage is repaired rather than refused (read_state). change may raise to write nothing; it must not
-    call update_state or state_lock (never nested), but may call append_log. Returns the state written."""
+    call update_state or state_lock (never nested), nor plan.save_state (a RuntimeError: the outer write would overwrite
+    it), but may call append_log. Returns the state written."""
+    key = _lock_key(root)
     with state_lock(root):
         state = read_state(root, prepare, owned)
-        events = change(state) or ()
+        _CHANGING.add(key)
+        try:
+            events = change(state) or ()
+        finally:
+            _CHANGING.discard(key)
         write_state(root, state)
         for event in events:
             _append_log_line(root, event)
