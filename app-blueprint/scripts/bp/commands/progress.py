@@ -24,6 +24,7 @@ from bp.plan import GLYPH, LABEL, STATES, load_plan, load_state, owner_of, plann
 from bp.registry import command_built
 from bp.validate import validate_plan
 from bp.views.render import render_all
+from bp.views.structure import one_line
 
 # status flags of 2.0 -> the module that implements them (through its status_lines or status_card hook)
 STATUS_FLAGS = {"feature": "features", "features": "features", "milestone": "roadmap", "tasks": "roadmap",
@@ -218,6 +219,45 @@ def cmd_sync(args):
         sys.exit(1)
 
 
+def _flat(text):
+    """roadmap.flat: runs of whitespace collapse to one space (the wording of the roadmap's unknown-milestone)."""
+    return " ".join(str(text).split())
+
+
+def _check_selectors(ctx, args):
+    """An unknown --feature or --milestone id is one error in both forms (unknown-feature / unknown-milestone, 7.3;
+    exit 1, the failure envelope with --json), raised before status prints anything. The modules' own checks run
+    first, through the hooks the text form calls (status_card; status_lines, whose lines are dropped), so the wording
+    and next are theirs; the core's check after them is the fallback for a module that does not check, in the
+    same words as the module's."""
+    from bp.plan import section_index
+    plan = ctx["plan"]
+    if getattr(args, "feature", None) and registry.hook("status_card") is not None:
+        registry.hook("status_card")(ctx, args.feature)
+    if getattr(args, "milestone", None):
+        registry.collect("status_lines", ctx, args)
+    fid = getattr(args, "feature", None)
+    if fid and fid not in section_index(plan, "features"):
+        raise BlueprintError("unknown-feature", f"feature {fid} is not in the plan", entry=f"feature {fid}",
+                             next="blueprint.py status --features")
+    mid = getattr(args, "milestone", None)
+    if mid and mid not in section_index(plan, "milestones"):
+        known = list(section_index(plan, "milestones"))
+        bp = "python .blueprint/bin/blueprint.py"
+        raise BlueprintError("unknown-milestone", f"{_flat(mid)!r} is not a milestone in the plan"
+                             + (" (milestones: " + ", ".join(_flat(m) for m in known) + ")" if known else ""),
+                             entry=f"milestone {_flat(mid)}",
+                             next=f"{bp} migrate" if plan.get("_from") == 1 else f"{bp} status")
+
+
+def _blocked(ctx, key):
+    """The strings in ctx["blocked"][key] (phases, or files: the planned files claim refuses, filled by the unknowns
+    module); a missing, None or malformed value at any level is empty, never a crash (review of #16, N9)."""
+    blocked = ctx.get("blocked")
+    value = blocked.get(key) if isinstance(blocked, dict) else None
+    return {x for x in value if isinstance(x, str)} if isinstance(value, (list, set, frozenset, tuple)) else set()
+
+
 def cmd_status(args):
     from bp.status import next_ready, summarize
     from bp.views.context import blocked_by, build_context, status_json
@@ -228,6 +268,7 @@ def cmd_status(args):
         if getattr(args, flag, None) and not registry.exists(module):
             raise not_built(f"status --{flag}", module)
     ctx = build_context(root, plan, state)
+    _check_selectors(ctx, args)
     comp = ctx["comp"]
     rows = comp["rows"]
     if args.owner:
@@ -237,6 +278,10 @@ def cmd_status(args):
     if args.json:
         out = status_json(ctx, {"rows": rows, "patterns": comp["patterns"], "unplanned": state.get("unplanned", []),
                                 "syncedAt": state.get("syncedAt")})
+        for flag, key in (("feature", "features"), ("milestone", "milestones")):  # the selectors of the text form
+            want = getattr(args, flag, None)
+            if want and isinstance(out.get(key), list):
+                out[key] = [x for x in out[key] if isinstance(x, dict) and x.get("id") == want]
         print(json.dumps(out, indent=2, ensure_ascii=False))
         return
     if getattr(args, "feature", None):  # the feature card only (status_card, features)
@@ -249,35 +294,47 @@ def cmd_status(args):
     total = len(rows)
     done = sum(1 for r in rows if r["status"] == "verified")
     built = sum(1 for r in rows if r["status"] in ("built", "verified"))
-    print(f"{plan['app'].get('name')}: {total} planned files"
-          + (f" for {args.owner}" if args.owner else "") + (f" in {args.phase}" if args.phase else ""))
-    print(f"  verified {done}/{total}, built or better {built}/{total}. Last sync: {state.get('syncedAt') or 'never'}")
+    print(f"{one_line(plan['app'].get('name'))}: {total} planned files"
+          + (f" for {one_line(args.owner)}" if args.owner else "") + (f" in {one_line(args.phase)}" if args.phase else ""))
+    print(f"  verified {done}/{total}, built or better {built}/{total}. Last sync: {one_line(state.get('syncedAt') or 'never')}")
     print("\n  By phase:")
     for ph in plan["phases"]:
         d = summarize([r for r in rows if r["phase"] == ph["id"]], "phase").get(ph["id"])
         if d:
             n = sum(d.values())
-            print(f"    {ph['id']:<4} {ph.get('name', ''):<28} " + " ".join(f"{GLYPH[s]}{d[s]}" for s in STATES if d[s]) + f"  ({d['verified']}/{n} verified)")
+            print(f"    {one_line(ph['id']):<4} {one_line(ph.get('name', '')):<28} " + " ".join(f"{GLYPH[s]}{d[s]}" for s in STATES if d[s]) + f"  ({d['verified']}/{n} verified)")
     if not args.owner:
         print("\n  By owner:")
         for o, d in sorted(summarize(rows, "owner").items()):
             n = sum(d.values())
-            print(f"    {o:<28} " + " ".join(f"{GLYPH[s]}{d[s]}" for s in STATES if d[s]) + f"  ({d['verified']}/{n} verified)")
+            print(f"    {one_line(o):<28} " + " ".join(f"{GLYPH[s]}{d[s]}" for s in STATES if d[s]) + f"  ({d['verified']}/{n} verified)")
     blocked = [r for r in rows if r["status"] == "blocked"]
     if blocked:
         print("\n  Blocked:")
         for r in blocked:
-            print(f"    ▲ {r['path']} ({r['owner']}): {r.get('note') or ''}")
+            print(f"    ▲ {one_line(r['path'])} ({one_line(r['owner'])}): {one_line(r.get('note') or '')}")
     if args.next:
-        blocked = set(ctx["blocked"].get("phases") or ())
-        ready = next_ready(plan, comp["rows"], args.owner, blocked_phases=blocked)
+        blocked = _blocked(ctx, "phases")
+        # files claim refuses (ctx["blocked"]["files"], unknowns) are never offered; given as blocked rows, so a file
+        # that depends on one waits as it does on any file not yet built
+        keys = {path_key(p) for p in _blocked(ctx, "files")}
+        held = [r for r in comp["rows"] if path_key(r["path"]) in keys and r["status"] in ("planned", "claimed", "ondisk")
+                and r["phase"] not in blocked]
+        held_ids = {id(r) for r in held}
+        offer_rows = [dict(r, status="blocked") if id(r) in held_ids else r for r in comp["rows"]]
+        ready = next_ready(plan, offer_rows, args.owner, blocked_phases=blocked)
         print("\n  Ready to build next:")
         for ph in plan["phases"]:  # 2.6: files of a phase blocked by an open unknown are not offered
             if ph.get("id") in blocked and any(r["phase"] == ph["id"] and r["status"] in ("planned", "claimed", "ondisk")
                                                for r in comp["rows"]):
-                print(f"    (phase {ph['id']} skipped: blocked by {', '.join(blocked_by(ctx, 'phase', ph['id'])) or 'an open unknown'})")
+                print(f"    (phase {one_line(ph['id'])} skipped: blocked by "
+                      f"{one_line(', '.join(blocked_by(ctx, 'phase', ph['id'])) or 'an open unknown')})")
+        # the count is of the files that would be offered without the block, so it never names a later phase's file
+        held = [r for r in next_ready(plan, comp["rows"], args.owner, blocked_phases=blocked) if id(r) in held_ids]
+        if held:
+            print(f"    ({len(held)} file(s) skipped: blocked by an open unknown; see status --unknowns)")
         for r in ready[:20]:
-            print(f"    {r['path']}  ({r['owner']}, {r['phase']})")
+            print(f"    {one_line(r['path'])}  ({one_line(r['owner'])}, {one_line(r['phase'])})")
         if not ready:
             print("    nothing: everything in the current phase is claimed, built or waiting on a dependency")
     n_stale = sum(1 for r in rows if r.get("stale"))

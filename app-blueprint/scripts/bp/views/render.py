@@ -5,6 +5,7 @@ return (ROADMAP.md, FEATURES.md, contract 8) and map.html. The map gets the map_
 and every tab-*.js asset inlined at the template's /*__TABS_JS__*/ placeholder, in sorted order (8.4).
 """
 import json
+import math
 import os
 import re
 import stat
@@ -20,10 +21,11 @@ from bp.status import compute
 from bp.views.context import build_context, merged
 from bp.views.structure import render_structure
 from bp.views.roster import render_roster
+from bp.core import copy_json  # on its own line, apart from the bp.core import above (PR #14 rewrites that one)
 
 BASE_VIEWS = ("STRUCTURE.md", "ROSTER.md", "map.html")
 RESERVED_VIEWS = BASE_VIEWS + ("README.md",)  # init writes README.md for people to edit
-_VIEW_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*\.md$")
+_VIEW_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\.md")  # used with fullmatch: "$" would accept a final newline
 
 
 def find_template():
@@ -41,7 +43,9 @@ def tab_scripts():
 
 
 def _script(text):
-    return text.replace("</script", "<\\/script")
+    """An asset's text, safe inside a script element: '</script' in any case and '<!--' cannot close the element or
+    start the HTML parser's escaped-comment state (review of #16, N1)."""
+    return re.sub(r"(?i)</(script)", r"<\\/\1", text).replace("<!--", "<\\!--")
 
 
 def render_map(plan, state, comp, ctx=None):
@@ -56,17 +60,61 @@ def render_map(plan, state, comp, ctx=None):
             "data": data_view(plan, state)}
     if ctx is not None:  # 2.0: keys from the map_payload hooks (contract 8.5); a collision is a bug
         data = merged("map_payload", ctx, data)
-    payload = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
-    html = tpl.read_text(encoding="utf-8")
     mm = find_asset("mindmap.js")
     mm_js = _script(mm.read_text(encoding="utf-8")) if mm else "function mindMap(host){host.textContent='Mind map unavailable: run init --refresh-tool.';return {expandAll:function(){},collapseAll:function(){},zoom:function(){},fit:function(){}};}"
-    html = html.replace("/*__MINDMAP_JS__*/", mm_js)
-    html = html.replace("/*__TABS_JS__*/", "\n;\n".join(_script(t) for t in tab_scripts()))
-    return html.replace("__APP_NAME__", _html_escape(plan["app"].get("name", "App"))).replace("__BLUEPRINT_DATA__", payload)
+    values = {"__APP_NAME__": _html_escape(plan["app"].get("name", "App")), "__BLUEPRINT_DATA__": script_json(data),
+              "/*__MINDMAP_JS__*/": mm_js, "/*__TABS_JS__*/": "\n;\n".join(_script(t) for t in tab_scripts())}
+    text = tpl.read_text(encoding="utf-8")
+    missing = [name for name in values if name not in text]
+    if missing:  # a broken template copy is a bug, never a map with a hole in it (review of #16, N11)
+        raise RuntimeError(f"{tpl} has no {', '.join(missing)} placeholder: run init --refresh-tool")
+    # One pass over the template: text put in for one placeholder is never searched for another (core review C4).
+    return _PLACEHOLDER.sub(lambda m: values[m.group(0)], text)
+
+
+_PLACEHOLDER = re.compile(r"__APP_NAME__|__BLUEPRINT_DATA__|/\*__MINDMAP_JS__\*/|/\*__TABS_JS__\*/")
+# what script_json writes as a \u escape: <, >, &, U+2028, U+2029 and every surrogate (written as escapes, not
+# literal characters, here: many tools treat a literal U+2028 as a line break)
+_SCRIPT_UNSAFE = re.compile("[<>&\u2028\u2029\ud800-\udfff]")
+
+
+def _finite(value):
+    """value with every non-finite float (NaN, Infinity, -Infinity, at any depth) as None: a browser's JSON.parse
+    rejects them, although Python's JSON reader accepts them in a plan (review of #16, M2). A copy only when needed,
+    made without recursion."""
+    try:
+        json.dumps(value, allow_nan=False)
+        return value
+    except ValueError:
+        pass
+    root = copy_json(value)
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        keys = node.keys() if isinstance(node, dict) else range(len(node))
+        for k in keys:
+            v = node[k]
+            if isinstance(v, float) and not math.isfinite(v):
+                node[k] = None
+            elif isinstance(v, (dict, list)):
+                stack.append(v)
+    return root
+
+
+def script_json(value):
+    """Strict JSON, safe to embed in a script element: non-finite numbers become null; <, >, &, U+2028, U+2029 and
+    lone surrogates become \\u escapes, so no plan text can close the element, open a comment or a CDATA section,
+    end a line in an older JavaScript parser or make the file unencodable (review of #16, M3). Those characters occur
+    only inside JSON strings, where the escape stands for the same character: the value parses back equal."""
+    text = json.dumps(_finite(value), ensure_ascii=False, allow_nan=False)
+    return _SCRIPT_UNSAFE.sub(lambda m: "\\u%04x" % ord(m.group(0)), text)
 
 
 def _html_escape(s):
-    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+    """Text for an HTML element; a lone surrogate becomes a character reference (shown as U+FFFD), so the page
+    stays encodable (review of #16, M3)."""
+    text = str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+    return re.sub("[\ud800-\udfff]", lambda m: "&#x%x;" % ord(m.group(0)), text)
 
 
 def _hook_views(ctx):
@@ -76,7 +124,7 @@ def _hook_views(ctx):
     out = {}
     for name, views in registry.collect("views", ctx):
         for fname, text in (views or {}).items():
-            if not isinstance(fname, str) or not _VIEW_NAME.match(fname) or fname in RESERVED_VIEWS or fname in out:
+            if not isinstance(fname, str) or not _VIEW_NAME.fullmatch(fname) or fname in RESERVED_VIEWS or fname in out:
                 raise RuntimeError(f"{name}.views returned the view name {fname!r}: a .md file name in .blueprint/, "
                                    "not a base view, not README.md and not one another module returns")
             text = str(text)
