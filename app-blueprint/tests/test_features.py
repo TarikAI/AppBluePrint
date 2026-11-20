@@ -827,7 +827,7 @@ class HooksTest(ProjectBase):
         code, out, err = self.run_("status", "--feature", "F-ghost")
         self.assertEqual(code, 1)
         self.assertIn("error: feature F-ghost is not in the plan", err)
-        self.assertIn("next: blueprint.py status --features", err)
+        self.assertRegex(err, r'next: python ".*blueprint\.py" status --features --root ".*"')  # runs as printed
 
     def test_status_card_shows_results_evaluation_and_blockers(self):
         chk = {"F-log-snag": checks({"C1": entry(repeat={"n": 3, "passed": 3}), "C2": entry("fail", level="unit"),},
