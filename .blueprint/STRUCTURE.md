@@ -4,7 +4,7 @@
 
 The repository's own plan: who builds which file of app-blueprint 2.0, taken from section 11 of the contract.
 
-**140 planned files, 7 patterns.** Status: ○ planned 59, ◑ on disk 81. Last sync: 2026-11-19T20:44:13Z at `a474596`.
+**141 planned files, 7 patterns.** Status: ○ planned 60, ◑ on disk 81. Last sync: 2026-11-20T03:01:24Z at `cb194a8`.
 
 ## Build approach
 
@@ -51,8 +51,8 @@ The repository's own plan: who builds which file of app-blueprint 2.0, taken fro
 │   ├── scripts/  # The tool: launcher and the bp package [tool]
 │   │   ├── bp/
 │   │   │   ├── commands/
-│   │   │   │   ├── __init__.py  ◑ Package marker for the command modules (W0-A1, W0)
-│   │   │   │   ├── data.py  ◑ The db-check command (W0-A1, W0)
+│   │   │   │   ├── __init__.py  ◑ Package marker for the command modules (W0-A2, W0)
+│   │   │   │   ├── data.py  ◑ The db-check command (W0-A2, W0)
 │   │   │   │   ├── evidence.py  ○ The evidence command (W2-E, W2)
 │   │   │   │   ├── learn.py  ◑ feedback, report and doctor commands (W0-A2, W0)
 │   │   │   │   ├── migrate.py  ◑ The migrate command (W0-B, W0)
@@ -83,24 +83,24 @@ The repository's own plan: who builds which file of app-blueprint 2.0, taken fro
 │   │   │   │   ├── trace.py  ○ study trace: roles and depth (W2-S, W2)
 │   │   │   │   └── web.py  ○ Web lane: HAR, source maps and bundles (W2-W, W2)
 │   │   │   ├── views/
-│   │   │   │   ├── __init__.py  ◑ Package marker for the view modules (W0-A1, W0)
+│   │   │   │   ├── __init__.py  ◑ Package marker for the view modules (W0-A2, W0)
 │   │   │   │   ├── context.py  ◑ The context every view and status hook reads (W0-A2, W0)
 │   │   │   │   ├── features_md.py  ○ FEATURES.md (W1-F, W1)
 │   │   │   │   ├── render.py  ◑ Writes every view and the map (W0-A2, W0)
 │   │   │   │   ├── roadmap_md.py  ○ ROADMAP.md (W1-R, W1)
 │   │   │   │   ├── roster.py  ◑ ROSTER.md (W0-A2, W0)
 │   │   │   │   └── structure.py  ◑ STRUCTURE.md (W0-A2, W0)
-│   │   │   ├── __init__.py  ◑ Package marker for bp (W0-A1, W0)
-│   │   │   ├── api.py  ◑ Frozen 1.x public names re-exported to the launcher (W0-A1, W0)
+│   │   │   ├── __init__.py  ◑ Package marker for bp (W0-A2, W0)
+│   │   │   ├── api.py  ◑ Frozen 1.x public names re-exported to the launcher (W0-A2, W0)
 │   │   │   ├── cli.py  ◑ Argument parser, start-up completeness check and command dispatch (W0-A2, W0)
 │   │   │   ├── core.py ★  ◑ Paths, JSON and git helpers, BlueprintError and the envelope, proofs (W0-A2, W0)
 │   │   │   ├── data.py  ◑ Stores and resources: SQL, Prisma and code scanning for the data checks (W0-A2, W0)
 │   │   │   ├── evidence.py  ○ Evidence store and records (W2-E, W2)
-│   │   │   ├── export.py  ◑ Export formats: codeowners, csv, json, AgenticTeam commands (W0-A1, W0)
+│   │   │   ├── export.py  ◑ Export formats: codeowners, csv, json, AgenticTeam commands (W0-A2, W0)
 │   │   │   ├── features.py  ○ Features, criteria, file links and derived status (W1-F, W1)
-│   │   │   ├── globs.py  ◑ Glob matching for owner rules, patterns and ignores (W0-A1, W0)
-│   │   │   ├── install.py  ◑ Copy of the tool into .blueprint/bin and the package start-up check (W0-A1, W0)
-│   │   │   ├── learn.py  ◑ Learning-loop store, redaction and incident records (W0-A1, W0)
+│   │   │   ├── globs.py  ◑ Glob matching for owner rules, patterns and ignores (W0-A2, W0)
+│   │   │   ├── install.py  ◑ Copy of the tool into .blueprint/bin and the package start-up check (W0-A2, W0)
+│   │   │   ├── learn.py  ◑ Learning-loop store, redaction and incident records (W0-A2, W0)
 │   │   │   ├── migrate.py  ◑ In-memory upgrade of plans and state from version 1 to 2 (W0-A2, W0)
 │   │   │   ├── plan.py  ◑ Plan loading, shape checks and the skeleton (W0-A2, W0)
 │   │   │   ├── records.py  ○ Verification records, criterion checks and acceptance (W3-V, W3)
@@ -119,34 +119,35 @@ The repository's own plan: who builds which file of app-blueprint 2.0, taken fro
 │   │   │   ├── android/
 │   │   │   │   └── **  ⟨pattern android-goldens: Goldens built with aapt2; 3 on disk⟩ (W2-FX1, W2)
 │   │   │   ├── v1/
-│   │   │   │   └── **  ⟨pattern v1-goldens: Frozen 1.3.0 inputs and golden views; 4 on disk⟩ (W0-A1, W0)
+│   │   │   │   └── **  ⟨pattern v1-goldens: Frozen 1.3.0 inputs and golden views; 4 on disk⟩ (W0-A2, W0)
 │   │   │   └── README.md [modify]  ◑ Where the golden files came from and how to rebuild them (W2-FX1, W2)
 │   │   ├── fixtures_archives.py [modify]  ◑ Builders for APK, AAB, XAPK, IPA, asar and hostile archives (W2-FX1, W2)
 │   │   ├── fixtures_text.py [modify]  ◑ Builders for HAR, source map, bundle, SQLite, OpenAPI, GraphQL, proto, repo, rea, JADX, apktool and capture fixtures (W2-FX2, W2)
-│   │   ├── support.py  ◑ Shared test helpers for loading the tool (W0-A1, W0)
+│   │   ├── support.py  ◑ Shared test helpers for loading the tool (W0-A2, W0)
 │   │   ├── test_agents.py  ○ Tests of the agent files against the real CLI (W3-A, W3)
-│   │   ├── test_blueprint.py  ◑ The 1.3.0 behaviour tests of the tool (W0-A1, W0)
-│   │   ├── test_contracts_module.py  ◑ Tests of module README contracts (W0-A1, W0)
-│   │   ├── test_data_and_learning.py  ◑ The 1.3.0 tests of the data checks and the learning loop (W0-A1, W0)
+│   │   ├── test_blueprint.py  ◑ The 1.3.0 behaviour tests of the tool (W0-A2, W0)
+│   │   ├── test_contracts_module.py  ◑ Tests of module README contracts (W0-A2, W0)
+│   │   ├── test_data_and_learning.py  ◑ The 1.3.0 tests of the data checks and the learning loop (W0-A2, W0)
 │   │   ├── test_docs.py  ○ Checks that the docs match the real CLI (W3-R2, W3)
 │   │   ├── test_e2e.py  ○ End-to-end tests (W4-E2E, W4)
 │   │   ├── test_evidence.py  ○ Tests of the evidence store (W2-E, W2)
 │   │   ├── test_features.py  ○ Tests of features and FEATURES.md (W1-F, W1)
 │   │   ├── test_fixtures_archives.py [modify]  ◑ Structural self-checks of the archive builders (W2-FX1, W2)
 │   │   ├── test_fixtures_text.py [modify]  ◑ Self-checks of the text builders (W2-FX2, W2)
-│   │   ├── test_ignore_anchor.py  ◑ Tests of ignore rule anchoring (W0-A1, W0)
+│   │   ├── test_ignore_anchor.py  ◑ Tests of ignore rule anchoring (W0-A2, W0)
 │   │   ├── test_migrate.py  ◑ Tests of the migrate command (W0-B, W0)
-│   │   ├── test_owner_anchor.py  ◑ Tests of owner rule anchoring (W0-A1, W0)
-│   │   ├── test_package.py  ◑ Package layout, 1.x names, version lines and interrupted-copy tests (W0-A1, W0)
-│   │   ├── test_plan_fuzz.py  ◑ Fuzz tests of version 1 plans (W0-A1, W0)
+│   │   ├── test_owner_anchor.py  ◑ Tests of owner rule anchoring (W0-A2, W0)
+│   │   ├── test_package.py  ◑ Package layout, 1.x names, version lines and interrupted-copy tests (W0-A2, W0)
+│   │   ├── test_plan_fuzz.py  ◑ Fuzz tests of version 1 plans (W0-A2, W0)
 │   │   ├── test_plan_fuzz_v2.py  ◑ Fuzz tests of version 2 plans, run with each module loaded (W0-A2, W0)
-│   │   ├── test_plan_shapes.py  ◑ Tests of plan shape errors (W0-A1, W0)
-│   │   ├── test_presets.py  ◑ Tests of the stack presets (W0-A1, W0)
+│   │   ├── test_plan_shapes.py  ◑ Tests of plan shape errors (W0-A2, W0)
+│   │   ├── test_presets.py  ◑ Tests of the stack presets (W0-A2, W0)
 │   │   ├── test_records.py  ○ Tests of verification records (W3-V, W3)
 │   │   ├── test_registry.py  ○ Tests of the registry across all modules (W4-E2E, W4)
 │   │   ├── test_registry_hooks.py  ◑ Tests of the registry and every hook with a stub module (W0-A2, W0)
 │   │   ├── test_roadmap.py  ○ Tests of milestones, tasks and ROADMAP.md (W1-R, W1)
 │   │   ├── test_signals.py  ○ Tests of signals (W3-L, W3)
+│   │   ├── test_state_integrity.py  ○ Tests of state locking, atomic writes and a broken state.json (W0-A2, W0)
 │   │   ├── test_study_core.py  ○ Tests of the study engine and its safety rules (W2-E, W2)
 │   │   ├── test_study_data.py  ○ Tests of the data and compare lanes (W2-DA, W2)
 │   │   ├── test_study_desktop.py  ○ Tests of the desktop lane (W2-D, W2)
@@ -229,7 +230,7 @@ flowchart LR
 
 | Phase | Name | Goal | Exit | Files | Verified |
 |---|---|---|---|---|---|
-| W0 | Foundations | The package split, the 2.0 foundations, migrate, and this plan with its ownership check. | validate passes on this plan; check_owned.py passes on a branch of its own files | 60 | 0 |
+| W0 | Foundations | The package split, the 2.0 foundations, migrate, and this plan with its ownership check. | validate passes on this plan; check_owned.py passes on a branch of its own files | 61 | 0 |
 | W1 | Roadmap, features, unknowns | Milestones and tasks, features and criteria, unknowns and blocking. | the Wave 1 tests and test_plan_fuzz_v2 pass with each module loaded | 13 | 0 |
 | W2 | Evidence and study | Fixtures, the evidence store, the study engine and its lanes, synthesis. | the Wave 2 tests pass; hostile archives and the time bound hold | 38 | 0 |
 | W3 | Verification, agents, docs | Verification records, the surveyor and evaluator agents, builder rules, references and the docs check, learning-loop upgrades. | test_docs and test_agents pass; every command in the docs parses with the real CLI | 23 | 0 |
@@ -252,7 +253,7 @@ These files are depended on by several owners. Change them only through their ow
 | dogfood-views | `.blueprint/*` | One file init, sync or render writes in .blueprint/ (README.md, blueprint.json, state.json, log.jsonl, STRUCTURE.md, ROSTER.md, map.html, and later ROADMAP.md and FEATURES.md). The tool copy in .blueprint/bin is not committed. | orchestrator | W0 | 6 |
 | example-project | `examples/**` | One file of the example, including its own .blueprint folder and tool copy; never edited by hand. | orchestrator | W0 | 50 |
 | example-plan | `examples/*/.blueprint/**` | One file under an example's .blueprint folder, written by the tool when make_example.py runs. | orchestrator | W0 | 0 |
-| v1-goldens | `app-blueprint/tests/data/v1/**` | One frozen input, golden or generator script of the version 1 behaviour tests. | W0-A1 | W0 | 4 |
+| v1-goldens | `app-blueprint/tests/data/v1/**` | One frozen input, golden or generator script of the version 1 behaviour tests. | W0-A2 | W0 | 4 |
 | android-goldens | `app-blueprint/tests/data/android/**` | One manifest source or aapt2 output (text, binary AXML or proto). | W2-FX1 | W2 | 3 |
 | issue-templates | `.github/ISSUE_TEMPLATE/*` | One issue form or the issue chooser config. | maintainers | W0 | 5 |
 | stack-presets | `app-blueprint/references/stacks/*.md` | One stack preset document with its parts, versions, docs URLs and folder layout. | maintainers | W0 | 4 |
@@ -261,25 +262,25 @@ These files are depended on by several owners. Change them only through their ow
 
 | File | Action | Module | Phase | Owner | Status | Purpose | Consumes | Produces | Verify |
 |---|---|---|---|---|---|---|---|---|---|
-| `app-blueprint/scripts/bp/views/__init__.py` | create | tool | W0 | W0-A1 | ◑ on disk | Package marker for the view modules |  |  | `python app-blueprint/scripts/blueprint.py --version` |
-| `app-blueprint/scripts/bp/__init__.py` | create | tool | W0 | W0-A1 | ◑ on disk | Package marker for bp |  |  | `python app-blueprint/scripts/blueprint.py --version` |
-| `app-blueprint/scripts/bp/globs.py` | create | tool | W0 | W0-A1 | ◑ on disk | Glob matching for owner rules, patterns and ignores |  |  | `python app-blueprint/scripts/blueprint.py --version` |
-| `app-blueprint/scripts/bp/learn.py` | create | tool | W0 | W0-A1 | ◑ on disk | Learning-loop store, redaction and incident records |  |  | `python app-blueprint/scripts/blueprint.py --version` |
-| `app-blueprint/scripts/bp/export.py` | create | tool | W0 | W0-A1 | ◑ on disk | Export formats: codeowners, csv, json, AgenticTeam commands |  |  | `python app-blueprint/scripts/blueprint.py --version` |
-| `app-blueprint/scripts/bp/install.py` | create | tool | W0 | W0-A1 | ◑ on disk | Copy of the tool into .blueprint/bin and the package start-up check |  |  | `python app-blueprint/scripts/blueprint.py --version` |
-| `app-blueprint/scripts/bp/api.py` | create | tool | W0 | W0-A1 | ◑ on disk | Frozen 1.x public names re-exported to the launcher |  |  | `python app-blueprint/scripts/blueprint.py --version` |
-| `app-blueprint/scripts/bp/commands/__init__.py` | create | tool | W0 | W0-A1 | ◑ on disk | Package marker for the command modules |  |  | `python app-blueprint/scripts/blueprint.py --version` |
-| `app-blueprint/scripts/bp/commands/data.py` | create | tool | W0 | W0-A1 | ◑ on disk | The db-check command |  |  | `python app-blueprint/scripts/blueprint.py --version` |
-| `app-blueprint/tests/support.py` | create | tests | W0 | W0-A1 | ◑ on disk | Shared test helpers for loading the tool |  |  | `python -m unittest discover -s app-blueprint/tests` |
-| `app-blueprint/tests/test_package.py` | create | tests | W0 | W0-A1 | ◑ on disk | Package layout, 1.x names, version lines and interrupted-copy tests |  |  | `python -m unittest discover -s app-blueprint/tests` |
-| `app-blueprint/tests/test_blueprint.py` | create | tests | W0 | W0-A1 | ◑ on disk | The 1.3.0 behaviour tests of the tool |  |  | `python -m unittest discover -s app-blueprint/tests` |
-| `app-blueprint/tests/test_data_and_learning.py` | create | tests | W0 | W0-A1 | ◑ on disk | The 1.3.0 tests of the data checks and the learning loop |  |  | `python -m unittest discover -s app-blueprint/tests` |
-| `app-blueprint/tests/test_presets.py` | create | tests | W0 | W0-A1 | ◑ on disk | Tests of the stack presets |  |  | `python -m unittest discover -s app-blueprint/tests` |
-| `app-blueprint/tests/test_contracts_module.py` | create | tests | W0 | W0-A1 | ◑ on disk | Tests of module README contracts |  |  | `python -m unittest discover -s app-blueprint/tests` |
-| `app-blueprint/tests/test_ignore_anchor.py` | create | tests | W0 | W0-A1 | ◑ on disk | Tests of ignore rule anchoring |  |  | `python -m unittest discover -s app-blueprint/tests` |
-| `app-blueprint/tests/test_owner_anchor.py` | create | tests | W0 | W0-A1 | ◑ on disk | Tests of owner rule anchoring |  |  | `python -m unittest discover -s app-blueprint/tests` |
-| `app-blueprint/tests/test_plan_shapes.py` | create | tests | W0 | W0-A1 | ◑ on disk | Tests of plan shape errors |  |  | `python -m unittest discover -s app-blueprint/tests` |
-| `app-blueprint/tests/test_plan_fuzz.py` | create | tests | W0 | W0-A1 | ◑ on disk | Fuzz tests of version 1 plans |  |  | `python -m unittest discover -s app-blueprint/tests` |
+| `app-blueprint/scripts/bp/views/__init__.py` | create | tool | W0 | W0-A2 | ◑ on disk | Package marker for the view modules |  |  | `python app-blueprint/scripts/blueprint.py --version` |
+| `app-blueprint/scripts/bp/__init__.py` | create | tool | W0 | W0-A2 | ◑ on disk | Package marker for bp |  |  | `python app-blueprint/scripts/blueprint.py --version` |
+| `app-blueprint/scripts/bp/globs.py` | create | tool | W0 | W0-A2 | ◑ on disk | Glob matching for owner rules, patterns and ignores |  |  | `python app-blueprint/scripts/blueprint.py --version` |
+| `app-blueprint/scripts/bp/learn.py` | create | tool | W0 | W0-A2 | ◑ on disk | Learning-loop store, redaction and incident records |  |  | `python app-blueprint/scripts/blueprint.py --version` |
+| `app-blueprint/scripts/bp/export.py` | create | tool | W0 | W0-A2 | ◑ on disk | Export formats: codeowners, csv, json, AgenticTeam commands |  |  | `python app-blueprint/scripts/blueprint.py --version` |
+| `app-blueprint/scripts/bp/install.py` | create | tool | W0 | W0-A2 | ◑ on disk | Copy of the tool into .blueprint/bin and the package start-up check |  |  | `python app-blueprint/scripts/blueprint.py --version` |
+| `app-blueprint/scripts/bp/api.py` | create | tool | W0 | W0-A2 | ◑ on disk | Frozen 1.x public names re-exported to the launcher |  |  | `python app-blueprint/scripts/blueprint.py --version` |
+| `app-blueprint/scripts/bp/commands/__init__.py` | create | tool | W0 | W0-A2 | ◑ on disk | Package marker for the command modules |  |  | `python app-blueprint/scripts/blueprint.py --version` |
+| `app-blueprint/scripts/bp/commands/data.py` | create | tool | W0 | W0-A2 | ◑ on disk | The db-check command |  |  | `python app-blueprint/scripts/blueprint.py --version` |
+| `app-blueprint/tests/support.py` | create | tests | W0 | W0-A2 | ◑ on disk | Shared test helpers for loading the tool |  |  | `python -m unittest discover -s app-blueprint/tests` |
+| `app-blueprint/tests/test_package.py` | create | tests | W0 | W0-A2 | ◑ on disk | Package layout, 1.x names, version lines and interrupted-copy tests |  |  | `python -m unittest discover -s app-blueprint/tests` |
+| `app-blueprint/tests/test_blueprint.py` | create | tests | W0 | W0-A2 | ◑ on disk | The 1.3.0 behaviour tests of the tool |  |  | `python -m unittest discover -s app-blueprint/tests` |
+| `app-blueprint/tests/test_data_and_learning.py` | create | tests | W0 | W0-A2 | ◑ on disk | The 1.3.0 tests of the data checks and the learning loop |  |  | `python -m unittest discover -s app-blueprint/tests` |
+| `app-blueprint/tests/test_presets.py` | create | tests | W0 | W0-A2 | ◑ on disk | Tests of the stack presets |  |  | `python -m unittest discover -s app-blueprint/tests` |
+| `app-blueprint/tests/test_contracts_module.py` | create | tests | W0 | W0-A2 | ◑ on disk | Tests of module README contracts |  |  | `python -m unittest discover -s app-blueprint/tests` |
+| `app-blueprint/tests/test_ignore_anchor.py` | create | tests | W0 | W0-A2 | ◑ on disk | Tests of ignore rule anchoring |  |  | `python -m unittest discover -s app-blueprint/tests` |
+| `app-blueprint/tests/test_owner_anchor.py` | create | tests | W0 | W0-A2 | ◑ on disk | Tests of owner rule anchoring |  |  | `python -m unittest discover -s app-blueprint/tests` |
+| `app-blueprint/tests/test_plan_shapes.py` | create | tests | W0 | W0-A2 | ◑ on disk | Tests of plan shape errors |  |  | `python -m unittest discover -s app-blueprint/tests` |
+| `app-blueprint/tests/test_plan_fuzz.py` | create | tests | W0 | W0-A2 | ◑ on disk | Fuzz tests of version 1 plans |  |  | `python -m unittest discover -s app-blueprint/tests` |
 | `app-blueprint/scripts/bp/data.py` | create | tool | W0 | W0-A2 | ◑ on disk | Stores and resources: SQL, Prisma and code scanning for the data checks |  |  | `python app-blueprint/scripts/blueprint.py --version` |
 | `app-blueprint/scripts/bp/core.py` | create | tool | W0 | W0-A2 | ◑ on disk | Paths, JSON and git helpers, BlueprintError and the envelope, proofs |  |  | `python app-blueprint/scripts/blueprint.py --version` |
 | `app-blueprint/scripts/bp/plan.py` | create | tool | W0 | W0-A2 | ◑ on disk | Plan loading, shape checks and the skeleton |  |  | `python app-blueprint/scripts/blueprint.py --version` |
@@ -401,6 +402,7 @@ These files are depended on by several owners. Change them only through their ow
 | `.github/workflows/tests.yml` | modify | ci | W0 | maintainers | ◑ on disk | CI test workflow |  |  | `python -c "pass"` |
 | `app-blueprint/agents/openai.yaml` | modify | skill | W0 | maintainers | ◑ on disk | Agent descriptor for OpenAI-style hosts |  |  | `python app-blueprint/scripts/blueprint.py --version` |
 | `app-blueprint/references/example-blueprint.json` | modify | references | W0 | maintainers | ◑ on disk | The version 1 example plan |  |  | `python app-blueprint/scripts/blueprint.py validate --root examples/snag-desk` |
+| `app-blueprint/tests/test_state_integrity.py` | create | tests | W0 | W0-A2 | ○ planned | Tests of state locking, atomic writes and a broken state.json |  |  | `python -m unittest discover -s app-blueprint/tests` |
 
 ## Decisions
 
@@ -408,4 +410,5 @@ These files are depended on by several owners. Change them only through their ow
 - **D2:** Files no workstream of the table touches belong to the roster id maintainers. Why: Every tracked file needs exactly one owner; these are the pre-2.0 files that stay as they are. (maintainers/design/v2-contract.md section 11)
 - **D4:** The .blueprint/** files are recorded as orchestrator, the final owner once the W0-C pull request merges (a third handover). maintainers/check_owned.py and its test stay W0-C. Why: Only a person or the orchestrator changes the plan; the check reads it from the base, so a builder branch cannot widen its own area. (orchestrator ruling, review round 1)
 - **D3:** The tool copy in .blueprint/bin is not committed. Why: The repository is the tool; a copy would go stale at every version bump. (W0-C)
+- **D5:** The files of the finished W0-A1 workstream pass to W0-A2, which maintains the core. Why: W0-A1 is merged and closed; later core fixes touch its files and must pass the ownership check. (orchestrator)
 
