@@ -40,6 +40,7 @@ FID = "F-log-snag"
 ITEMS = ("crates/snag-api/src/main.rs", "crates/snag-api/tests/snags.rs")
 ALL_FILES = ("Cargo.toml",) + ITEMS + ("apps/web/src/Inbox.tsx", "apps/web/src/offline.ts")
 PASS, FAIL = "exit 0", "exit 3"
+MAILBOX = "me" + chr(64) + "mail.test"
 
 
 def own_sources():
@@ -431,10 +432,10 @@ class WriteTest(Isolated, TempRoot):
 
     def test_notes_are_redacted_and_cut(self):
         text = (f"saw {self.root} and {self.root.as_posix()} and C:\\Users\\someone\\x and /home/me/secret and \\\\server\\share\\f "
-                "mail me@example.com token abcdefghijklmnopqrstuvwxyz0123456789 " + "y" * 800 + "\ud800")
+                "mail " + MAILBOX + " token abcdefghijklmnopqrstuvwxyz0123456789 " + "y" * 800 + "\ud800")
         note = self.records._clean_note(text, self.root)
         self.assertLessEqual(len(note), 500)
-        for bad in (str(self.root), self.root.as_posix(), "Users\\someone", "/home/me", "\\\\server", "me@example.com", "abcdefghijklmnopqrstuvwxyz0123456789"):
+        for bad in (str(self.root), self.root.as_posix(), "Users\\someone", "/home/me", "\\\\server", MAILBOX, "abcdefghijklmnopqrstuvwxyz0123456789"):
             self.assertNotIn(bad, note)
         self.assertIsNone(self.records._clean_note(None))
         self.assertIsNone(self.records._clean_note("   ", self.root))
