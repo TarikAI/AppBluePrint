@@ -1028,7 +1028,8 @@ class FindingsTest(HermeticRoot):
 
     def test_bad_id_is_registered_once_in_the_core(self):
         """Contract 7.4: bad-id is a cross-section code; the core registers it, domain modules only emit it."""
-        self.assertIn((r"^[a-z ]+ id '.*' has the wrong form", "bad-id"), self.v.CODES)
+        self.assertIn((r"(?s)^[a-z ]+ id '.*' has the wrong form", "bad-id"), self.v.CODES)
+        self.assertEqual(self.v.classify_error("task id 'T-a\nb' has the wrong form; use T-"), "bad-id")  # multi-line id
         self.assertIn("bad-id", self.v.CODE_EXAMPLES)
         for msg in ("milestone id 'beta' has the wrong form; use M then 1 to 3 digits",
                     "feature id 'Inbox' has the wrong form; use F- then lowercase letters",
