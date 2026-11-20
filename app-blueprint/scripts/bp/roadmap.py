@@ -12,12 +12,11 @@ import json
 import re
 from pathlib import Path
 
-from bp.core import BlueprintError, append_log, copy_json, now_iso
-from bp.plan import load_state, save_state
+from bp.core import BlueprintError, copy_json, now_iso, read_state, run_hint, update_state
+from bp.migrate import upgrade_state
 
 TASK_STATES = ("todo", "doing", "done", "blocked")
 TASK_GLYPH = {"todo": "○", "doing": "◑", "done": "✔", "blocked": "▲"}
-BP = "python .blueprint/bin/blueprint.py"  # how every next step starts: it runs as printed
 MILESTONE_ID = re.compile(r"M[0-9]{1,3}")  # always used with fullmatch: `$` would accept a trailing newline
 TASK_ID = re.compile(r"T-[a-z0-9][a-z0-9-]{0,47}")
 _DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
@@ -225,7 +224,7 @@ def unmet_dependencies(plan, tid, tasks, features):
     return out
 
 
-def _plan_fix(tid, owner, owner_action, roster):
+def _plan_fix(root, tid, owner, owner_action, roster):
     """What is wrong with the plan around a task when the command we would suggest cannot work, else None."""
     if owner not in roster:
         why = f"task {tid}: owner {owner!r} is not a roster entry"
@@ -235,7 +234,13 @@ def _plan_fix(tid, owner, owner_action, roster):
         why = f"task {tid} is an owner action, so its owner must be a human roster entry"
     else:
         return None
-    return f"fix .blueprint/blueprint.json ({why}), then run: {BP} validate"
+    return f"fix .blueprint/blueprint.json ({why}), then run: {_bp(root, 'validate')}"
+
+
+def _bp(root, args, module=None):
+    """A next step that runs as printed (core.run_hint): the project's copy when it has the command (module names
+    the file it needs), else this tool with --root; the copy form when no root is known."""
+    return run_hint(root, args, module) if root is not None else f"python .blueprint/bin/blueprint.py {args}"
 
 
 def _task_error(error, message, tid, next, code=1):  # noqa: A002 (next is the contract's name)
@@ -251,41 +256,48 @@ def set_task(root, plan, tid, status, by, note=None, force=False):
     tasks = section_index(plan, "tasks")
     if tid not in tasks:
         raise _task_error("unknown-task", f"{tid!r} is not a task in the plan", tid,
-                          f"{BP} migrate" if plan.get("_from") == 1 else f"{BP} status --tasks")
+                          _bp(root, "migrate", "commands/migrate") if plan.get("_from") == 1
+                          else _bp(root, "status --tasks"))
     task = tasks[tid]
     roster = _roster(plan)
     owner = _s(task.get("owner"))
     owner_action = any(t.get("ownerAction") is True for t in _list(plan, "tasks") if t.get("id") == tid)
-    again = _plan_fix(tid, owner, owner_action, roster) or (
-        f"{BP} task {tid} {status if status in TASK_STATES else 'doing'} --by {owner}"
-        + (' --note "waiting on ..."' if status == "blocked" else ""))
+    again = _plan_fix(root, tid, owner, owner_action, roster) or _bp(
+        root, f"task {tid} {status if status in TASK_STATES else 'doing'} --by {owner}"
+        + (' --note "waiting on ..."' if status == "blocked" else ""), "commands/roadmap")
     if by not in roster:
         raise _task_error("unknown-roster", f"--by {by!r} is not in the roster (roster ids: "
                           + (", ".join(sorted(roster)) or "none") + ")", tid, again)
     if status not in TASK_STATES:
         raise _task_error("usage", f"{status!r} is not a task status (use one of: {', '.join(TASK_STATES)})", tid,
-                          f"{BP} task --help", 64)
+                          _bp(root, "task --help", "commands/roadmap"), 64)
     if status == "blocked" and not (note or "").strip():
         raise _task_error("usage", f"{tid}: say why it is blocked", tid,
-                          f'{BP} task {tid} blocked --by {by} --note "waiting on ..."', 64)
-    state = load_state(root)
+                          _bp(root, f'task {tid} blocked --by {by} --note "waiting on ..."', "commands/roadmap"), 64)
+    state = read_state(root, upgrade_state)  # a state.json that cannot be used is bad-state, not a crash
     current = _state_task(state, tid).get("status")
     if owner_action and not _human(roster, by) and (status == "done" or current == "done"):
         person = owner if _human(roster, owner) else None
         why = ("only a person can mark it done" if status == "done" and current != "done"
                else "a person marked it done, and only a person can change that")
         raise _task_error("owner-action-human", f"{tid} is an owner action: {why}, and {by} is not a human roster entry",
-                          tid, f"{BP} task {tid} {status} --by {person}" + (' --note "waiting on ..."' if status == "blocked" else "")
+                          tid, _bp(root, f"task {tid} {status} --by {person}"
+                                   + (' --note "waiting on ..."' if status == "blocked" else ""), "commands/roadmap")
                           if person else again, 3)
     if by != owner and not force:
         raise _task_error("wrong-owner", f"{tid} is owned by {owner or 'nobody'}, not {by}; ask {owner or 'the lead'}, "
                           "or use --force if the lead says so", tid, again, 3)
-    if not isinstance(state.get("tasks"), dict):
-        state["tasks"] = {}
     rec = {"status": status, "by": by, "at": now_iso(), "note": note if note else None}
-    state["tasks"][tid] = rec
-    save_state(root, state)
-    append_log(root, {"event": "task", "task": tid, "status": status, "by": by, "note": rec["note"]})
+
+    def change(fresh):  # under the state lock, on state.json as it is now; task owns state.tasks[tid] only
+        if owner_action and not _human(roster, by) and _state_task(fresh, tid).get("status") == "done":
+            raise _task_error("owner-action-human", f"{tid} is an owner action: a person marked it done meanwhile, "
+                              f"and {by} is not a human roster entry", tid, _bp(root, "status --tasks"), 3)
+        if not isinstance(fresh.get("tasks"), dict):
+            fresh["tasks"] = {}
+        fresh["tasks"][tid] = rec
+        return [{"event": "task", "task": tid, "status": status, "by": by, "note": rec["note"]}]
+    update_state(root, change, upgrade_state)  # core: lock, re-read, change, atomic write, log line, unlock
     return rec
 
 
@@ -497,8 +509,8 @@ def cell(text):
     return line(text).replace("\\", "\\\\").replace("|", "\\|")
 
 
-def _migrate_or(plan, other):
-    return f"{BP} migrate" if isinstance(plan, dict) and plan.get("_from") == 1 else other
+def _migrate_or(root, plan, other):
+    return _bp(root, "migrate", "commands/migrate") if isinstance(plan, dict) and plan.get("_from") == 1 else other
 
 
 def status_lines(ctx, args):
@@ -525,7 +537,8 @@ def status_lines(ctx, args):
         if m is None:
             raise BlueprintError("unknown-milestone", f"{flat(want)!r} is not a milestone in the plan"
                                  + (" (milestones: " + ", ".join(flat(x["id"]) for x in ms) + ")" if ms else ""),
-                                 entry=f"milestone {flat(want)}", next=_migrate_or(ctx.get("plan"), f"{BP} status"))
+                                 entry=f"milestone {flat(want)}", next=_migrate_or(ctx.get("root"), ctx.get("plan"),
+                                                                _bp(ctx.get("root"), "status")))
         feats = {f["id"]: f for f in feature_rows(ctx.get("plan") or {}, ctx)}
         out += ["", f"  {flat(m['id'])} {flat(m['name'])}" + (f" · due {flat(m['due'])}" if m["due"] else "") + f" · {progress_text(m)}"]
         if m["goal"]:

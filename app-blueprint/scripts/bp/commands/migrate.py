@@ -12,10 +12,11 @@ import contextlib
 import json
 import os
 import re
+import secrets
 import sys
 from pathlib import Path
 
-from bp.core import TOOL_HOME, BlueprintError, append_log, bp_dir, emit, find_root
+from bp.core import TOOL_HOME, BlueprintError, append_log, bp_dir, emit, find_root, state_lock
 from bp.learn import _copy_version
 from bp.migrate import plan_version, upgrade_plan, upgrade_state
 from bp.plan import load_plan, load_raw_plan, load_state
@@ -79,12 +80,14 @@ def _write_failed(root, shown, reason, kind="tmp"):
                           next=(f"make {shown} writable" if exists else "make the folder .blueprint writable") + again)
 
 
-def _write_atomic(root, path, rel, data):
+def _write_atomic(root, path, rel, data, unique=False):
     """Write bytes to path (a link is followed to its target) through a temporary file beside it, then replace. The old
-    file stays whole on any failure, and the temporary file is removed whatever interrupts the write."""
+    file stays whole on any failure, and the temporary file is removed whatever interrupts the write. unique: the temp
+    name is unique to the process, as core.write_json's (state.json, which other commands write too)."""
     target = Path(os.path.realpath(path))
-    tmp = target.with_name(target.name + ".tmp")
-    tmp_rel = _shown(root, tmp, rel + ".tmp")
+    suffix = f".{os.getpid()}-{secrets.token_hex(4)}.tmp" if unique else ".tmp"
+    tmp = target.with_name(target.name + suffix)
+    tmp_rel = _shown(root, tmp, rel + suffix)
     keep = False  # a file already at the temporary name that could not be opened for writing is not ours to remove
     try:
         try:
@@ -217,6 +220,19 @@ def _read_state(root):
     return (raw, None) if isinstance(raw, dict) else (None, "is not a JSON object")
 
 
+def _state_out(state_raw, state_why):
+    """(the bytes of the upgraded state, or None when there is nothing to write; why it is left as it is, or None)."""
+    if state_raw is None:
+        return None, state_why
+    new_state = upgrade_state(state_raw)
+    if new_state == state_raw:
+        return None, None
+    try:
+        return _encode(new_state), None
+    except (UnicodeEncodeError, ValueError, RecursionError):
+        return None, "contains text or numbers that cannot be written back"
+
+
 def _backup(root, original):
     """Keep the original bytes: .blueprint/blueprint.v1.json when it does not exist (or holds the same bytes), else the
     first free blueprint.v1.N.json, so an older backup is never overwritten. Returns (relative name, written)."""
@@ -287,15 +303,7 @@ def cmd_migrate(args):
     except (UnicodeEncodeError, ValueError, RecursionError):
         raise BlueprintError("bad-json", "blueprint.json contains text that is not valid Unicode (a lone \\udXXX escape)",
                              entry="blueprint.json", next=_fix_next(root))
-    state_raw, state_why = _read_state(root)
-    state_bytes = None
-    if state_raw is not None:
-        new_state = upgrade_state(state_raw)
-        if new_state != state_raw:
-            try:
-                state_bytes = _encode(new_state)
-            except (UnicodeEncodeError, ValueError, RecursionError):
-                state_why = "contains text or numbers that cannot be written back"
+    state_bytes, state_why = _state_out(*_read_state(root))
     added = [k for k in NEW_SECTIONS if k not in raw]
     if dry:  # step 3
         line = "version 1 -> 2; " + (f"adds {', '.join(added)} (empty)" if added else "adds no sections")
@@ -309,32 +317,36 @@ def cmd_migrate(args):
         emit(args, "migrate", {"from": 1, "to": 2, "written": [], "dryRun": True}, [line])
         return
     _check_writable(root, [PLAN] + ([STATE] if state_bytes is not None else []))
-    backup, backup_written = _backup(root, original)  # step 4
-    for key in repeated:
-        print(f'warning: blueprint.json repeats the key "{key}"; the last value was kept and the original is in {backup}',
-              file=sys.stderr)
-    written = [PLAN]
-    _warn_hard_link(bp_dir(root) / "blueprint.json", PLAN)
-    try:  # step 5
-        _write_atomic(root, bp_dir(root) / "blueprint.json", PLAN, plan_bytes)
-    except _WriteError as e:
-        raise _write_failed(root, e.shown, e.reason, e.kind)
-    if state_bytes is not None:
-        _warn_hard_link(bp_dir(root) / "state.json", STATE)
-        try:
-            _write_atomic(root, bp_dir(root) / "state.json", STATE, state_bytes)
-            written.append(STATE)
-        except _WriteError as e:  # the plan is migrated; the state upgrades in memory whenever it is read (3.2)
-            print(f"warning: {e.shown} could not be written ({e.reason}). blueprint.json is migrated; state.json was left "
-                  "as it is and is upgraded in memory whenever it is read", file=sys.stderr)
-    elif state_why:
-        print(_state_warning(root, state_why), file=sys.stderr)
-    if backup_written:
-        written.append(backup)
-    try:  # step 6: the log and the views never undo a finished migration
-        append_log(root, {"event": "migrate", "from": 1, "to": 2, "tool": TOOL_VERSION})
-    except OSError as exc:
-        print(f"warning: the migration was not logged: {exc.strerror or exc}", file=sys.stderr)
+    # From here state.json is read again and replaced under the state lock (core.state_lock), so a change another
+    # command made meanwhile is kept; the log line is appended inside it. Nothing above writes or locks anything.
+    with state_lock(root):
+        state_bytes, state_why = _state_out(*_read_state(root))
+        backup, backup_written = _backup(root, original)  # step 4
+        for key in repeated:
+            print(f'warning: blueprint.json repeats the key "{key}"; the last value was kept and the original is in {backup}',
+                  file=sys.stderr)
+        written = [PLAN]
+        _warn_hard_link(bp_dir(root) / "blueprint.json", PLAN)
+        try:  # step 5
+            _write_atomic(root, bp_dir(root) / "blueprint.json", PLAN, plan_bytes)
+        except _WriteError as e:
+            raise _write_failed(root, e.shown, e.reason, e.kind)
+        if state_bytes is not None:
+            _warn_hard_link(bp_dir(root) / "state.json", STATE)
+            try:
+                _write_atomic(root, bp_dir(root) / "state.json", STATE, state_bytes, unique=True)
+                written.append(STATE)
+            except _WriteError as e:  # the plan is migrated; the state upgrades in memory whenever it is read (3.2)
+                print(f"warning: {e.shown} could not be written ({e.reason}). blueprint.json is migrated; state.json was left "
+                      "as it is and is upgraded in memory whenever it is read", file=sys.stderr)
+        elif state_why:
+            print(_state_warning(root, state_why), file=sys.stderr)
+        if backup_written:
+            written.append(backup)
+        try:  # step 6: the log and the views never undo a finished migration
+            append_log(root, {"event": "migrate", "from": 1, "to": 2, "tool": TOOL_VERSION})
+        except OSError as exc:
+            print(f"warning: the migration was not logged: {exc.strerror or exc}", file=sys.stderr)
     _render_quietly(root)
     emit(args, "migrate", {"from": 1, "to": 2, "written": written, "dryRun": False},
          [f"Migrated blueprint.json to schema version 2. Backup: {backup}. Next: add milestones and features "

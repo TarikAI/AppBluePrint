@@ -21,6 +21,7 @@ from pathlib import Path
 import support as S
 
 from bp import plan as bplan, registry, roadmap, validate
+from bp import core
 from bp.core import BlueprintError
 from bp.views import roadmap_md
 from bp.views.context import merged
@@ -578,7 +579,8 @@ class TaskCliTest(Isolated, TempRoot):
         self.assertEqual(r.returncode, 1)
         self.assertIn("M9", r.stderr)
         self.assertIn("(milestones: M1)", r.stderr)
-        self.assertIn("next: python .blueprint/bin/blueprint.py status", r.stderr)
+        self.assertRegex(r.stderr, r'next: python "[^"]+[\\/]scripts[\\/]blueprint\.py" status --root "'
+                         + re.escape(str(self.root.resolve())) + '"\n')  # this CLI runs from a copy of the skill
 
 
 def stub_features(**status):
@@ -1136,7 +1138,7 @@ class ReviewRoundOneTest(Isolated, TempRoot):
         for args in (("T-nope", "done", "owner"), ("T-api", "done", "nobody"), ("T-api", "finished", "backend-lead"),
                      ("T-api", "blocked", "backend-lead"), ("T-api", "done", "owner"), ("T-domain", "done", "backend-lead")):
             nxt = self.refused_next(loaded, *args)
-            self.assertTrue(nxt.startswith(PREFIX + " "), nxt)
+            self.assertTrue(nxt.startswith(core.run_hint(self.root, "\0").split(" \0")[0] + " "), nxt)
             self.assertNotIn("<", nxt)
         self.assertIn("task T-domain done --by owner", self.refused_next(loaded, "T-domain", "done", "backend-lead"))
         self.assertIn("--by backend-lead", self.refused_next(loaded, "T-api", "blocked", "backend-lead"))
@@ -1145,7 +1147,8 @@ class ReviewRoundOneTest(Isolated, TempRoot):
     def test_version_1_next_is_migrate(self):
         (self.root / ".blueprint" / "blueprint.json").write_text(S.EXAMPLE.read_text(encoding="utf-8"), encoding="utf-8")
         out = json.loads(self.cli("task", "T-domain", "done", "--by", "owner", "--json").stdout)
-        self.assertEqual(out["error"]["next"], PREFIX + " migrate")
+        self.assertRegex(out["error"]["next"], r'^python "[^"]+[\\/]scripts[\\/]blueprint\.py" migrate --root "'
+                         + re.escape(str(self.root.resolve())) + '"$')  # no project copy here
         ctx = {"plan": bplan.load_plan(self.root), "milestones": [], "tasks": []}
         with self.assertRaises(BlueprintError) as cm:
             roadmap.status_lines(ctx, type("A", (), {"milestone": "M1"})())
@@ -1154,7 +1157,7 @@ class ReviewRoundOneTest(Isolated, TempRoot):
     def test_unknown_milestone_next_runs(self):
         with self.assertRaises(BlueprintError) as cm:
             roadmap.status_lines(self.ctx(), type("A", (), {"milestone": "M9"})())
-        self.assertEqual(cm.exception.next, PREFIX + " status")
+        self.assertEqual(cm.exception.next, core.run_hint(self.root, "status"))
 
     # N2 and N3: one line per value; no raw HTML
     def test_status_tasks_prints_one_line_per_task(self):
@@ -1348,7 +1351,8 @@ class ReviewRoundTwoTest(Isolated, TempRoot):
             with self.assertRaises(BlueprintError) as cm:
                 roadmap.set_task(self.root, loaded, *args)
             self.assertTrue(cm.exception.next.startswith("fix .blueprint/blueprint.json ("), cm.exception.next)
-            self.assertTrue(cm.exception.next.endswith(f"then run: {PREFIX} validate"), cm.exception.next)
+            self.assertTrue(cm.exception.next.endswith("then run: " + core.run_hint(self.root, "validate")),
+                            cm.exception.next)
         plan = self.duplicate_kinds()
         loaded = bplan.load_plan(self.root)
         with self.assertRaises(BlueprintError) as cm:
@@ -1451,9 +1455,14 @@ class NoMachineSpecificTextTest(Isolated, TempRoot):
     def test_the_payload_and_next_texts_use_the_project_copy_form(self):
         from bp import roadmap as rm
         self.plan_json = v2_plan()
-        self.assertTrue(rm.BP.startswith("python .blueprint/bin/blueprint.py"))
-        self.assertNotIn(str(S.SCRIPTS), rm.BP)
+        self.assertEqual(rm._bp(None, "status"), "python .blueprint/bin/blueprint.py status")
         self.write_plan(v2_plan())
+        with self.assertRaises(BlueprintError) as cm:  # no project copy yet: this tool, with --root (literal form)
+            rm.set_task(self.root, bplan.load_plan(self.root), "T-nope", "done", "owner")
+        self.assertEqual(cm.exception.next, f'python "{S.LAUNCHER}" status --tasks --root "{self.root}"')
+        from bp.install import copy_tool
+        with contextlib.redirect_stdout(io.StringIO()):
+            copy_tool(self.root)  # with a project copy, every next step uses the copy form: no machine path
         loaded = bplan.load_plan(self.root)
         ctx = ViewTest.ctx(self, features=[], unknowns=[])
         blob = json.dumps(rm.map_payload(ctx))
@@ -1463,6 +1472,7 @@ class NoMachineSpecificTextTest(Isolated, TempRoot):
             rm.set_task(self.root, loaded, "T-nope", "done", "owner")
         self.assertNotIn(str(S.SCRIPTS), cm.exception.next)
         self.assertNotIn(str(self.root), cm.exception.next)
+        self.assertEqual(cm.exception.next, "python .blueprint/bin/blueprint.py status --tasks")  # literal, on purpose
 
 
 class RoadmapNextTest(Isolated, TempRoot):

@@ -16,11 +16,11 @@ from pathlib import Path
 
 from bp import registry
 from bp.version import TOOL_VERSION
-from bp.core import (BlueprintError, append_log, bp_dir, die, emit, find_root, git_head, norm, now_iso, path_key,
+from bp.core import (BlueprintError, bp_dir, die, emit, find_root, git_head, norm, now_iso, path_key,
                      project_path)
 from bp.globs import pattern_instance_rx
 from bp.learn import record_incident
-from bp.plan import GLYPH, LABEL, STATES, load_plan, load_state, owner_of, planned_file, save_state
+from bp.plan import GLYPH, LABEL, STATES, load_plan, owner_of, planned_file
 from bp.registry import command_built
 from bp.validate import validate_plan
 from bp.views.render import render_all
@@ -143,12 +143,31 @@ def _write_refusal(args, root, plan, path, by):
     return msg
 
 
+def _render_after(args, root, plan, state):
+    """The views, after a command's own result is saved (sync, verify --run, hook post). A failure here (state-busy,
+    bad-state, or a crash, which is recorded as an incident) prints one line on stderr and never changes the
+    command's exit code, as a view conflict does not (contract 8)."""
+    try:
+        render_all(root, plan, state, quiet=True)
+    except BlueprintError as e:
+        print(f"views not refreshed: {e.message}" + (f"; {e.next}" if e.next else ""), file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 - the command's own work is saved; say so and keep its exit code
+        record_incident(args, exc)
+        print("views not refreshed: an unexpected error (incident recorded); run render", file=sys.stderr)
+
+
 def cmd_sync(args):
+    """sync scans first, without the lock, then sets only the keys it owns (patterns, unplanned, ignoredTracked,
+    missingModify, syncedAt, head, and data apart from db-check's data.live) on the state as it is under the lock;
+    file records written by claim, mark and verify meanwhile are kept. Damage confined to a key sync rewrites is
+    repaired, as 1.3.0's rewrite did; damage in what it only reads (files) is bad-state."""
     from bp.data import scan_data
-    from bp.status import compute, repo_files
+    from bp.status import change_state, compute, load_state, repo_files
     root = find_root(args.root)
     plan = load_plan(root)
-    state = load_state(root)
+    owned_keys = ("patterns", "unplanned", "ignoredTracked", "missingModify") + (
+        ("data",) if plan["stores"] or plan["resources"] else ())  # data is rewritten only when there is data to scan
+    state = load_state(root, owned_keys)
     ignored_tracked = []
     disk = repo_files(root, plan, ignored_tracked)
     disk_set = set(disk)
@@ -169,20 +188,27 @@ def cmd_sync(args):
         if not hit:
             unplanned.append(p)
     missing_modify = [f["path"] for f in plan["files"] if f.get("action") == "modify" and f["path"] not in disk_set]
-    state["patterns"] = patterns
-    state["unplanned"] = unplanned
-    state["ignoredTracked"] = {"count": len(ignored_tracked), "paths": ignored_tracked[:20]}
-    state["missingModify"] = missing_modify
-    state["syncedAt"] = now_iso()
-    state["head"] = git_head(root)
-    data_issues = []
+    owned = {"patterns": patterns, "unplanned": unplanned,
+             "ignoredTracked": {"count": len(ignored_tracked), "paths": ignored_tracked[:20]},
+             "missingModify": missing_modify, "syncedAt": now_iso(), "head": git_head(root)}
+    state.update(owned)
+    data_issues, data = [], None
     if plan["stores"] or plan["resources"]:
-        state["data"] = scan_data(root, plan, state, disk)
-        data_issues = state["data"]["issues"]
-    save_state(root, state)
-    comp = compute(root, plan, state)
-    c = comp["counts"]
-    append_log(root, {"event": "sync", "head": state["head"], "counts": c, "unplanned": len(unplanned), "dataIssues": len(data_issues)})
+        data = state["data"] = scan_data(root, plan, state, disk)
+        data_issues = data["issues"]
+    scanned_files = state["files"]
+    counts = {"c": compute(root, plan, state)["counts"]}  # before the lock: this hashes the files
+
+    def change(fresh):
+        fresh.update(owned)
+        if data is not None:
+            fresh["data"] = dict(data, live=(fresh.get("data") or {}).get("live"))  # db-check's live, as it is now
+        if fresh["files"] != scanned_files:  # a claim, mark or proof landed meanwhile: count the state written
+            counts["c"] = compute(root, plan, fresh)["counts"]  # (the hashes are cached, so this is quick)
+        return [{"event": "sync", "head": owned["head"], "counts": counts["c"], "unplanned": len(unplanned),
+                 "dataIssues": len(data_issues)}]
+    state = change_state(root, change, owned_keys)
+    c = counts["c"]
     if not args.quiet:
         print(f"Synced {len(disk)} files on disk against {len(plan['files'])} planned files and {len(plan['patterns'])} patterns.")
         print("  " + "  ".join(f"{GLYPH[s]} {LABEL[s]} {c[s]}" for s in STATES))
@@ -201,8 +227,8 @@ def cmd_sync(args):
                 print("    !", p)
         if state.get("data"):
             dt = state["data"]
-            print(f"  Data: {len(dt['tables'])} table(s) in schema files, {len(plan['resources'])} declared resource(s), "
-                  f"{len(dt['observed'])} file(s) touching data, {len(data_issues)} issue(s).")
+            print(f"  Data: {len(dt.get('tables') or [])} table(s) in schema files, {len(plan['resources'])} declared "
+                  f"resource(s), {len(dt.get('observed') or {})} file(s) touching data, {len(data_issues)} issue(s).")
             for i in data_issues[:12]:
                 print(f"    ~ [{i['type']}] {i['detail']}")
             if len(data_issues) > 12:
@@ -213,8 +239,8 @@ def cmd_sync(args):
             if not args.quiet:
                 print(f"  Views not refreshed: the blueprint has {len(errors)} validation error(s). Run validate.")
         else:
-            render_all(root, plan, state, quiet=True)
-    serious = [i for i in data_issues if i["type"] != "declared-not-found"]
+            _render_after(args, root, plan, state)
+    serious =[i for i in data_issues if i["type"] != "declared-not-found"]
     if getattr(args, "strict", False) and (unplanned or missing_modify or serious):
         sys.exit(1)
 
@@ -259,7 +285,7 @@ def _blocked(ctx, key):
 
 
 def cmd_status(args):
-    from bp.status import next_ready, summarize
+    from bp.status import load_state, next_ready, summarize
     from bp.views.context import blocked_by, build_context, status_json
     root = find_root(args.root)
     plan = load_plan(root)
@@ -404,6 +430,7 @@ def cmd_mark(args):
 def _verify_feature(args, root, plan):
     """verify --feature F (7.2) through the verify_feature hook of records. Fail closed: exit 0 only when the hook says
     0 and every record it returns has result pass."""
+    from bp.status import load_state
     from bp.views.context import build_context
     fn = registry.hook("verify_feature")
     if fn is None:
@@ -417,6 +444,9 @@ def _verify_feature(args, root, plan):
 
 
 def cmd_verify(args):
+    """verify --run runs each check without the lock, then records that group's proofs (its own files' "verified")
+    and its log line on the state as it is under the lock; the lock is never held while a check runs."""
+    from bp.status import change_state, load_state
     from bp.verify import record_file_proofs, run_check, verify_groups
     feature = getattr(args, "feature", None)
     with_feature = {"--criterion": getattr(args, "criterion", None), "--repeat": getattr(args, "repeat", None),
@@ -446,7 +476,10 @@ def cmd_verify(args):
         for cmd, paths in groups.items():
             print(f"  {cmd}    # {len(paths)} file(s)")
         return
-    state = load_state(root)
+    state = load_state(root)  # a state that cannot be used is reported before any check runs
+    # each file's record as this verify found it: a reset to planned, or a claim by another owner, made after this
+    # point wins over the proof of a check that started before it (the proof is not saved)
+    started = {p: _rec_key(state["files"].get(p)) for paths in groups.values() for p in paths}
     failed = 0
     for cmd, paths in groups.items():
         print(f"$ {cmd}")
@@ -458,11 +491,49 @@ def cmd_verify(args):
         failed += 0 if ok else 1
         if not ok:
             registry.signal(root, "verify", f"verify-{result['result']}")  # 9.4
-        record_file_proofs(root, plan, state, cmd, paths, result)
-        append_log(root, {"event": "verify", "cmd": cmd, "ok": ok, "files": len(paths)})
-    save_state(root, state)
-    render_all(root, plan, state, quiet=True)
+        proofs = {"files": {}}
+        record_file_proofs(root, plan, proofs, cmd, paths, result)  # hashed before the lock is taken
+
+        reset = {}
+
+        def change(fresh, paths=paths, proofs=proofs["files"], cmd=cmd, ok=ok, reset=reset):
+            reset.clear()
+            for p in paths:
+                rec = fresh["files"].setdefault(p, {})
+                if "verified" not in proofs.get(p, {}):
+                    continue  # no proof for this file (not on disk): nothing to save, nothing to undo
+                if _reset_since(started.get(p), _rec_key(rec)):
+                    reset[p] = _rec_key(rec)  # changed while the check ran: that change wins, the proof is not saved
+                    continue
+                rec["verified"] = proofs[p]["verified"]
+            event = {"event": "verify", "cmd": cmd, "ok": ok, "files": len(paths)}
+            if reset:
+                event["notSaved"] = sorted(reset)  # the files whose proof this line does not stand for
+            return [event]
+        state = change_state(root, change)
+        for p, (st, by, _) in sorted(reset.items()):
+            what = "marked planned" if st == "planned" else "claimed"
+            print(f"  {p}: not verified: it was {what} by {by} while the check ran; verify it again when it is built")
+        failed += 1 if reset else 0
+    _render_after(args, root, plan, state)
     sys.exit(1 if failed else 0)
+
+
+def _rec_key(rec):
+    """(state, by, at) of a file record: what verify compares to see that it changed while a check ran."""
+    rec = rec if isinstance(rec, dict) else {}
+    return rec.get("state"), rec.get("by"), rec.get("at")
+
+
+def _reset_since(was, now):
+    """A file's record changed in a way that a proof from a check started at `was` must not undo: it went back to
+    planned, or it was claimed by a different owner than the one recorded then (no record then means no previous
+    owner to differ from, so a first claim, by anyone, is not a reset)."""
+    if now == was:
+        return False
+    if now[0] == "planned":
+        return True
+    return now[0] == "claimed" and was is not None and was[1] is not None and now[1] != was[1]
 
 
 def cmd_guard(args):

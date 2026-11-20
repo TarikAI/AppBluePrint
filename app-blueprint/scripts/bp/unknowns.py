@@ -19,7 +19,7 @@ import stat
 
 from pathlib import Path
 
-from bp.core import TOOL_HOME, bp_dir, norm, path_key, project_path
+from bp.core import bp_dir, norm, path_key, project_path, run_hint
 from bp.globs import pattern_instance_rx
 from bp.rules import uniq
 
@@ -127,7 +127,7 @@ def _run(root, args, needs=None, portable=False):
         return f"python .blueprint/bin/blueprint.py {args}"
     if portable:
         return f"python <skill>/scripts/blueprint.py {args} --root ."
-    return f'python "{TOOL_HOME / "blueprint.py"}" {args} --root "{root}"'
+    return run_hint(root, args, needs[:-3] if needs else None)  # core: this tool with --root
 
 
 def _blocks_of(u):
