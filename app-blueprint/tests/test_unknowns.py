@@ -1349,6 +1349,214 @@ class ResolvedWithoutDecisionTest(unittest.TestCase):
         self.assertNotIn("Nothing is open", out["text"])
 
 
+class ShortNameTest(unittest.TestCase):
+    """R3-B1: an 8.3 short name and the long name are one file (Windows, on a volume that makes short names)."""
+
+    LONG, SHORT = "apps/web/longfilename.ts", "apps/web/LONGFI~1.TS"
+
+    def project(self, entries):
+        plan = with_unknowns(unknown(blocks=["P2"]))
+        for path, phase in entries:
+            add_file(plan, path, phase)
+        return plan
+
+    def on_disk(self, p, long_name=True):
+        folder = p.root / "apps" / "web"
+        folder.mkdir(parents=True, exist_ok=True)
+        if long_name:
+            (folder / "longfilename.ts").write_text("x\n", encoding="utf-8")
+        if os.name != "nt" or not (folder / "LONGFI~1.TS").exists():
+            self.skipTest("this volume does not make 8.3 short names")
+
+    def test_both_directions_and_both_orders(self):
+        if os.name != "nt":
+            self.skipTest("8.3 short names are a Windows thing")
+        for long_blocked in (True, False):
+            for long_first in (True, False):
+                pair = [(self.LONG, "P2" if long_blocked else "P1"), (self.SHORT, "P1" if long_blocked else "P2")]
+                plan = self.project(pair if long_first else pair[::-1])
+                with TempProject(plan) as p:
+                    self.on_disk(p)
+                    for claimed in (self.LONG, self.SHORT):
+                        got = unknowns.refuse("claim", p.root, p.loaded(), claimed, "x")
+                        self.assertIsNotNone(got, f"{claimed}: long blocked {long_blocked}, long first {long_first}")
+                        r = p.cli("claim", claimed, "--by", "frontend-engineer")
+                        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+                    ctx = {}
+                    unknowns.context(p.root, p.loaded(), {}, ctx)
+                    self.assertTrue({self.LONG, self.SHORT} <= ctx["blocked"]["files"])
+
+    def test_a_short_folder_name(self):
+        if os.name != "nt":
+            self.skipTest("8.3 short names are a Windows thing")
+        plan = self.project([("apps/web/longfoldername/x.ts", "P2"), ("apps/web/LONGFO~1/x.ts", "P1")])
+        with TempProject(plan) as p:
+            (p.root / "apps" / "web" / "longfoldername").mkdir(parents=True)
+            if not (p.root / "apps" / "web" / "LONGFO~1").exists():
+                self.skipTest("this volume does not make 8.3 short names")
+            self.assertIsNotNone(unknowns.refuse("claim", p.root, p.loaded(), "apps/web/LONGFO~1/x.ts", "x"))
+
+    def test_when_neither_exists_the_names_are_compared_as_written(self):
+        """No file has either name, so there is no short-name alias: `LONGFI~1.TS` is a different path from
+        `longfilename.ts` until the long file exists, and claiming the free one cannot reach the blocked work."""
+        if os.name != "nt":
+            self.skipTest("8.3 short names are a Windows thing")
+        plan = self.project([(self.LONG, "P2"), (self.SHORT, "P1")])
+        with TempProject(plan) as p:
+            self.assertIsNone(unknowns.refuse("claim", p.root, p.loaded(), self.SHORT, "x"))
+            self.assertIsNotNone(unknowns.refuse("claim", p.root, p.loaded(), self.LONG, "x"))
+
+
+class OutsideLinkTest(unittest.TestCase):
+    """R3-M1: two folders linked to the same folder outside the project are the same file."""
+
+    def test_two_links_to_one_outside_folder(self):
+        outside = Path(tempfile.mkdtemp(prefix="bp outside "))
+        self.addCleanup(shutil.rmtree, outside, True)
+        for first in (True, False):
+            pair = [("apps/web/o1/x.ts", "P2"), ("apps/web/o2/x.ts", "P1")]
+            plan = with_unknowns(unknown(blocks=["P2"]))
+            for path, phase in (pair if first else pair[::-1]):
+                add_file(plan, path, phase)
+            with TempProject(plan) as p:
+                (p.root / "apps" / "web").mkdir(parents=True)
+                if not (make_dir_link(p.root / "apps" / "web" / "o1", outside)
+                        and make_dir_link(p.root / "apps" / "web" / "o2", outside)):
+                    self.skipTest("this machine cannot create a directory link")
+                for claimed in ("apps/web/o1/x.ts", "apps/web/o2/x.ts"):
+                    got = unknowns.refuse("claim", p.root, p.loaded(), claimed, "x")
+                    self.assertIsNotNone(got, f"{claimed}, blocked listed first: {first}")
+                    self.assertNotIn(str(outside), got[0] + got[2].replace(str(p.root), ""))
+                    self.assertEqual(p.cli("claim", claimed, "--by", "frontend-engineer").returncode, 3)
+                ctx = {}
+                unknowns.context(p.root, p.loaded(), {}, ctx)
+                self.assertTrue({"apps/web/o1/x.ts", "apps/web/o2/x.ts"} <= ctx["blocked"]["files"])
+                self.assertNotIn(str(outside), json.dumps(sorted(ctx["blocked"]["files"])))
+
+
+class KnownLimitTest(unittest.TestCase):
+    def test_known_limit_a_link_below_a_pattern_wildcard_is_not_followed(self):
+        """Known limit (R3-M2): only a pattern's literal folder prefix is resolved. A link located below a wildcard
+        (`apps/web/*/x` with `a/x` linked to another planned folder) is not followed, so the free planned file in the
+        real folder stays claimable. The instance written through the link is refused."""
+        pat = {"id": "p", "glob": "apps/web/*/x/*.ts", "module": "web", "phase": "P2", "purpose": "p"}
+        plan = with_unknowns(unknown(blocks=["P2"]))
+        plan["patterns"] = [pat]
+        add_file(plan, "apps/web/b/y/f.ts", "P1")
+        with TempProject(plan) as p:
+            (p.root / "apps" / "web" / "a").mkdir(parents=True)
+            (p.root / "apps" / "web" / "b" / "y").mkdir(parents=True)
+            if not make_dir_link(p.root / "apps" / "web" / "a" / "x", p.root / "apps" / "web" / "b" / "y"):
+                self.skipTest("this machine cannot create a directory link")
+            self.assertIsNotNone(unknowns.refuse("claim", p.root, p.loaded(), "apps/web/a/x/f.ts", "x"))
+            self.assertIsNone(unknowns.refuse("claim", p.root, p.loaded(), "apps/web/b/y/f.ts", "x"),
+                              "the known limit: documented in the contract, not followed")
+
+
+class CostTest(unittest.TestCase):
+    """R3-M3: one claim costs about what the core's own check costs; nothing is resolved without a candidate."""
+
+    def timed(self, fn):
+        import time
+        t = time.time()
+        out = fn()
+        return out, time.time() - t
+
+    def many(self, n, shape):
+        plan = with_unknowns(unknown(blocks=["P2"]))
+        if shape == "folders":
+            plan["files"] = [{"path": f"apps/web/d{i}/f{i}.ts", "action": "create", "module": "web",
+                              "phase": "P1" if i % 2 else "P2", "purpose": "p"} for i in range(n)]
+        elif shape == "same-name":
+            plan["files"] = [{"path": f"apps/web/d{i}/index.ts", "action": "create", "module": "web",
+                              "phase": "P1" if i % 2 else "P2", "purpose": "p"} for i in range(n)]
+        else:
+            plan["files"] = [{"path": f"apps/web/f{i}.ts", "action": "create", "module": "web",
+                              "phase": "P1" if i % 2 else "P2", "purpose": "p"} for i in range(n)]
+        return plan
+
+    def test_20000_files_in_20000_folders_resolve_nothing(self):
+        from unittest import mock
+        plan = self.many(20000, "folders")
+        with TempProject() as p:
+            with mock.patch.object(unknowns, "project_path", side_effect=AssertionError("resolved the plan")) as m:
+                got, t1 = self.timed(lambda: unknowns.refuse("claim", p.root, plan, "apps/web/d2/f2.ts", "x"))
+                ctx = {}
+                _, t2 = self.timed(lambda: unknowns.context(p.root, plan, {}, ctx))
+            self.assertIsNotNone(got)
+            self.assertEqual(len(ctx["blocked"]["files"]), 10000)
+            self.assertFalse(m.called)
+            self.assertLess(t1, 3, f"one claim took {t1:.1f}s")
+            self.assertLess(t2, 5, f"the context took {t2:.1f}s")
+
+    def test_20000_files_with_one_name_are_bounded(self):
+        plan = self.many(20000, "same-name")
+        with TempProject() as p:
+            got, t = self.timed(lambda: unknowns.refuse("claim", p.root, plan, "apps/web/d2/index.ts", "x"))
+            self.assertIsNotNone(got)
+            self.assertLess(t, 6, f"one claim took {t:.1f}s")
+
+    def test_2000_patterns_in_one_claim(self):
+        plan = self.many(10, "one")
+        plan["patterns"] = [{"id": f"p{i}", "glob": f"apps/web/g{i}/*.ts", "module": "web", "phase": "P2", "purpose": "p"}
+                            for i in range(2000)]
+        with TempProject() as p:
+            got, t = self.timed(lambda: unknowns.refuse("claim", p.root, plan, "apps/web/g7/x.ts", "x"))
+            self.assertIsNotNone(got)
+            self.assertLess(t, 3, f"one claim took {t:.1f}s")
+
+    def test_a_backslash_path_is_resolved_like_its_slash_form(self):
+        with TempProject() as p:
+            plan = p.loaded()
+            got = unknowns.refuse("claim", p.root, plan, "apps\\web\\src\\offline.ts", "x")
+            self.assertEqual(got, unknowns.refuse("claim", p.root, plan, OFFLINE, "x"))
+
+
+class LinksAndShortNamesPropertyTest(unittest.TestCase):
+    """Random plans over folders, links to them and (on Windows) a long and a short file name: everything listed in
+    ctx["blocked"]["files"] is refused in every spelling, every refused planned file is listed, and a file is refused
+    exactly when some planned file with the same real location is in a blocked phase."""
+
+    def test_random_plans(self):
+        import random
+        with TempProject() as p:
+            web = p.root / "apps" / "web"
+            for d in ("d1", "d2", "d1/s"):
+                (web / d).mkdir(parents=True)
+            made = {n: make_dir_link(web / n, web / t) for n, t in (("L1", "d1"), ("L2", "d2"), ("L3", "d1/s"))}
+            if not all(made.values()):
+                self.skipTest("this machine cannot create a directory link")
+            names = ["a.ts", "b.ts", "A.TS"] if CASE_INSENSITIVE else ["a.ts", "b.ts"]
+            if os.name == "nt":
+                (web / "d1" / "longfilename.ts").write_text("x\n", encoding="utf-8")
+                if (web / "d1" / "LONGFI~1.TS").exists():
+                    names += ["longfilename.ts", "LONGFI~1.TS"]
+            folders = ["d1", "d2", "L1", "L2", "L3", "d1/s", "L1/s"]
+            pool = sorted({f"apps/web/{d}/{n}" for d in folders for n in names})
+            checked = 0
+            for seed in range(1, 41):
+                rnd = random.Random(seed)
+                paths = rnd.sample(pool, rnd.randint(2, 8))
+                plan = with_unknowns(unknown(blocks=["P2"]))
+                for path in paths:
+                    add_file(plan, path, rnd.choice(["P1", "P2"]))
+                ctx = {}
+                unknowns.context(p.root, plan, {}, ctx)
+                listed = ctx["blocked"]["files"]
+
+                def real(path):
+                    return os.path.normcase(os.path.realpath(p.root / path))
+                blocked_real = {real(f["path"]) for f in plan["files"] if f["phase"] == "P2"}
+                for f in plan["files"]:
+                    expect = real(f["path"]) in blocked_real
+                    self.assertEqual(f["path"] in listed, expect, f"seed {seed}: {f['path']} in {paths}")
+                    for spelling in spellings_of(f["path"], p.root):
+                        got = unknowns.refuse("claim", p.root, plan, spelling, "x")
+                        self.assertEqual(got is not None, expect, f"seed {seed}: {spelling}")
+                        checked += 1
+            self.assertGreater(checked, 400)
+
+
 class ReviewNitsTest(unittest.TestCase):
     def test_n1_a_resolved_unknown_without_its_decision_keeps_blocking(self):
         for decisions, dec in (([], DROP), ([], "D-offline"), ([decision()], "D-other"), ([decision()], ""),

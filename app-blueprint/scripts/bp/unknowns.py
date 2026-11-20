@@ -360,108 +360,151 @@ def validate(plan, E, W, vctx):
 
 # --- which claims are refused ---------------------------------------------------------------------------------------
 
-def _spellings(root, path):
-    """Every way the claimed path can be written that still names one file: as given, with `./`, `..` and repeated
-    slashes folded, and (when the root is known) as the project resolves it (a junction or symlink included)."""
-    first = norm(path)
-    out = [first, posixpath.normpath(first)]
-    try:
-        rel = project_path(root, path) if root is not None else None
-    except Exception:  # noqa: BLE001 - a path the resolver cannot read is simply not another spelling
-        rel = None
-    if rel and rel not in out:
-        out.append(rel)
-    return out
+NT = os.name == "nt"
+
+
+def _leaf_of(path):
+    return path.rpartition("/")[2]
+
+
+def _plain_leaf(leaf):
+    """The name a new file of this name gets on this system: Windows drops a stream suffix and trailing dots and
+    spaces (so `y.ts.` and `y.ts::$DATA` are `y.ts`)."""
+    return leaf.split(":", 1)[0].rstrip(". ") if NT else leaf
+
+
+def _leaf_key(path):
+    return path_key(_plain_leaf(_leaf_of(path)))
+
+
+def _odd(c):
+    """A written path that is absolute, or leaves or re-enters the folder tree: it needs resolving to be compared."""
+    return os.path.isabs(c) or c.startswith("//") or re.match(r"[A-Za-z]:", c) is not None or ".." in c.split("/")
 
 
 class _Plan:
-    """What claim decisions need from a plan, computed once: the blocking scan, the plan's feature ids, planned files
-    by path key and the patterns with their instance expressions."""
+    """What claim decisions need from a plan: the blocking scan, the plan's feature ids, planned files by written path
+    and by file name, and the patterns with their instance expressions.
 
-    def __init__(self, plan, root=None):
-        self.plan, self.root, self.res = plan, root, {}
+    Two plan entries name the same file when their resolved locations are equal (a link, a junction, a short name, a
+    trailing dot or a stream suffix can make two written paths one file). Resolving is done only for entries that
+    could be the file being judged, never for the whole plan: the planned files with the same file name (after
+    path_key and the Windows name rules), those whose name could be an 8.3 short name (contains ~), every pattern
+    (matched as written and rebased on its resolved literal folder), and nothing at all when none of that applies.
+    A location outside the project gets an internal key, used only to compare, never stored or shown."""
+
+    def __init__(self, plan, root=None, full=False):
+        self.plan, self.root, self.full = plan, root, full  # full: resolve the claimed path with project_path itself
+        self.res, self.dirs = {}, {}
         self.blocked, self.info, self.hits, self.why = _scan(plan)
         self.features = _ids(plan, "features")
-        self.files, self.pos = [], {}
-        self.by_key = {}
+        self.files, self.pos, self.by_key, self.by_leaf, self.tilde = [], {}, {}, {}, []
         for f in _dicts(plan, "files"):
             if isinstance(f.get("path"), str):
                 self.pos[id(f)] = len(self.files)
                 self.files.append(f)
-                for key in {path_key(norm(f["path"])), *self.keys_of(f["path"])}:
-                    self.by_key.setdefault(key, []).append(f)
-        fold = re.IGNORECASE if os.path.normcase("A") == "a" else 0  # a case-insensitive disk: fail closed
+                p = norm(f["path"])
+                self.by_key.setdefault(path_key(p), []).append(f)
+                self.by_leaf.setdefault(_leaf_key(p), []).append(f)
+                if NT and "~" in _leaf_of(p):
+                    self.tilde.append(f)
+        self.fold = re.IGNORECASE if os.path.normcase("A") == "a" else 0  # a case-insensitive disk: fail closed
         self.patterns = []
         for p in _dicts(plan, "patterns"):
             if isinstance(p.get("glob"), str) and p["glob"]:
-                rxs = [re.compile((rx := pattern_instance_rx(g)).pattern, rx.flags | fold)
-                       for g in [p["glob"]] + self.rebased(p["glob"])]
-                self.patterns.append((p, rxs))
+                self.patterns.append((p, [self.rx(p["glob"])]))
+        self.rebased_done = False
 
-    def resolved(self, path):
-        """The project-relative location `path` really names (links, case, trailing dots and streams resolved), or
-        None when the root is unknown. Done once per path."""
-        if self.root is None:
-            return None
-        if path not in self.res:
-            self.res[path] = self._resolve(path)
-        return self.res[path]
+    def rx(self, glob):
+        rx = pattern_instance_rx(glob)
+        return re.compile(rx.pattern, rx.flags | self.fold)
 
+    # --- locations -------------------------------------------------------------------------------------------------
     def _full(self, path):
         try:
             return project_path(self.root, path)
         except Exception:  # noqa: BLE001 - a path the resolver cannot read has no other location
             return None
 
-    def _resolve(self, path):
-        """project_path(root, path), but each folder is resolved once and only the file name is treated on its own
-        (a plan has few folders and many files): the resolved folder, then the name as a new file of it would be
-        written (Windows drops a stream suffix and trailing dots and spaces), and the full resolution when the name
-        is itself a link."""
-        parent, sep, leaf = path.rpartition("/")
-        if not sep or not leaf or leaf in (".", ".."):
-            return self._full(path)
-        if parent not in self.res:
-            self.res[parent] = self._full(parent)
-        rparent = self.res[parent]
-        if rparent is None:
-            return None
-        if os.name == "nt":
-            leaf = leaf.split(":", 1)[0].rstrip(". ")
-            if not leaf:
-                return self._full(path)
-        found = f"{rparent}/{leaf}" if rparent not in ("", ".") else leaf
+    def resolved(self, path):
+        """The project-relative location a written path really names, or None (outside the project, or unreadable).
+        Folders are resolved one segment at a time with one lstat each, cached; a segment that is a link, or that
+        could be a short name, goes through project_path itself."""
+        if path not in self.res:
+            self.res[path] = self._resolve(path)
+        return self.res[path]
+
+    def _dir(self, d):
+        if d in ("", "."):
+            return ""
+        if d in self.dirs:
+            return self.dirs[d]
+        parent, _, name = d.rpartition("/")
+        rp = self._dir(parent) if parent else ""
+        if rp is None or name in (".", "..") or (NT and "~" in name):
+            out = self._full(d)
+        else:
+            if NT:
+                name = name.split(":", 1)[0].rstrip(". ")
+            found = f"{rp}/{name}" if rp else name
+            out = found if self._plain(found) else self._full(d)
+        self.dirs[d] = out
+        return out
+
+    def _plain(self, rel):
+        """True when `rel` (project-relative) is not a link (or does not exist): it names itself."""
         try:
-            st = os.lstat(os.path.join(str(self.root), found))
+            st = os.lstat(os.path.join(str(self.root), rel))
         except FileNotFoundError:
-            return found
+            return True
         except (OSError, ValueError):
+            return False
+        return not (stat.S_ISLNK(st.st_mode) or getattr(st, "st_file_attributes", 0) & 0x400)  # symlink, junction
+
+    def _resolve(self, path):
+        parent, sep, leaf = path.rpartition("/")
+        if not sep or not leaf or leaf in (".", "..") or (NT and "~" in leaf):
             return self._full(path)
-        if stat.S_ISLNK(st.st_mode) or getattr(st, "st_file_attributes", 0) & 0x400:  # symlink, junction
+        rp = self._dir(parent)
+        if rp is None:
+            return None
+        leaf = _plain_leaf(leaf)
+        if not leaf:
             return self._full(path)
-        return found
+        found = f"{rp}/{leaf}" if rp else leaf
+        return found if self._plain(found) else self._full(path)
 
-    def keys_of(self, path):
-        r = self.resolved(norm(path))
-        return [path_key(r)] if r else []
+    def loc(self, path, rel):
+        """The key two entries are compared by: the resolved location (path_key), or for a location outside the
+        project an internal key made of the real path. Never stored, printed or put in ctx."""
+        if rel:
+            return path_key(rel)
+        try:
+            return "<outside>:" + os.path.normcase(os.path.realpath(os.path.join(str(self.root), path)))
+        except (OSError, ValueError):
+            return None
 
-    def rebased(self, glob):
-        """The glob again with its literal folder prefix resolved (a pattern through a link also names the real
-        folder), as a list of zero or one globs."""
-        segs = norm(glob).lstrip("/").split("/")
-        lit = []
-        for sg in segs[:-1]:
-            if "*" in sg or "?" in sg:
-                break
-            lit.append(sg)
-        if not lit:
-            return []
-        prefix = "/".join(lit)
-        r = self.resolved(prefix)
-        if not r or path_key(r) == path_key(prefix):
-            return []
-        return [r + "/" + "/".join(segs[len(lit):])]
+    def rebase_patterns(self):
+        """Each pattern also as a glob on the resolved location of its literal folder prefix (a pattern written through
+        a link also names the real folder). Links below a wildcard are not followed (a known limit, R3-M2)."""
+        if self.rebased_done or self.root is None:
+            return
+        self.rebased_done = True
+        for entry in self.patterns:
+            segs = norm(entry[0]["glob"]).lstrip("/").split("/")
+            lit = []
+            for sg in segs[:-1]:
+                if "*" in sg or "?" in sg:
+                    break
+                lit.append(sg)
+            if not lit:
+                continue
+            prefix = "/".join(lit)
+            r = self.resolved(prefix)
+            if r and path_key(r) != path_key(prefix):
+                entry[1].append(self.rx(r + "/" + "/".join(segs[len(lit):])))
 
+    # --- matching --------------------------------------------------------------------------------------------------
     def served(self, entries):
         """The feature ids the entries serve, in order, from the plan: only ids that name a feature of features[]
         (compared exactly) count, so a typo is never a free feature. Infrastructure is just a file with none."""
@@ -476,27 +519,89 @@ class _Plan:
         phase = entry.get("phase")
         return isinstance(phase, str) and phase in self.blocked["phases"] and bool(self.blocked["by"].get(f"phase:{phase}"))
 
-    def spellings(self, path):
-        """Every way the claimed path can be written that still names one file (see _spellings), resolving once."""
-        out = _spellings(None, path)
-        r = self.resolved(path)
-        if r and r not in out:
-            out.append(r)
-        return out
+    def matches(self, path):
+        """(files, patterns) that the claimed path names, written or resolved: planned files with the same written
+        path (path_key), planned files with the same location, and patterns that match any spelling."""
+        c = norm(path)
+        spells = [c, posixpath.normpath(c)]
+        files = {id(f): f for k in {path_key(s) for s in spells} for f in self.by_key.get(k, [])}
+        if self.root is not None:
+            lstat_link = not self._plain(c) if c and not c.startswith("../") else False
+            names = {_leaf_key(c)}
+            candidates = list(self.by_leaf.get(_leaf_key(c), []))
+            need = (_odd(c) or bool(self.patterns) or len(candidates) > 1 or lstat_link or bool(self.tilde)
+                    or (NT and "~" in _leaf_of(c)))
+            if need:
+                rel = self._full(c) if self.full else self.resolved(c)
+                if rel and rel not in spells:
+                    spells.append(rel)
+                key = self.loc(c, rel)
+                if rel:
+                    names.add(_leaf_key(rel))
+                cand = {}
+                for n in names:
+                    for f in self.by_leaf.get(n, []):
+                        cand[id(f)] = f
+                if NT and "~" in _leaf_of(c):
+                    cand.update({id(f): f for f in self.files})
+                cand.update({id(f): f for f in self.tilde})
+                for f in cand.values():
+                    if id(f) in files or key is None:
+                        continue
+                    p = norm(f["path"])
+                    if self.loc(p, self.resolved(p)) == key:
+                        files[id(f)] = f
+                self.rebase_patterns()
+        out_files = sorted(files.values(), key=lambda f: self.pos[id(f)])
+        pats = [p for p, rxs in self.patterns if any(rx.match(s) for rx in rxs for s in spells)]
+        return out_files, pats
 
-    def matches(self, spellings):
-        """(files, patterns) that any spelling names: planned files whose path key equals a spelling's, in plan
-        order, and patterns whose instance expression matches a spelling."""
-        keys = {path_key(s) for s in spellings}
-        files, seen = [], set()
-        for k in keys:
-            for f in self.by_key.get(k, []):
-                if id(f) not in seen:
-                    seen.add(id(f))
-                    files.append(f)
-        files.sort(key=lambda f: self.pos[id(f)])
-        pats = [p for p, rxs in self.patterns if any(rx.match(s) for rx in rxs for s in spellings)]
-        return files, pats
+    def refused_files(self):
+        """The planned file paths that a claim refuses: the decision `matches` and `judge` make for each file, taken in
+        one pass. Files are grouped by location (resolved only where a claim would resolve: same file name as another,
+        a possible short name, a link, an odd spelling, or any pattern or short name in the plan), a group is refused
+        when one member is, and each file also meets the patterns that match it."""
+        need = set()
+        if self.root is not None:
+            every = bool(self.patterns) or bool(self.tilde)
+            for f in self.files:
+                p = norm(f["path"])
+                if (every or _odd(p) or len(self.by_leaf[_leaf_key(p)]) > 1 or (NT and "~" in _leaf_of(p))
+                        or not self._plain(p)):
+                    need.add(id(f))
+            work = [f for f in self.files if id(f) in need]
+            while work:  # a link to a file with another name: that file is a candidate too
+                f = work.pop()
+                p = norm(f["path"])
+                rel = self.resolved(p)
+                names = {_leaf_key(rel)} - {_leaf_key(p)} if rel else set()  # only a link changes the name
+                for n in names:
+                    for g in self.by_leaf.get(n, []):
+                        if id(g) not in need:
+                            need.add(id(g))
+                            work.append(g)
+            self.rebase_patterns()
+        groups, key_of = {}, {}
+        for f in self.files:
+            p = norm(f["path"])
+            key = (self.loc(p, self.resolved(p)) if id(f) in need else None) or path_key(p)
+            key_of[id(f)] = key
+            groups.setdefault(key, []).append(f)
+        group_refused = {k: any(self.judge([g], []) for g in members) for k, members in groups.items()}
+        out = set()
+        for f in self.files:
+            if group_refused[key_of[id(f)]]:
+                out.add(f["path"])
+            elif self.patterns:
+                p = norm(f["path"])
+                spells = [p, posixpath.normpath(p)]
+                rel = self.resolved(p) if self.root is not None else None
+                if rel and rel not in spells:
+                    spells.append(rel)
+                pats = [q for q, rxs in self.patterns if any(rx.match(sp) for rx in rxs for sp in spells)]
+                if pats and self.judge([], pats):
+                    out.add(f["path"])
+        return out
 
     def judge(self, files, pats):
         """The first reason a claim is refused, as (kind, entry-or-patterns, served): every matching planned file is
@@ -523,12 +628,13 @@ def _named(uids, info):
     return shown
 
 
-def _decide(pl, root, path):
-    """(message, error, next) when claiming `path` is refused under `pl` (a _Plan), else None."""
-    files, pats = pl.matches(pl.spellings(path))
+def _decide(pl, root, path, message=True):
+    """(message, error, next) when claiming `path` is refused under `pl` (a _Plan), else None; with message=False
+    just True or None (the same decision, without building the text)."""
+    files, pats = pl.matches(path)
     verdict = pl.judge(files, pats)
-    if verdict is None:
-        return None
+    if verdict is None or not message:
+        return None if verdict is None else True
     kind, entries, served = verdict
     shown = _one(norm(path))
     if entries[0] in files:
@@ -565,7 +671,7 @@ def _decide(pl, root, path):
 def blocked_files(plan, root=None):
     """The planned file paths that a claim refuses: the same decision `refuse` makes, so the two never disagree."""
     pl = _Plan(plan, root)
-    return {f["path"] for f in pl.files if _decide(pl, root, f["path"])}
+    return pl.refused_files()
 
 
 def refuse(action, root, plan, path, by):
@@ -575,7 +681,7 @@ def refuse(action, root, plan, path, by):
     an unknown naming the feature, or its milestone). The refusal names the entry that caused it."""
     if action != "claim" or not isinstance(plan, dict):
         return None
-    return _decide(_Plan(plan, root), root, path)
+    return _decide(_Plan(plan, root, full=True), root, path)
 
 
 # --- context, views and status --------------------------------------------------------------------------------------
@@ -606,7 +712,7 @@ def context(root, plan, state, ctx):
     that claim refuses (an extra key, "files")."""
     pl = _Plan(plan, root)
     ctx["blocked"] = pl.blocked
-    ctx["blocked"]["files"] = {f["path"] for f in pl.files if _decide(pl, root, f["path"])}
+    ctx["blocked"]["files"] = pl.refused_files()
     ids = _plan_ids(plan)
     items = plan.get("unknowns") if isinstance(plan, dict) else None
     ctx["unknowns"] = [_payload(u, ids, i in pl.hits)
