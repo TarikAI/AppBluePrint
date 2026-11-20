@@ -15,13 +15,13 @@ from pathlib import Path
 from bp.version import TOOL_VERSION
 from bp import registry
 from bp.core import TOOL_HOME, BlueprintError, bp_dir, find_asset, write_text_if_changed
-from bp.core import copy_json
 from bp.plan import GLYPH, LABEL, STATES, save_state
 from bp.data import data_view
 from bp.status import compute
 from bp.views.context import build_context, merged
 from bp.views.structure import render_structure
 from bp.views.roster import render_roster
+from bp.core import copy_json  # on its own line, apart from the bp.core import above (PR #14 rewrites that one)
 
 BASE_VIEWS = ("STRUCTURE.md", "ROSTER.md", "map.html")
 RESERVED_VIEWS = BASE_VIEWS + ("README.md",)  # init writes README.md for people to edit
