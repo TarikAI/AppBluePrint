@@ -250,8 +250,8 @@ def scrub(text):
     return text, found
 
 
-_BREAKS = "\r\n\x0b\x0c\x1c\x1d\x1e\x85  "
-_CONTROL = re.compile(r"[\x00-\x1f\x7f\x85  ]")
+_BREAKS = "\r\n\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"
+_CONTROL = re.compile(r"[\x00-\x1f\x7f\x85\u2028\u2029]")
 _SPACES = re.compile(r"\s+")
 
 

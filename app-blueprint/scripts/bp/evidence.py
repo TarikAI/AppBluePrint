@@ -46,7 +46,7 @@ DATA_TRIMMED = "data trimmed"
 BAD_STUDY = "bad-study"  # error identifier for a damaged study.json or behaviours.json (proposed for 7.3)
 EVIDENCE_FILE, STUDY_FILE, BEHAVIOURS_FILE = "evidence.jsonl", "study.json", "behaviours.json"
 BUNDLE_MAX = 256 * 1024 * 1024
-_CONTROL = re.compile(r"[\x00-\x1f\x7f\x85  ]")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f\x85\u2028\u2029]")
 
 
 # ------------------------------------------------------------------------------------------------ paths
