@@ -8,8 +8,8 @@ Ownership follows the rules below in order; **the last matching rule wins**, as 
 
 | Owner | Kind | Harness | Role | Files | Verified | Patterns |
 |---|---|---|---|---|---|---|
-| W0-A1 | agent | claude-code | Mechanical split of the 1.3.0 tool into the bp package, launcher, copied layout | 19 | 0 | 1 |
-| W0-A2 | agent | claude-code | 2.0 foundations: registry and hooks, findings, envelope, proofs, validation of schema 2 | 21 | 0 | 0 |
+| W0-A1 | agent | claude-code | Mechanical split of the 1.3.0 tool into the bp package, launcher, copied layout | 0 | 0 | 0 |
+| W0-A2 | agent | claude-code | 2.0 foundations: registry and hooks, findings, envelope, proofs, validation of schema 2 | 41 | 0 | 1 |
 | W0-B | agent | claude-code | The migrate command and the version 2 example plan | 3 | 0 | 0 |
 | W0-C | agent | claude-code | This plan and the pull-request ownership check | 2 | 0 | 0 |
 | W1-R | agent | claude-code | Roadmap: milestones, tasks, ROADMAP.md, Roadmap tab | 5 | 0 | 0 |
@@ -70,11 +70,11 @@ Ownership follows the rules below in order; **the last matching rule wins**, as 
 | 28 | `/app-blueprint/references/schema.md` | W3-R2 |  | 1 |
 | 29 | `/app-blueprint/references/stacks/` | maintainers |  | 1 |
 | 30 | `/app-blueprint/scripts/blueprint.py` | orchestrator |  | 1 |
-| 31 | `/app-blueprint/scripts/bp/__init__.py` | W0-A1 |  | 1 |
-| 32 | `/app-blueprint/scripts/bp/api.py` | W0-A1 |  | 1 |
+| 31 | `/app-blueprint/scripts/bp/__init__.py` | W0-A2 |  | 1 |
+| 32 | `/app-blueprint/scripts/bp/api.py` | W0-A2 |  | 1 |
 | 33 | `/app-blueprint/scripts/bp/cli.py` | W0-A2 |  | 1 |
-| 34 | `/app-blueprint/scripts/bp/commands/__init__.py` | W0-A1 |  | 1 |
-| 35 | `/app-blueprint/scripts/bp/commands/data.py` | W0-A1 |  | 1 |
+| 34 | `/app-blueprint/scripts/bp/commands/__init__.py` | W0-A2 |  | 1 |
+| 35 | `/app-blueprint/scripts/bp/commands/data.py` | W0-A2 |  | 1 |
 | 36 | `/app-blueprint/scripts/bp/commands/evidence.py` | W2-E |  | 1 |
 | 37 | `/app-blueprint/scripts/bp/commands/learn.py` | W0-A2 |  | 1 |
 | 38 | `/app-blueprint/scripts/bp/commands/migrate.py` | W0-B |  | 1 |
@@ -86,11 +86,11 @@ Ownership follows the rules below in order; **the last matching rule wins**, as 
 | 44 | `/app-blueprint/scripts/bp/core.py` | W0-A2 |  | 1 |
 | 45 | `/app-blueprint/scripts/bp/data.py` | W0-A2 |  | 1 |
 | 46 | `/app-blueprint/scripts/bp/evidence.py` | W2-E |  | 1 |
-| 47 | `/app-blueprint/scripts/bp/export.py` | W0-A1 |  | 1 |
+| 47 | `/app-blueprint/scripts/bp/export.py` | W0-A2 |  | 1 |
 | 48 | `/app-blueprint/scripts/bp/features.py` | W1-F |  | 1 |
-| 49 | `/app-blueprint/scripts/bp/globs.py` | W0-A1 |  | 1 |
-| 50 | `/app-blueprint/scripts/bp/install.py` | W0-A1 |  | 1 |
-| 51 | `/app-blueprint/scripts/bp/learn.py` | W0-A1 |  | 1 |
+| 49 | `/app-blueprint/scripts/bp/globs.py` | W0-A2 |  | 1 |
+| 50 | `/app-blueprint/scripts/bp/install.py` | W0-A2 |  | 1 |
+| 51 | `/app-blueprint/scripts/bp/learn.py` | W0-A2 |  | 1 |
 | 52 | `/app-blueprint/scripts/bp/migrate.py` | W0-A2 |  | 1 |
 | 53 | `/app-blueprint/scripts/bp/plan.py` | W0-A2 |  | 1 |
 | 54 | `/app-blueprint/scripts/bp/records.py` | W3-V |  | 1 |
@@ -123,7 +123,7 @@ Ownership follows the rules below in order; **the last matching rule wins**, as 
 | 81 | `/app-blueprint/scripts/bp/validate.py` | W0-A2 |  | 1 |
 | 82 | `/app-blueprint/scripts/bp/verify.py` | W0-A2 |  | 1 |
 | 83 | `/app-blueprint/scripts/bp/version.py` | orchestrator |  | 1 |
-| 84 | `/app-blueprint/scripts/bp/views/__init__.py` | W0-A1 |  | 1 |
+| 84 | `/app-blueprint/scripts/bp/views/__init__.py` | W0-A2 |  | 1 |
 | 85 | `/app-blueprint/scripts/bp/views/context.py` | W0-A2 |  | 1 |
 | 86 | `/app-blueprint/scripts/bp/views/features_md.py` | W1-F |  | 1 |
 | 87 | `/app-blueprint/scripts/bp/views/render.py` | W0-A2 |  | 1 |
@@ -132,28 +132,28 @@ Ownership follows the rules below in order; **the last matching rule wins**, as 
 | 90 | `/app-blueprint/scripts/bp/views/structure.py` | W0-A2 |  | 1 |
 | 91 | `/app-blueprint/tests/data/README.md` | W2-FX1 |  | 1 |
 | 92 | `/app-blueprint/tests/data/android/` | W2-FX1 |  | 1 |
-| 93 | `/app-blueprint/tests/data/v1/` | W0-A1 |  | 1 |
+| 93 | `/app-blueprint/tests/data/v1/` | W0-A2 |  | 1 |
 | 94 | `/app-blueprint/tests/fixtures_archives.py` | W2-FX1 |  | 1 |
 | 95 | `/app-blueprint/tests/fixtures_text.py` | W2-FX2 |  | 1 |
-| 96 | `/app-blueprint/tests/support.py` | W0-A1 |  | 1 |
+| 96 | `/app-blueprint/tests/support.py` | W0-A2 |  | 1 |
 | 97 | `/app-blueprint/tests/test_agents.py` | W3-A |  | 1 |
-| 98 | `/app-blueprint/tests/test_blueprint.py` | W0-A1 |  | 1 |
-| 99 | `/app-blueprint/tests/test_contracts_module.py` | W0-A1 |  | 1 |
-| 100 | `/app-blueprint/tests/test_data_and_learning.py` | W0-A1 |  | 1 |
+| 98 | `/app-blueprint/tests/test_blueprint.py` | W0-A2 |  | 1 |
+| 99 | `/app-blueprint/tests/test_contracts_module.py` | W0-A2 |  | 1 |
+| 100 | `/app-blueprint/tests/test_data_and_learning.py` | W0-A2 |  | 1 |
 | 101 | `/app-blueprint/tests/test_docs.py` | W3-R2 |  | 1 |
 | 102 | `/app-blueprint/tests/test_e2e.py` | W4-E2E |  | 1 |
 | 103 | `/app-blueprint/tests/test_evidence.py` | W2-E |  | 1 |
 | 104 | `/app-blueprint/tests/test_features.py` | W1-F |  | 1 |
 | 105 | `/app-blueprint/tests/test_fixtures_archives.py` | W2-FX1 |  | 1 |
 | 106 | `/app-blueprint/tests/test_fixtures_text.py` | W2-FX2 |  | 1 |
-| 107 | `/app-blueprint/tests/test_ignore_anchor.py` | W0-A1 |  | 1 |
+| 107 | `/app-blueprint/tests/test_ignore_anchor.py` | W0-A2 |  | 1 |
 | 108 | `/app-blueprint/tests/test_migrate.py` | W0-B |  | 1 |
-| 109 | `/app-blueprint/tests/test_owner_anchor.py` | W0-A1 |  | 1 |
-| 110 | `/app-blueprint/tests/test_package.py` | W0-A1 |  | 1 |
-| 111 | `/app-blueprint/tests/test_plan_fuzz.py` | W0-A1 |  | 1 |
+| 109 | `/app-blueprint/tests/test_owner_anchor.py` | W0-A2 |  | 1 |
+| 110 | `/app-blueprint/tests/test_package.py` | W0-A2 |  | 1 |
+| 111 | `/app-blueprint/tests/test_plan_fuzz.py` | W0-A2 |  | 1 |
 | 112 | `/app-blueprint/tests/test_plan_fuzz_v2.py` | W0-A2 |  | 1 |
-| 113 | `/app-blueprint/tests/test_plan_shapes.py` | W0-A1 |  | 1 |
-| 114 | `/app-blueprint/tests/test_presets.py` | W0-A1 |  | 1 |
+| 113 | `/app-blueprint/tests/test_plan_shapes.py` | W0-A2 |  | 1 |
+| 114 | `/app-blueprint/tests/test_presets.py` | W0-A2 |  | 1 |
 | 115 | `/app-blueprint/tests/test_records.py` | W3-V |  | 1 |
 | 116 | `/app-blueprint/tests/test_registry.py` | W4-E2E |  | 1 |
 | 117 | `/app-blueprint/tests/test_registry_hooks.py` | W0-A2 |  | 1 |
@@ -186,10 +186,11 @@ Ownership follows the rules below in order; **the last matching rule wins**, as 
 | 144 | `/maintainers/mutations.json` | W4-M |  | 1 |
 | 145 | `/maintainers/tests/test_check_owned.py` | W0-C |  | 1 |
 | 146 | `/maintainers/tests/test_learn.py` | W3-L |  | 1 |
+| 147 | `/app-blueprint/tests/test_state_integrity.py` | W0-A2 |  | 1 |
 
 ## Write lists by owner and phase
 
-### W0-A1
+### W0-A2
 
 **W0 Foundations**
 
@@ -212,12 +213,6 @@ Ownership follows the rules below in order; **the last matching rule wins**, as 
 - ◑ `app-blueprint/tests/test_owner_anchor.py`
 - ◑ `app-blueprint/tests/test_plan_shapes.py`
 - ◑ `app-blueprint/tests/test_plan_fuzz.py`
-- ⟨pattern⟩ `app-blueprint/tests/data/v1/**`: One frozen input, golden or generator script of the version 1 behaviour tests.
-
-### W0-A2
-
-**W0 Foundations**
-
 - ◑ `app-blueprint/scripts/bp/data.py`
 - ◑ `app-blueprint/scripts/bp/core.py` ★
 - ◑ `app-blueprint/scripts/bp/plan.py`
@@ -239,6 +234,8 @@ Ownership follows the rules below in order; **the last matching rule wins**, as 
 - ◑ `app-blueprint/tests/test_validate.py`
 - ◑ `app-blueprint/tests/test_registry_hooks.py`
 - ◑ `app-blueprint/tests/test_plan_fuzz_v2.py`
+- ○ `app-blueprint/tests/test_state_integrity.py`
+- ⟨pattern⟩ `app-blueprint/tests/data/v1/**`: One frozen input, golden or generator script of the version 1 behaviour tests.
 
 ### W0-B
 
