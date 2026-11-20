@@ -487,14 +487,32 @@ _STATE_TMP = re.compile(r"^state\.json\.\d+-[0-9a-f]{8}\.tmp$")  # write_json's 
 _HELD = set()  # the lock files this process holds: the lock is never nested, so a second take is a bug
 
 
-def run_hint(root, args, module=None):
-    """A command line that runs as printed: `python .blueprint/bin/blueprint.py <args>` when the project's copy has
-    the command (module, e.g. "commands/roadmap", names the file it needs; None: any copy), else this running tool
-    with --root."""
+# characters that are literal inside double quotes in bash, PowerShell and cmd (besides letters and digits, which
+# str.isalnum accepts in any script): a path made only of these can be printed inside a command (review of #17, F8)
+PASTE_SAFE = frozenset(" -_./\\:+,@=()[]")
+PORTABLE_NOTE = " (run from the project folder)"
+
+
+def paste_safe(text):
+    """True when `text` can go inside double quotes in a printed command: every character a letter, a digit (any
+    script) or in PASTE_SAFE, and no backslash at the end (in bash it would escape the closing quote)."""
+    return bool(text) and all(c.isalnum() or c in PASTE_SAFE for c in text) and not text.endswith("\\")
+
+
+def run_hint(root, args, module=None, use_copy=True):
+    """A command line that runs as printed, and runs nothing else when pasted into bash, PowerShell or cmd:
+    - the project's copy, `python .blueprint/bin/blueprint.py <args>`, when it has the command (module, e.g.
+      "commands/roadmap", names the file it needs; None: any copy) and use_copy is true (no path in it);
+    - else this running tool, `python "<launcher>" <args> --root "<root>"`, when both paths are paste_safe;
+    - else the portable form, `python <skill>/scripts/blueprint.py <args> --root . (run from the project folder)`.
+    args is the tool's own text (a subcommand and flags), never something a caller typed."""
     copy = bp_dir(root) / "bin"
-    if (copy / "blueprint.py").is_file() and (module is None or (copy / "bp" / (module + ".py")).is_file()):
+    if use_copy and (copy / "blueprint.py").is_file() and (module is None or (copy / "bp" / (module + ".py")).is_file()):
         return f"python .blueprint/bin/blueprint.py {args}"
-    return f'python "{TOOL_HOME / "blueprint.py"}" {args} --root "{root}"'
+    launcher, where = str(TOOL_HOME / "blueprint.py"), str(root)
+    if paste_safe(launcher) and paste_safe(where):
+        return f'python "{launcher}" {args} --root "{where}"'
+    return f"python <skill>/scripts/blueprint.py {args} --root .{PORTABLE_NOTE}"
 
 
 def _bad_state(why, next, name="state.json"):  # noqa: A002 (next is the contract's name)

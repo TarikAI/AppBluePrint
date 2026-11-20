@@ -16,10 +16,10 @@ import secrets
 import sys
 from pathlib import Path
 
-from bp.core import TOOL_HOME, BlueprintError, append_log, bp_dir, emit, find_root, state_lock
+from bp.core import TOOL_HOME, BlueprintError, append_log, bp_dir, emit, find_root, run_hint, state_lock
 from bp.learn import _copy_version
 from bp.migrate import plan_version, upgrade_plan, upgrade_state
-from bp.plan import load_plan, load_raw_plan, load_state
+from bp.plan import check_plan, load_plan, load_state, parse_plan_bytes, read_plan_bytes
 from bp.validate import validate_plan
 from bp.version import MIN_SCHEMA2_TOOL, TOOL_VERSION
 
@@ -36,11 +36,9 @@ def register(name, p):
 
 
 def _run(root, args):
-    """A command line the user can run as printed: the project's own copy when it has the command, else this tool."""
-    copy = bp_dir(root) / "bin"
-    if (copy / "blueprint.py").is_file() and (not args.startswith("migrate") or (copy / "bp" / "commands" / "migrate.py").is_file()):
-        return f"python .blueprint/bin/blueprint.py {args}"
-    return f'python "{TOOL_HOME / "blueprint.py"}" {args} --root "{root}"'
+    """A command line the user can run as printed (core.run_hint): the project's own copy when it has the command,
+    else this tool, or the portable form when a path is not safe to print."""
+    return run_hint(root, args, "commands/migrate" if args.startswith("migrate") else None)
 
 
 def _fix_next(root):
@@ -192,16 +190,11 @@ def _non_finite(value):
 
 
 def _read_plan(root):
-    """(original bytes, parsed plan): blueprint.json is read once and both the backup and the upgrade
-    come from those bytes. A file that does not parse is reported by load_raw_plan with the 1.x text."""
-    path = bp_dir(root) / "blueprint.json"
-    load_raw_plan(root)  # the one place a plan is refused (bad-json: unreadable, or a value it cannot write back)
-    try:
-        original = path.read_bytes()
-        return original, json.loads(original.decode("utf-8"), object_pairs_hook=_object)
-    except (OSError, ValueError, RecursionError):  # not readable, not UTF-8, not JSON, or too deep (a ValueError)
-        load_raw_plan(root)  # raises no-blueprint / bad-json with the 1.x message; it cannot succeed here
-        raise
+    """(original bytes, parsed plan): blueprint.json is read once (plan.read_plan_bytes, with the core's Windows
+    retry), and the checks, the backup and the upgrade all come from those bytes (review of #17, F4 and F11). A plan
+    that cannot be read, parsed or used is refused by plan.parse_plan_bytes with the load error every command gives."""
+    original = read_plan_bytes(root)
+    return original, parse_plan_bytes(root, original, object_pairs_hook=_object)
 
 
 def _read_state(root):
@@ -292,13 +285,13 @@ def cmd_migrate(args):
     if where is not None:  # would be written as Infinity or NaN, which JSON does not have
         raise BlueprintError("bad-json", f"blueprint.json has a number that is not finite ({where}); JSON cannot hold it",
                              entry="blueprint.json", next=_fix_next(root))
-    load_plan(root)  # the load checks of 3.3 (shape, types, version): a plan that does not load is not migrated
+    check_plan(raw, root)  # the load checks of 3.3 (shape, types, version) on the bytes read: a plan that does not load is not migrated
     repeated = _repeated_paths(raw)
     new_plan = upgrade_plan(raw)
     old = None if getattr(args, "force", False) else _old_copy(root)  # step 2
     if old is not None:
         raise BlueprintError("old-tool-copy", old, entry=".blueprint/bin",
-                             next=f'python "{TOOL_HOME / "blueprint.py"}" init --refresh-tool --root "{root}"')
+                             next=run_hint(root, "init --refresh-tool", use_copy=False))
     try:  # both outputs are bytes before anything is written, in a dry run too
         plan_bytes = _encode(new_plan)
     except (UnicodeEncodeError, ValueError, RecursionError):

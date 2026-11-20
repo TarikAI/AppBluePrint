@@ -6,19 +6,24 @@ timeout is a failure; an OSError from starting the shell propagates (1.x recorde
 import subprocess
 import time
 
-from bp.core import now_iso
+from bp.core import norm, now_iso, path_key, project_path
+from bp.globs import pattern_instance_rx
 from bp.plan import item_verify, owner_of
 from bp.status import HASHER, proof_inputs
 
 
-def verify_groups(plan, phase=None, owner=None, only=None, state=None):
+def verify_groups(plan, phase=None, owner=None, only=None, state=None, root=None, skipped=None):
     """{verify command: [paths]} in plan order, skipping deletes; only, if given, limits the paths.
 
     The planned files first. Then, for a version 2 plan and when state is given, each pattern's instances recorded in
     state (by the last sync) under the pattern's verify command (its own, else its module's), filtered by the
     pattern's phase and the instance's owner, so a pattern instance can be proven like a planned file (option B of
     the core review). An instance that is also a planned file is proven as that file. A version 1 plan keeps the 1.x
-    groups exactly: planned files only."""
+    groups exactly: planned files only.
+
+    state.json is input, not trusted (review of #17, F5): a recorded instance counts only when it is a project path
+    (project_instance) that its pattern's glob matches; any other goes into `skipped` (a set, when given) and gets no
+    hash, no proof and no credit. Without root no instance can be checked, so none is grouped."""
     groups = {}
     for f in plan["files"]:
         if f.get("action") == "delete" or (phase and f.get("phase") != phase):
@@ -30,7 +35,7 @@ def verify_groups(plan, phase=None, owner=None, only=None, state=None):
         cmd = item_verify(plan, f)
         if cmd:
             groups.setdefault(cmd, []).append(f["path"])
-    if state is None or plan.get("_from") == 1:
+    if state is None or root is None or plan.get("_from") == 1:
         return groups
     planned = {f["path"] for f in plan["files"]}
     recorded = state.get("patterns") if isinstance(state.get("patterns"), dict) else {}
@@ -42,8 +47,15 @@ def verify_groups(plan, phase=None, owner=None, only=None, state=None):
         instances = entry.get("instances") if isinstance(entry, dict) else None
         if not cmd or not isinstance(instances, list):
             continue
+        rx = pattern_instance_rx(p["glob"]) if isinstance(p.get("glob"), str) and p["glob"] else None
         for inst in instances:
-            if not isinstance(inst, str) or inst in planned or (only is not None and inst not in only):
+            if not isinstance(inst, str) or inst in planned:
+                continue
+            if rx is None or not rx.fullmatch(inst) or not project_instance(root, inst):
+                if skipped is not None:
+                    skipped.add(inst)
+                continue
+            if only is not None and inst not in only:
                 continue
             if owner and owner_of(plan, inst)[0] != owner:
                 continue
@@ -53,6 +65,19 @@ def verify_groups(plan, phase=None, owner=None, only=None, state=None):
     return groups
 
 
+def project_instance(root, inst):
+    """True for a recorded instance that names a file of this project as it is written: normalised (forward slashes,
+    no '.' or '..' segment), relative, not in .blueprint/, and core.project_path resolves it to itself (no link
+    leading elsewhere, nothing outside the root)."""
+    if not inst or inst != norm(inst) or inst.startswith("/") or "\\" in inst or ":" in inst:
+        return False
+    segs = inst.split("/")
+    if any(s in ("", ".", "..") for s in segs) or segs[0] == ".blueprint":
+        return False
+    resolved = project_path(root, inst)
+    return resolved is not None and path_key(resolved) == path_key(inst)
+
+
 def stale_instances(root, plan, state):
     """The recorded pattern instances (version 2 plans) whose last proof passed but no longer holds (contract 4.7),
     as verify --stale needs them beside the stale planned files."""
@@ -60,7 +85,7 @@ def stale_instances(root, plan, state):
     if plan.get("_from") == 1:
         return set()
     out = set()
-    for paths in verify_groups(plan, state=state).values():
+    for paths in verify_groups(plan, state=state, root=root).values():
         for p in paths:
             rec = state["files"].get(p) if isinstance(state.get("files"), dict) else None
             ver = rec.get("verified") if isinstance(rec, dict) else None

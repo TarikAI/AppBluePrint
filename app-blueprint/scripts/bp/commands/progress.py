@@ -471,7 +471,10 @@ def cmd_verify(args):
         only = {r["path"] for r in compute(root, plan, current)["rows"] if r["stale"]}
         if state is not None:
             only |= stale_instances(root, plan, state)
-    groups = verify_groups(plan, phase=args.phase, owner=args.owner, only=only, state=state)
+    skipped = set()  # recorded instances that are not this project's paths (review of #17, F5)
+    groups = verify_groups(plan, phase=args.phase, owner=args.owner, only=only, state=state, root=root, skipped=skipped)
+    if skipped:
+        print(f"skipped {len(skipped)} recorded instance(s) that are not project paths")
     if not groups:
         print("No verify commands in scope.")
         return
@@ -485,6 +488,7 @@ def cmd_verify(args):
     # point wins over the proof of a check that started before it (the proof is not saved)
     started = {p: _rec_key(state["files"].get(p)) for paths in groups.values() for p in paths}
     failed = 0
+    failed_paths = set()  # an instance under two commands is proven only when every one passed (review of #17, F6)
     for cmd, paths in groups.items():
         print(f"$ {cmd}")
         result = run_check(cmd, root, args.timeout)
@@ -494,6 +498,7 @@ def cmd_verify(args):
         print(f"  {'passed' if ok else 'FAILED'} for {len(paths)} file(s)")
         failed += 0 if ok else 1
         if not ok:
+            failed_paths.update(paths)
             registry.signal(root, "verify", f"verify-{result['result']}")  # 9.4
         proofs = {"files": {}}
         record_file_proofs(root, plan, proofs, cmd, paths, result)  # hashed before the lock is taken
@@ -506,6 +511,8 @@ def cmd_verify(args):
                 rec = fresh["files"].setdefault(p, {})
                 if "verified" not in proofs.get(p, {}):
                     continue  # no proof for this file (not on disk): nothing to save, nothing to undo
+                if ok and p in failed_paths:
+                    continue  # another command covering it failed in this run: that failure stands
                 if _reset_since(started.get(p), _rec_key(rec)):
                     reset[p] = _rec_key(rec)  # changed while the check ran: that change wins, the proof is not saved
                     continue

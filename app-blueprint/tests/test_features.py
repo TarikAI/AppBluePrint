@@ -396,7 +396,7 @@ class ItemsTest(TempRoot):
         self.touch("apps/web/src/screens/A.tsx")
         plan, st, comp = self.ctx()
         st["patterns"] = {"screen": {"instances": ["apps/web/src/screens/A.tsx"]}}
-        groups = verify_groups(plan, state=st)
+        groups = verify_groups(plan, state=st, root=self.root)
         cmd = next(c for c, paths in groups.items() if "apps/web/src/screens/A.tsx" in paths)
         only = {"id": "F-x", "criteria": [crit("C1")]}
         item = features.feature_items(self.root, plan, st, status.compute(self.root, plan, st), "F-inbox")

@@ -831,17 +831,17 @@ class UnwritableContentTest(MigrateCase):
 
     def test_the_plan_is_read_once_so_the_backup_and_the_upgrade_agree(self):
         original = self.plan_path.read_bytes()
-        real = cmd.load_plan
+        real = cmd.check_plan  # the load checks run on the bytes read (review of #17, F11)
 
         calls = []
 
-        def edit_then_load(root):  # someone edits blueprint.json after migrate read it
+        def edit_then_check(raw, root):  # someone edits blueprint.json after migrate read it
             if not calls:
                 calls.append(1)
                 self.plan_path.write_bytes(original.replace(b"Snag Desk", b"Edited"))
-            return real(root)
+            return real(raw, root)
 
-        with mock.patch.object(cmd, "load_plan", edit_then_load):
+        with mock.patch.object(cmd, "check_plan", edit_then_check):
             out, err = io.StringIO(), io.StringIO()
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 cmd.cmd_migrate(Namespace(root=str(self.root), dry_run=False, force=True, json=False))

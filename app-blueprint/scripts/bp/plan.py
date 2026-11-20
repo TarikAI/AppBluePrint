@@ -9,7 +9,8 @@ import sys
 
 from bp.version import SCHEMA_VERSION
 from bp import core
-from bp.core import BlueprintError, bp_dir, die, json_depth, norm, read_json, run_hint, unusable_json
+from bp.core import (BlueprintError, _retry_windows, bp_dir, die, json_depth, norm, read_json, run_hint,
+                     unusable_json)
 from bp.globs import glob_match
 from bp.migrate import upgrade_plan, upgrade_state
 
@@ -279,14 +280,27 @@ def _load_error(error, msg, next):  # noqa: A002
     raise e
 
 
-def load_raw_plan(root):
-    """blueprint.json as parsed JSON, untouched (no checks, no upgrade). Writers of the plan start from this (3.3)."""
+def read_plan_bytes(root):
+    """The bytes of blueprint.json, read once through the core's Windows retry (another process replacing the file
+    makes a read fail for a moment there; review of #17, F4). No file is no-blueprint; a read that still fails is the
+    bad-json load error, never an incident."""
     path = bp_dir(root) / "blueprint.json"
     if not path.exists():
         _load_error("no-blueprint", f"No blueprint at {path}. Run: blueprint.py init --name \"App name\"",
                     run_hint(root, 'init --name "App name"'))
     try:
-        raw = read_json(path)
+        return _retry_windows(path.read_bytes)
+    except OSError as e:
+        _load_error("bad-json", f"blueprint.json cannot be read: {e.strerror or e}", fix_next(root))
+
+
+def parse_plan_bytes(root, data, **json_kw):
+    """Those bytes as parsed JSON, untouched, with the 1.x load errors (the text 1.3.0 printed: the text is read with
+    universal newlines, as 1.3.0's read_json did, so error positions match), then the refusal of values no write could
+    keep (unusable_json). json_kw goes to json.loads (migrate passes its object_pairs_hook)."""
+    try:
+        text = data.decode("utf-8")
+        raw = json.loads(text.replace("\r\n", "\n").replace("\r", "\n"), **json_kw)
     except json.JSONDecodeError as e:
         _load_error("bad-json", f"blueprint.json is not valid JSON: {e}", fix_next(root))
     except UnicodeDecodeError as e:  # review R2-M1: unreadable is a load error too (bad-json), never a crash
@@ -295,18 +309,25 @@ def load_raw_plan(root):
         _load_error("bad-json", f"blueprint.json cannot be read as JSON: {e}", fix_next(root))
     except RecursionError:
         _load_error("bad-json", "blueprint.json is nested too deeply to read", fix_next(root))
-    except OSError as e:
-        _load_error("bad-json", f"blueprint.json cannot be read: {e.strerror or e}", fix_next(root))
     bad = unusable_json(raw)  # a value no write could keep: every command refuses the plan here, migrate included
     if bad:
         _load_error("bad-json", f"blueprint.json cannot be used: {bad[0]} holds {bad[1]}", fix_next(root))
     return raw
 
 
+def load_raw_plan(root):
+    """blueprint.json as parsed JSON, untouched (no checks, no upgrade). Writers of the plan start from this (3.3)."""
+    return parse_plan_bytes(root, read_plan_bytes(root))
+
+
 def load_plan(root):
     """The plan at schema version 2, whatever supported version the file has (contract 3.3). Shape problems exit 1
     with every message at once; a version other than 1 or 2 raises schema-too-new. Never writes blueprint.json."""
-    raw = load_raw_plan(root)
+    return check_plan(load_raw_plan(root), root)
+
+
+def check_plan(raw, root):
+    """load_plan's checks, upgrade and normalisation on a plan already read (migrate checks the bytes it migrates)."""
     try:
         return _load_checked(raw, root)
     except RecursionError:

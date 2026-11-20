@@ -90,25 +90,49 @@ def text_cell(s):
 
 
 def code_cell(s):
-    """Text inside a code span of a version 2 table cell: as text_cell, without the entities (Markdown shows a code
-    span's text as it is and never reads HTML in it)."""
+    """The text of a code span in a version 2 table cell: one line, the backslash escaped before the pipe (a table cell
+    is split on unescaped pipes even inside a code span), no entities (Markdown shows a code span's text as it is)."""
     return one_line(s if s is not None else "").replace("\\", "\\\\").replace("|", "\\|")
 
 
+def code_span(s):
+    """A code span for a version 2 table cell, backtick-safe: fenced with one backtick more than the longest run of
+    backticks in the text, and padded with a space on each side when the text holds a backtick (or starts and ends
+    with a space), so the span always ends where it should. An empty value is an empty cell."""
+    text = code_cell(s)
+    if not text:
+        return ""
+    runs = [len(r) for r in re.findall("`+", text)]
+    fence = "`" * (max(runs) + 1 if runs else 1)
+    pad = " " if runs or (len(text) > 1 and text.startswith(" ") and text.endswith(" ")) else ""
+    return f"{fence}{pad}{text}{pad}{fence}"
+
+
+class _Cells:
+    """How the core's tables write plan text (item 6 and review of #17, F1). A version 1 plan keeps 1.3.0's bytes:
+    md_cell where 1.3.0 used it, the raw value where it wrote it raw. A version 2 plan follows the one Markdown rule
+    for every table cell: one line; backslash, then pipe, escaped; '<' and '&' as entities outside code spans; code
+    spans backtick-safe (code_span).
+    cell(s)   a plain cell              raw(s)       a plain cell 1.3.0 wrote raw
+    span(s)   a code span (md_cell'd)   raw_span(s)  a code span 1.3.0 wrote raw
+    spans(xs) a list of code spans in one cell"""
+
+    def __init__(self, v1):
+        self.v1 = v1
+        if v1:
+            self.cell, self.raw = md_cell, (lambda s: s)
+            self.span = lambda s: f"`{md_cell(s)}`"
+            self.raw_span = lambda s: f"`{s}`"
+            self.spans = lambda xs: md_cell(", ".join("`" + x + "`" for x in xs))
+        else:
+            self.cell = self.raw = text_cell
+            self.span = self.raw_span = code_span
+            self.spans = lambda xs: ", ".join(code_span(x) for x in xs)
+
+
 def cells(plan):
-    """(plain, code, raw) cell functions for the core's tables: 1.3.0's (md_cell, md_cell, as is) for a version 1
-    plan; text_cell, code_cell, text_cell for a version 2 plan (item 6 of the core follow-up)."""
-    if plan.get("_from") == 1 or plan.get("version") == 1:
-        return md_cell, md_cell, (lambda s: s)
-    return text_cell, code_cell, text_cell
-
-
-def codes(cell, items):
-    """A list of code spans in one cell: 1.3.0's form for a version 1 plan (the joined text through md_cell), each
-    item through code_cell for a version 2 plan."""
-    if cell is md_cell:
-        return md_cell(", ".join("`" + x + "`" for x in items))
-    return ", ".join("`" + code_cell(x) + "`" for x in items)
+    """The cell writers (_Cells) for this plan's version."""
+    return _Cells(plan.get("_from") == 1 or plan.get("version") == 1)
 
 
 def render_structure(plan, state, comp, ctx=None):
@@ -116,7 +140,7 @@ def render_structure(plan, state, comp, ctx=None):
     re-verify line follows the counts (contract 8.3); a plan without features renders exactly as in 1.3.0."""
     app = plan["app"]
     rows, pats = comp["rows"], comp["patterns"]
-    P, C, R = cells(plan)
+    T = cells(plan)
     tags = file_tags(ctx) if ctx is not None else None
     n_stale = sum(1 for r in rows if r.get("stale")) if ctx is not None and plan.get("features") else 0
     module_by_path = {norm(m.get("path", "")).rstrip("/"): m for m in plan["modules"] if m.get("path")}
@@ -135,7 +159,7 @@ def render_structure(plan, state, comp, ctx=None):
     if plan["stack"]:
         w("## Stack\n\n| Part | Choice | Version | Docs | Checked |\n|---|---|---|---|---|\n")
         for s in plan["stack"]:
-            w(f"| {P(s.get('part'))} | {P(s.get('choice'))} | {P(s.get('version'))} | {P(s.get('docs'))} | {P(s.get('verified'))} |\n")
+            w(f"| {T.cell(s.get('part'))} | {T.cell(s.get('choice'))} | {T.cell(s.get('version'))} | {T.cell(s.get('docs'))} | {T.cell(s.get('verified'))} |\n")
         w("\n")
     ap = plan.get("approach") or {}
     if ap:
@@ -155,7 +179,7 @@ def render_structure(plan, state, comp, ctx=None):
                 w(f"  {re.sub(r'[^A-Za-z0-9_]', '_', m['id'])} --> {re.sub(r'[^A-Za-z0-9_]', '_', d)}\n")
         w("```\n\n| Module | Path | Layer | Purpose | Depends on | Verify |\n|---|---|---|---|---|---|\n")
         for m in plan["modules"]:
-            w(f"| {R(m['id'])} | `{C(m.get('path'))}` | {P(m.get('layer'))} | {P(m.get('purpose'))} | {P(', '.join(m.get('dependsOn', [])))} | `{C(m.get('verify'))}` |\n")
+            w(f"| {T.raw(m['id'])} | {T.span(m.get('path'))} | {T.cell(m.get('layer'))} | {T.cell(m.get('purpose'))} | {T.cell(', '.join(m.get('dependsOn', [])))} | {T.span(m.get('verify'))} |\n")
         w("\n")
     if plan["stores"] or plan["resources"]:
         dv = data_view(plan, state)
@@ -163,13 +187,13 @@ def render_structure(plan, state, comp, ctx=None):
         if dv["stores"]:
             w("| Store | Kind | Schema files | Purpose |\n|---|---|---|---|\n")
             for s in dv["stores"]:
-                w(f"| {R(s.get('id'))} | {R(s.get('kind'))} | {codes(P, s.get('schema', []))} | {P(s.get('purpose'))} |\n")
+                w(f"| {T.raw(s.get('id'))} | {T.raw(s.get('kind'))} | {T.spans(s.get('schema', []))} | {T.cell(s.get('purpose'))} |\n")
             w("\n")
         if dv["resources"]:
             w("| Resource | Kind | Store | Defined in | Owner | Read by | Written by |\n|---|---|---|---|---|---|---|\n")
             for r in dv["resources"]:
-                w(f"| {R(r['id'])} | {R(r['kind'])} | {P(r['store'])} | {('`' + (C(r['definedIn']) if P is not md_cell else r['definedIn']) + '`') if r['definedIn'] else ''} | {P(r['owner'])} | "
-                  f"{codes(P, r['readers'])} | {codes(P, r['writers'])} |\n")
+                w(f"| {T.raw(r['id'])} | {T.raw(r['kind'])} | {T.cell(r['store'])} | {T.raw_span(r['definedIn']) if r['definedIn'] else ''} | {T.cell(r['owner'])} | "
+                  f"{T.spans(r['readers'])} | {T.spans(r['writers'])} |\n")
             w("\n```mermaid\nflowchart LR\n")
             mods_used = {}
             files_mod = {f["path"]: f.get("module") for f in plan["files"]}
@@ -198,22 +222,22 @@ def render_structure(plan, state, comp, ctx=None):
     w("## Phases\n\n| Phase | Name | Goal | Exit | Files | Verified |\n|---|---|---|---|---|---|\n")
     for ph in plan["phases"]:
         pr = [r for r in rows if r["phase"] == ph["id"]]
-        w(f"| {ph['id']} | {md_cell(ph.get('name'))} | {md_cell(ph.get('goal'))} | {md_cell(ph.get('exit'))} | {len(pr)} | {sum(1 for r in pr if r['status'] == 'verified')} |\n")
+        w(f"| {T.raw(ph['id'])} | {T.cell(ph.get('name'))} | {T.cell(ph.get('goal'))} | {T.cell(ph.get('exit'))} | {len(pr)} | {sum(1 for r in pr if r['status'] == 'verified')} |\n")
     w("\n")
     contracts = [r for r in rows if r["contract"]]
     if contracts:
         w("## Shared contracts\n\nThese files are depended on by several owners. Change them only through their owner.\n\n| File | Owner | Produces | Purpose |\n|---|---|---|---|\n")
         for r in contracts:
-            w(f"| `{r['path']}` | {r['owner']} | {md_cell(', '.join(r['produces']))} | {md_cell(r['purpose'])} |\n")
+            w(f"| {T.raw_span(r['path'])} | {T.raw(r['owner'])} | {T.cell(', '.join(r['produces']))} | {T.cell(r['purpose'])} |\n")
         w("\n")
     if pats:
         w("## Repeated-file patterns\n\n| Pattern | Glob | One instance contains | Owner | Phase | On disk |\n|---|---|---|---|---|---|\n")
         for p in pats:
-            w(f"| {p['id']} | `{md_cell(p['glob'])}` | {md_cell(p['instance'])} | {p['owner']} | {p['phase']} | {len(p['instances'])} |\n")
+            w(f"| {T.raw(p['id'])} | {T.span(p['glob'])} | {T.cell(p['instance'])} | {T.raw(p['owner'])} | {T.raw(p['phase'])} | {len(p['instances'])} |\n")
         w("\n")
     w("## Files\n\n| File | Action | Module | Phase | Owner | Status | Purpose | Consumes | Produces | Verify |\n|---|---|---|---|---|---|---|---|---|---|\n")
     for r in rows:
-        w(f"| `{r['path']}` | {r['action']} | {r['module']} | {r['phase']} | {r['owner']} | {GLYPH[r['status']]} {LABEL[r['status']]} | {md_cell(r['purpose'])} | {md_cell(', '.join(r['consumes']))} | {md_cell(', '.join(r['produces']))} | `{md_cell(r['verify'])}` |\n")
+        w(f"| {T.raw_span(r['path'])} | {T.raw(r['action'])} | {T.raw(r['module'])} | {T.raw(r['phase'])} | {T.raw(r['owner'])} | {GLYPH[r['status']]} {LABEL[r['status']]} | {T.cell(r['purpose'])} | {T.cell(', '.join(r['consumes']))} | {T.cell(', '.join(r['produces']))} | {T.span(r['verify'])} |\n")
     w("\n")
     if plan["decisions"]:
         w("## Decisions\n\n")

@@ -4,13 +4,14 @@ import io
 from bp import registry
 from bp.plan import GLYPH, owner_of
 from bp.data import data_view
-from bp.views.structure import cells, md_cell, one_line
+from bp.views.structure import cells, md_cell, one_line, text_cell  # noqa: F401 - text_cell is public here (contract 1.3)
 
 
 def render_roster(plan, state, comp, ctx=None):
     rows, pats = comp["rows"], comp["patterns"]
     v1 = plan.get("_from") == 1 or plan.get("version") == 1
-    cell, code, raw = cells(plan)  # plain cells, code spans, and what 1.3.0 wrote raw (item 6)
+    T = cells(plan)  # the table rule for this plan's version (item 6; review of #17, F1)
+    cell, raw = T.cell, T.raw
     line = (lambda s: s) if v1 else one_line  # text outside the tables, one line in a version 2 plan
     out = io.StringIO()
     w = out.write
@@ -25,14 +26,14 @@ def render_roster(plan, state, comp, ctx=None):
     w("\n## Owner rules (last match wins)\n\n| # | Pattern | Owner | Override | Wins |\n|---|---|---|---|---|\n")
     for i, rule in enumerate(plan["owners"]):
         wins = sum(1 for x in rows if x["rule"] == i) + sum(1 for p in pats if p["rule"] == i)
-        w(f"| {i + 1} | `{code(rule.get('pattern'))}` | {raw(rule.get('owner'))} | {'yes' if rule.get('override') else ''} | {wins} |\n")
+        w(f"| {i + 1} | {T.span(rule.get('pattern'))} | {raw(rule.get('owner'))} | {'yes' if rule.get('override') else ''} | {wins} |\n")
     if plan["resources"]:
         dv = data_view(plan, state)
         w("\n## Data ownership\n\nThe owner of a table is the owner of the file that defines it (or `owner` in the blueprint). Writes by anyone else need that owner's review.\n\n")
         w("| Resource | Kind | Owner | Writers from other owners |\n|---|---|---|---|\n")
         for r in dv["resources"]:
             foreign = [x for x in r["writers"] if owner_of(plan, x)[0] not in (None, r["owner"])]
-            w(f"| {raw(r['id'])} | {raw(r['kind'])} | {cell(r['owner'])} | {md_cell(', '.join('`' + x + '` (' + str(owner_of(plan, x)[0]) + ')' for x in foreign)) if v1 else ', '.join('`' + code(x) + '` (' + cell(owner_of(plan, x)[0]) + ')' for x in foreign)} |\n")
+            w(f"| {raw(r['id'])} | {raw(r['kind'])} | {cell(r['owner'])} | {md_cell(', '.join('`' + x + '` (' + str(owner_of(plan, x)[0]) + ')' for x in foreign)) if v1 else ', '.join(T.span(x) + ' (' + cell(owner_of(plan, x)[0]) + ')' for x in foreign)} |\n")
     w("\n## Write lists by owner and phase\n\n")
     for r in plan["roster"]:
         mine = [x for x in rows if x["owner"] == r["id"]]

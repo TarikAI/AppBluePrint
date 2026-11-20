@@ -5,8 +5,8 @@ the 1.x team check. Each finding is {"level", "code", "entry", "message", "next"
 the code its message classifies as. validate_plan keeps the 1.x return: (error messages, warning messages).
 """
 import re
-from pathlib import Path
 
+from bp.core import PORTABLE_NOTE, run_hint
 from bp.learn import project_ident, store_append
 from bp.migrate import upgrade_plan
 from bp import data as _data, registry, rules
@@ -98,9 +98,10 @@ def validate_findings(plan, team=None, evidence_ids=None, root=None):
         plan, from_v1 = upgrade_plan(plan), True
     if from_v1:
         migrate_built = registry.command_built("migrate")  # the hint only once the command exists (1.5 row d)
+        hint = _migrate_next(root) if migrate_built else None
         W("blueprint.json is schema version 1; it still works."
-          + (" To use milestones, features, tasks and unknowns, run: blueprint.py migrate" if migrate_built else ""),
-          code="schema-v1", entry="blueprint.json", next=_migrate_next(root) if migrate_built else None)
+          + (f" To use milestones, features, tasks and unknowns, run: {hint}" if hint else ""),
+          code="schema-v1", entry="blueprint.json", next=hint)
     vctx = validation_context(plan, team, evidence_ids, root)
     registry.collect("validate", plan, E, W, vctx)
     if not from_v1:  # a version 1 plan validates as in 1.3.0
@@ -190,12 +191,12 @@ def _report(E, W, label, entry, problem, where):
 
 
 def _migrate_next(root):
-    """The schema-v1 finding's next. A finding is data (validate --json, and modules may keep it), so it names no path
-    of this machine: the project's copy when it has migrate, else the portable form with the <skill> placeholder."""
-    copy = None if root is None else Path(root) / ".blueprint" / "bin"
-    if copy is not None and (copy / "blueprint.py").is_file() and (copy / "bp" / "commands" / "migrate.py").is_file():
-        return "python .blueprint/bin/blueprint.py migrate"
-    return "python <skill>/scripts/blueprint.py migrate --root ."
+    """The schema-v1 warning's command, one form for the console text and the finding's next (review of #17, F3 and
+    F10: printed output may carry this machine's paths; core.run_hint keeps them safe to paste). Without a root (a
+    plan validated in memory) the portable form."""
+    if root is None:
+        return "python <skill>/scripts/blueprint.py migrate --root ." + PORTABLE_NOTE
+    return run_hint(root, "migrate", "commands/migrate")
 
 
 def validate_plan(plan, team=None, evidence_ids=None, root=None):
