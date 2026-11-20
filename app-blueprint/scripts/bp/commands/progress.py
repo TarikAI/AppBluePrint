@@ -20,7 +20,7 @@ from bp.core import (BlueprintError, append_log, bp_dir, die, emit, find_root, g
                      project_path)
 from bp.globs import pattern_instance_rx
 from bp.learn import record_incident
-from bp.plan import GLYPH, LABEL, STATES, load_plan, load_state, owner_of, planned_file, save_state
+from bp.plan import GLYPH, LABEL, STATES, load_plan, load_state, owner_of, planned_file, save_state, section_index
 from bp.registry import command_built
 from bp.validate import validate_plan
 from bp.views.render import render_all
@@ -218,6 +218,34 @@ def cmd_sync(args):
         sys.exit(1)
 
 
+def one_line(value):
+    """Plan or state text on one line: runs of whitespace (newlines included) become one space. An invalid plan can
+    hold a multi-line id, name or path; status never lets one break a line of its own output (core review)."""
+    return " ".join(str(value).split()) if value is not None else ""
+
+
+def _check_selectors(plan, args):
+    """The --feature and --milestone ids must be in the plan, for the text and the JSON form alike: unknown-feature /
+    unknown-milestone (7.3), exit 1, the failure envelope with --json. Checked here once, before any hook runs."""
+    fid = getattr(args, "feature", None)
+    if fid and fid not in section_index(plan, "features"):
+        raise BlueprintError("unknown-feature", f"feature {one_line(fid)} is not in the plan",
+                             entry=f"feature {one_line(fid)}", next="blueprint.py status --features")
+    mid = getattr(args, "milestone", None)
+    if mid and mid not in section_index(plan, "milestones"):
+        known = list(section_index(plan, "milestones"))
+        raise BlueprintError("unknown-milestone", f"{one_line(mid)!r} is not a milestone in the plan"
+                             + (" (milestones: " + ", ".join(one_line(m) for m in known) + ")" if known else ""),
+                             entry=f"milestone {one_line(mid)}", next="blueprint.py status")
+
+
+def _blocked_file_keys(ctx):
+    """path_key of every plan path in ctx["blocked"]["files"] (filled by the unknowns module: the planned files that
+    claim refuses); a missing key or a value that is not a list or set adds nothing."""
+    files = (ctx.get("blocked") or {}).get("files")
+    return {path_key(p) for p in files if isinstance(p, str)} if isinstance(files, (list, set, frozenset, tuple)) else set()
+
+
 def cmd_status(args):
     from bp.status import next_ready, summarize
     from bp.views.context import blocked_by, build_context, status_json
@@ -227,6 +255,7 @@ def cmd_status(args):
     for flag, module in STATUS_FLAGS.items():  # 2.0 flags need their module (7.2); read with getattr (1.4)
         if getattr(args, flag, None) and not registry.exists(module):
             raise not_built(f"status --{flag}", module)
+    _check_selectors(plan, args)
     ctx = build_context(root, plan, state)
     comp = ctx["comp"]
     rows = comp["rows"]
@@ -237,6 +266,10 @@ def cmd_status(args):
     if args.json:
         out = status_json(ctx, {"rows": rows, "patterns": comp["patterns"], "unplanned": state.get("unplanned", []),
                                 "syncedAt": state.get("syncedAt")})
+        for flag, key in (("feature", "features"), ("milestone", "milestones")):  # the selectors of the text form
+            want = getattr(args, flag, None)
+            if want and isinstance(out.get(key), list):
+                out[key] = [x for x in out[key] if isinstance(x, dict) and x.get("id") == want]
         print(json.dumps(out, indent=2, ensure_ascii=False))
         return
     if getattr(args, "feature", None):  # the feature card only (status_card, features)
@@ -249,35 +282,46 @@ def cmd_status(args):
     total = len(rows)
     done = sum(1 for r in rows if r["status"] == "verified")
     built = sum(1 for r in rows if r["status"] in ("built", "verified"))
-    print(f"{plan['app'].get('name')}: {total} planned files"
-          + (f" for {args.owner}" if args.owner else "") + (f" in {args.phase}" if args.phase else ""))
-    print(f"  verified {done}/{total}, built or better {built}/{total}. Last sync: {state.get('syncedAt') or 'never'}")
+    print(f"{one_line(plan['app'].get('name'))}: {total} planned files"
+          + (f" for {one_line(args.owner)}" if args.owner else "") + (f" in {one_line(args.phase)}" if args.phase else ""))
+    print(f"  verified {done}/{total}, built or better {built}/{total}. Last sync: {one_line(state.get('syncedAt') or 'never')}")
     print("\n  By phase:")
     for ph in plan["phases"]:
         d = summarize([r for r in rows if r["phase"] == ph["id"]], "phase").get(ph["id"])
         if d:
             n = sum(d.values())
-            print(f"    {ph['id']:<4} {ph.get('name', ''):<28} " + " ".join(f"{GLYPH[s]}{d[s]}" for s in STATES if d[s]) + f"  ({d['verified']}/{n} verified)")
+            print(f"    {one_line(ph['id']):<4} {one_line(ph.get('name', '')):<28} " + " ".join(f"{GLYPH[s]}{d[s]}" for s in STATES if d[s]) + f"  ({d['verified']}/{n} verified)")
     if not args.owner:
         print("\n  By owner:")
         for o, d in sorted(summarize(rows, "owner").items()):
             n = sum(d.values())
-            print(f"    {o:<28} " + " ".join(f"{GLYPH[s]}{d[s]}" for s in STATES if d[s]) + f"  ({d['verified']}/{n} verified)")
+            print(f"    {one_line(o):<28} " + " ".join(f"{GLYPH[s]}{d[s]}" for s in STATES if d[s]) + f"  ({d['verified']}/{n} verified)")
     blocked = [r for r in rows if r["status"] == "blocked"]
     if blocked:
         print("\n  Blocked:")
         for r in blocked:
-            print(f"    ▲ {r['path']} ({r['owner']}): {r.get('note') or ''}")
+            print(f"    ▲ {one_line(r['path'])} ({one_line(r['owner'])}): {one_line(r.get('note') or '')}")
     if args.next:
         blocked = set(ctx["blocked"].get("phases") or ())
-        ready = next_ready(plan, comp["rows"], args.owner, blocked_phases=blocked)
+        # files claim refuses (ctx["blocked"]["files"], unknowns) are never offered; given as blocked rows, so a file
+        # that depends on one waits as it does on any file not yet built
+        keys = _blocked_file_keys(ctx)
+        held = [r for r in comp["rows"] if path_key(r["path"]) in keys and r["status"] in ("planned", "claimed", "ondisk")
+                and r["phase"] not in blocked]
+        held_ids = {id(r) for r in held}
+        offer_rows = [dict(r, status="blocked") if id(r) in held_ids else r for r in comp["rows"]]
+        ready = next_ready(plan, offer_rows, args.owner, blocked_phases=blocked)
         print("\n  Ready to build next:")
         for ph in plan["phases"]:  # 2.6: files of a phase blocked by an open unknown are not offered
             if ph.get("id") in blocked and any(r["phase"] == ph["id"] and r["status"] in ("planned", "claimed", "ondisk")
                                                for r in comp["rows"]):
-                print(f"    (phase {ph['id']} skipped: blocked by {', '.join(blocked_by(ctx, 'phase', ph['id'])) or 'an open unknown'})")
+                print(f"    (phase {one_line(ph['id'])} skipped: blocked by "
+                      f"{one_line(', '.join(blocked_by(ctx, 'phase', ph['id'])) or 'an open unknown')})")
+        held = [r for r in held if not args.owner or r["owner"] == args.owner]
+        if held:
+            print(f"    ({len(held)} file(s) skipped: blocked by an open unknown; see status --unknowns)")
         for r in ready[:20]:
-            print(f"    {r['path']}  ({r['owner']}, {r['phase']})")
+            print(f"    {one_line(r['path'])}  ({one_line(r['owner'])}, {one_line(r['phase'])})")
         if not ready:
             print("    nothing: everything in the current phase is claimed, built or waiting on a dependency")
     n_stale = sum(1 for r in rows if r.get("stale"))

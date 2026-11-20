@@ -4,8 +4,9 @@ ctx starts with root, plan, state and comp (status.compute) and an empty value f
 module's context hook adds its keys in DOMAIN order (unknowns before records before features before roadmap), so a
 hook reads what the earlier ones added and a key whose module is not built yet reads as empty:
 
-    unknowns  []                    blocked  {"phases": set(), "milestones": set(), "features": set(), "by": {}}
-                                    (by: {"phase:P2" | "milestone:M1" | "feature:F-x": [unknown ids]})
+    unknowns  []                    blocked  {"phases": set(), "milestones": set(), "features": set(), "files": set(), "by": {}}
+                                    (by: {"phase:P2" | "milestone:M1" | "feature:F-x": [unknown ids]};
+                                     files: plan paths claim refuses, compared with core.path_key by status --next)
     checks    {fid: {...}} (1.4)    features []    milestones []    tasks []    studies []
 """
 from bp import registry
@@ -16,7 +17,7 @@ JSON_SECTIONS = ("features", "milestones", "tasks", "unknowns")  # what status -
 
 def build_context(root, plan, state):
     ctx = {"root": root, "plan": plan, "state": state, "comp": compute(root, plan, state),
-           "unknowns": [], "blocked": {"phases": set(), "milestones": set(), "features": set(), "by": {}},
+           "unknowns": [], "blocked": {"phases": set(), "milestones": set(), "features": set(), "files": set(), "by": {}},
            "checks": {}, "features": [], "milestones": [], "tasks": [], "studies": []}
     registry.collect("context", root, plan, state, ctx)
     return ctx

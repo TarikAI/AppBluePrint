@@ -23,7 +23,7 @@ from bp.views.roster import render_roster
 
 BASE_VIEWS = ("STRUCTURE.md", "ROSTER.md", "map.html")
 RESERVED_VIEWS = BASE_VIEWS + ("README.md",)  # init writes README.md for people to edit
-_VIEW_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*\.md$")
+_VIEW_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\.md")  # used with fullmatch: "$" would accept a final newline
 
 
 def find_template():
@@ -56,13 +56,23 @@ def render_map(plan, state, comp, ctx=None):
             "data": data_view(plan, state)}
     if ctx is not None:  # 2.0: keys from the map_payload hooks (contract 8.5); a collision is a bug
         data = merged("map_payload", ctx, data)
-    payload = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
-    html = tpl.read_text(encoding="utf-8")
     mm = find_asset("mindmap.js")
     mm_js = _script(mm.read_text(encoding="utf-8")) if mm else "function mindMap(host){host.textContent='Mind map unavailable: run init --refresh-tool.';return {expandAll:function(){},collapseAll:function(){},zoom:function(){},fit:function(){}};}"
-    html = html.replace("/*__MINDMAP_JS__*/", mm_js)
-    html = html.replace("/*__TABS_JS__*/", "\n;\n".join(_script(t) for t in tab_scripts()))
-    return html.replace("__APP_NAME__", _html_escape(plan["app"].get("name", "App"))).replace("__BLUEPRINT_DATA__", payload)
+    values = {"__APP_NAME__": _html_escape(plan["app"].get("name", "App")), "__BLUEPRINT_DATA__": script_json(data),
+              "/*__MINDMAP_JS__*/": mm_js, "/*__TABS_JS__*/": "\n;\n".join(_script(t) for t in tab_scripts())}
+    # One pass over the template: text put in for one placeholder is never searched for another (core review C4).
+    return _PLACEHOLDER.sub(lambda m: values[m.group(0)], tpl.read_text(encoding="utf-8"))
+
+
+_PLACEHOLDER = re.compile(r"__APP_NAME__|__BLUEPRINT_DATA__|/\*__MINDMAP_JS__\*/|/\*__TABS_JS__\*/")
+_SCRIPT_UNSAFE = {"<": "\\u003c", ">": "\\u003e", "&": "\\u0026", " ": "\\u2028", " ": "\\u2029"}
+
+
+def script_json(value):
+    """JSON safe to embed in a script element: <, >, & and U+2028/U+2029 become \\u escapes, so no plan text can
+    close the element, open a comment or a CDATA section, or end a line in an older JavaScript parser. Those
+    characters occur only inside JSON strings, where the escape stands for the same character: it parses back equal."""
+    return re.sub("[<>&  ]", lambda m: _SCRIPT_UNSAFE[m.group(0)], json.dumps(value, ensure_ascii=False))
 
 
 def _html_escape(s):
@@ -76,7 +86,7 @@ def _hook_views(ctx):
     out = {}
     for name, views in registry.collect("views", ctx):
         for fname, text in (views or {}).items():
-            if not isinstance(fname, str) or not _VIEW_NAME.match(fname) or fname in RESERVED_VIEWS or fname in out:
+            if not isinstance(fname, str) or not _VIEW_NAME.fullmatch(fname) or fname in RESERVED_VIEWS or fname in out:
                 raise RuntimeError(f"{name}.views returned the view name {fname!r}: a .md file name in .blueprint/, "
                                    "not a base view, not README.md and not one another module returns")
             text = str(text)
@@ -177,7 +187,7 @@ def render_all(root, plan, state, quiet=False, check=False, fail_on_conflict=Fal
     comp = ctx["comp"]
     outputs = {"STRUCTURE.md": render_structure(plan, state, comp, ctx), "ROSTER.md": render_roster(plan, state, comp, ctx)}
     current = state.get("generatedViews") if "generatedViews" in state else []
-    recorded = [n for n in current if isinstance(n, str) and _VIEW_NAME.match(n) and n not in RESERVED_VIEWS]         if isinstance(current, list) else []
+    recorded = [n for n in current if isinstance(n, str) and _VIEW_NAME.fullmatch(n) and n not in RESERVED_VIEWS]         if isinstance(current, list) else []
     hook = _hook_views(ctx)
     conflicts = {n: mod for n, (mod, _) in hook.items()
                  if n not in recorded and (bp_dir(root) / n).exists() and not _adoptable(bp_dir(root) / n)}

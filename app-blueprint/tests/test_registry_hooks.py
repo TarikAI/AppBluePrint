@@ -1473,7 +1473,7 @@ class StatusSelectorsTest(CliTestBase):
             ''',
             "roadmap.py": '''
                 def status_json(ctx):
-                    return {"milestones": [{"id": m["id"]} for m in ctx["plan"]["milestones"]] + [{"id": "M2"}]}
+                    return {"milestones": [{"id": m["id"]} for m in ctx["plan"]["milestones"]]}
 
                 def status_lines(ctx, args):
                     return []
@@ -1527,14 +1527,14 @@ class NextSkipsBlockedFilesTest(CliTestBase):
         self.assertEqual(code, 0, err)
         ready = out.split("Ready to build next:")[1]
         self.assertNotIn("apps/web/src/Inbox.tsx", ready)
-        self.assertIn("(1 file(s) skipped: every feature they serve is blocked; see status --unknowns)", ready)
+        self.assertIn("(1 file(s) skipped: blocked by an open unknown; see status --unknowns)", ready)
         self.assertIn("Cargo.toml", ready)
 
     def test_the_blocked_shape_has_files(self):
         from bp.views.context import build_context
         plan = quiet(bplan.load_plan, self.root)[0]
         ctx = build_context(self.root, plan, bplan.load_state(self.root))
-        self.assertEqual(ctx["blocked"], {"phases": set(), "milestones": set(), "features": set(), "files": [], "by": {}})
+        self.assertEqual(ctx["blocked"], {"phases": set(), "milestones": set(), "features": set(), "files": set(), "by": {}})
 
 
 class OneLineStatusTest(CliTestBase):
