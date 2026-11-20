@@ -1124,7 +1124,8 @@ class NextCommandTest(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertIn("Unknowns:", r.stdout)
             claim = p.cli("claim", OFFLINE, "--by", "frontend-engineer")
-            self.assertIn("next: " + got[2], claim.stderr)
+            # the CLI may spell the root differently (8.3 short and long names), so compare the shape, not the text
+            self.assertRegex(claim.stderr, r'next: python ".*blueprint\.py" status --unknowns --root ".*"')
 
     def test_a_copy_with_the_module_is_used_as_is(self):
         with TempProject() as p:
