@@ -187,7 +187,7 @@ def render_all(root, plan, state, quiet=False, check=False, fail_on_conflict=Fal
     comp = ctx["comp"]
     outputs = {"STRUCTURE.md": render_structure(plan, state, comp, ctx), "ROSTER.md": render_roster(plan, state, comp, ctx)}
     current = state.get("generatedViews") if "generatedViews" in state else []
-    recorded = [n for n in current if isinstance(n, str) and _VIEW_NAME.fullmatch(n) and n not in RESERVED_VIEWS]         if isinstance(current, list) else []
+    recorded = [n for n in current if isinstance(n, str) and _VIEW_NAME.match(n) and n not in RESERVED_VIEWS]         if isinstance(current, list) else []
     hook = _hook_views(ctx)
     conflicts = {n: mod for n, (mod, _) in hook.items()
                  if n not in recorded and (bp_dir(root) / n).exists() and not _adoptable(bp_dir(root) / n)}

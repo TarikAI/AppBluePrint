@@ -20,7 +20,7 @@ from bp.core import (BlueprintError, append_log, bp_dir, die, emit, find_root, g
                      project_path)
 from bp.globs import pattern_instance_rx
 from bp.learn import record_incident
-from bp.plan import GLYPH, LABEL, STATES, load_plan, load_state, owner_of, planned_file, save_state, section_index
+from bp.plan import GLYPH, LABEL, STATES, load_plan, load_state, owner_of, planned_file, save_state
 from bp.registry import command_built
 from bp.validate import validate_plan
 from bp.views.render import render_all
@@ -227,6 +227,7 @@ def one_line(value):
 def _check_selectors(plan, args):
     """The --feature and --milestone ids must be in the plan, for the text and the JSON form alike: unknown-feature /
     unknown-milestone (7.3), exit 1, the failure envelope with --json. Checked here once, before any hook runs."""
+    from bp.plan import section_index
     fid = getattr(args, "feature", None)
     if fid and fid not in section_index(plan, "features"):
         raise BlueprintError("unknown-feature", f"feature {one_line(fid)} is not in the plan",
