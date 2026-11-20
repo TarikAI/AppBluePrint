@@ -1376,7 +1376,7 @@ class SignalsTest(CliTestBase):
                          ["guard guard-unplanned", "guard guard-wrong-owner", "verify verify-fail"])
 
 
-HOSTILE = ["</script>", "<!--", "<!--<script>", "]]>", "a b c", "&amp;<b>", "__BLUEPRINT_DATA__",
+HOSTILE = ["</script>", "<!--", "<!--<script>", "]]>", "a\u2028b\u2029c", "&amp;<b>", "__BLUEPRINT_DATA__",
            "__APP_NAME__", "/*__MINDMAP_JS__*/", "/*__TABS_JS__*/"]
 SVG_NS = "http://www.w3.org/2000/svg"
 
@@ -1406,7 +1406,7 @@ class MapSafetyTest(CliTestBase):
         text = " | ".join(HOSTILE)
         plan["app"]["name"] = "Snag " + text
         plan["files"][0]["purpose"] = text
-        plan["files"][0]["path"] = "dir/" + "".join(c for c in text if c not in '<>:"|?*\\  ') + ".txt"
+        plan["files"][0]["path"] = "dir/" + "".join(c for c in text if c not in '<>:"|?*\\\u2028\u2029') + ".txt"
         plan["modules"][0]["purpose"] = text
         plan["phases"][0]["name"] = text
         return plan
@@ -1419,7 +1419,7 @@ class MapSafetyTest(CliTestBase):
                 plan = self.hostile_plan(version)
                 html = self.render(plan, exts if version == 2 else None)
                 raw = self.payload(html)
-                for ch in "<>&  ":
+                for ch in "<>&\u2028\u2029":
                     self.assertNotIn(ch, raw, "embedded data never holds a character the HTML parser reacts to")
                 data = json.loads(raw)
                 self.assertEqual(data["app"]["name"], plan["app"]["name"])
@@ -1576,6 +1576,29 @@ class OneLineStatusTest(CliTestBase):
             self.assertIn(needle, out)
         for line in out.splitlines():
             self.assertNotRegex(line, r"^(Desk|skeleton|\.toml|architect|for it)\b", line)
+
+
+class AliasSeverityCliTest(CliTestBase):
+    """file-path-alias warnings never block (review of #16, R2-2); its errors do."""
+
+    def test_warnings_render_and_sync_errors_block(self):
+        plan = v2_plan()
+        plan["files"].append(dict(plan["files"][1], path=plan["files"][1]["path"].upper(), dependsOn=[]))
+        plan["files"].append(dict(plan["files"][1], path="src/aux.ts", dependsOn=[]))
+        self.write_plan(plan)
+        code, out, err = self.run_("validate")
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("device name AUX", out + err)
+        for argv in (["render"], ["sync"]):
+            code, out, err = self.run_(*argv)
+            self.assertEqual(code, 0, out + err)
+            self.assertNotIn("Views not refreshed", out)
+        self.assertTrue((self.root / ".blueprint" / "STRUCTURE.md").is_file())
+        plan["files"].append(dict(plan["files"][1], path="src/b.ts.", dependsOn=[]))
+        self.write_plan(plan)
+        self.assertEqual(self.run_("validate")[0], 1)
+        code, out, err = self.run_("sync")
+        self.assertIn("Views not refreshed", out)
 
 
 class RosterCellsTest(CliTestBase):
@@ -1767,11 +1790,16 @@ class MapRoundOneTest(CliTestBase):
                     with self.assertRaisesRegex(RuntimeError, re.escape(name)):
                         render.render_map(loaded, state, ctx["comp"], ctx)
 
-    def test_render_py_holds_no_literal_line_separators(self):
-        for rel in ("views/render.py", "views/structure.py", "commands/progress.py"):
-            text = (S.SCRIPTS / "bp" / rel).read_text(encoding="utf-8")
-            for ch in "  ":
-                self.assertNotIn(ch, text, rel)
+    def test_no_source_holds_literal_line_separators(self):
+        """Every .py file under scripts/ and tests/ (this one included) writes these characters as escapes: many tools
+        treat them as line breaks (review of #16, N10 and round 2)."""
+        needles = [chr(n) for n in (0x2028, 0x2029, 0x85, 0x0B, 0x0C, 0x1C, 0x1D, 0x1E)]
+        files = sorted(S.SCRIPTS.rglob("*.py")) + sorted(Path(__file__).resolve().parent.rglob("*.py"))
+        self.assertIn(Path(__file__).resolve(), files)
+        for f in files:
+            text = f.read_text(encoding="utf-8")
+            for ch in needles:
+                self.assertNotIn(ch, text, f"{f}: U+{ord(ch):04X}")
 
 
 NETWORK = [r"https?://", r"(?<![:\w])//[A-Za-z0-9.-]+\.[A-Za-z]{2,}", r"@import", r"@font-face", r"url\(\s*['\"]?(?![#'\")]|data:)",
@@ -1811,7 +1839,7 @@ class NoNetworkTest(CliTestBase):
         self.assertEqual(network_uses("marker-end: url(#arr); a = 'b' // comment"), [])
 
 
-LINE_BREAKS = "\r\n\x0b\x0c\x1c\x1d\x1e\x85  "
+LINE_BREAKS = "\r\n\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"
 
 
 class StatusRoundOneTest(CliTestBase):

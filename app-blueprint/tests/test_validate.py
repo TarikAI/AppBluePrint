@@ -1057,9 +1057,8 @@ class FindingsTest(HermeticRoot):
                 self.assertEqual((errs[0]["message"], errs[0]["code"]), ("version must be 1 or 2", "version"))
 
     def test_windows_alias_paths(self):
-        """file-path-alias (version 2 only): every message says what Windows really does with the name (review of
-        #16, N4): a trailing dot or space at the end is dropped, so it names the plain file; elsewhere the name cannot
-        be stored as written; ':' starts a stream name; an empty segment, a device name, a case-only twin."""
+        """file-path-alias errors (version 2 only): names Windows cannot store as written, or stores as another name.
+        Every message says what Windows really does (review of #16, N4)."""
         cases = {
             "apps/web/y.ts.": "Windows drops the trailing dots and spaces, so it names the same file as 'apps/web/y.ts'",
             "apps/web/y2.ts ..": "Windows drops the trailing dots and spaces, so it names the same file as 'apps/web/y2.ts'",
@@ -1067,9 +1066,6 @@ class FindingsTest(HermeticRoot):
             "apps/web /b.ts": "the folder name 'web ' ends in a dot or a space, which Windows cannot store as written",
             "apps/z.ts::$DATA": "':' in 'z.ts::$DATA' starts a stream name on Windows",
             "src:x/a.ts": "':' in 'src:x' starts a stream name on Windows",
-            "src/con.ts": "'con.ts' is the Windows device name CON",
-            "lpt9/a.ts": "'lpt9' is the Windows device name LPT9",
-            "src/Aux": "'Aux' is the Windows device name AUX",
         }
         plan = v2_plan()
         for path in cases:
@@ -1091,21 +1087,37 @@ class FindingsTest(HermeticRoot):
         self.assertNotIn("file-path-alias", [f["code"] for f in self.v.validate_findings(self.load(v1))],
                          "a version 1 plan validates as in 1.3.0")
 
-    def test_case_twins_and_pattern_segments(self):
+    def test_device_names_and_case_twins_are_warnings(self):
+        """file-path-alias warnings (version 2 only, never blocking; review of #16, R2-2): device names and case-only
+        twins are legitimate on a Linux-only project, but such a plan cannot be checked out on Windows (or macOS)."""
         plan = v2_plan()
         first = plan["files"][1]["path"]
         twin = first.upper()
-        plan["files"].append(dict(plan["files"][1], path=twin, dependsOn=[]))
-        plan["patterns"].append({"id": "pat-alias", "glob": "src/aux/*.ts.", "module": plan["modules"][0]["id"],
+        for path in (twin, "src/con.ts", "lpt9/a.ts", "src/Aux"):
+            plan["files"].append(dict(plan["files"][1], path=path, dependsOn=[]))
+        plan["patterns"].append({"id": "pat-alias", "glob": "src/aux/*.ts", "module": plan["modules"][0]["id"],
                                  "phase": plan["phases"][0]["id"], "purpose": "p", "instance": "one file", "verify": "true"})
         found = [f for f in self.v.validate_findings(self.load(plan)) if f["code"] == "file-path-alias"]
-        self.assertEqual([f["message"] for f in found], [
-            f"file {twin!r}: differs from file {first!r} only by case; Windows and macOS see one file",
-            "pattern 'pat-alias': not a portable name on Windows: 'aux' is the Windows device name AUX",
+        dev = "the plan cannot be checked out on Windows as written: rename it"
+        self.assertEqual([(f["level"], f["entry"], f["message"]) for f in found], [
+            ("warning", f"file {twin}", f"file {twin!r}: differs from file {first!r} only by case; the plan cannot be "
+                                        "checked out on Windows or macOS as written: rename one of them"),
+            ("warning", "file src/con.ts", f"file 'src/con.ts': 'con.ts' is the Windows device name CON; {dev}"),
+            ("warning", "file lpt9/a.ts", f"file 'lpt9/a.ts': 'lpt9' is the Windows device name LPT9; {dev}"),
+            ("warning", "file src/Aux", f"file 'src/Aux': 'Aux' is the Windows device name AUX; {dev}"),
+            ("warning", "pattern pat-alias", f"pattern 'pat-alias': 'aux' is the Windows device name AUX; {dev}"),
         ])
-        self.assertEqual([f["entry"] for f in found], [f"file {twin}", "pattern pat-alias"])
         for f in found:
             self.assertEqual(self.v.classify_error(f["message"]), "file-path-alias")
+
+    def test_case_twins_are_simple_upper_case_pairs(self):
+        """NTFS folds case one character at a time (simple upper case): A/a pair, but ß/ss and the Kelvin sign do not
+        (review of #16, R2-1)."""
+        plan = v2_plan()
+        for path in ("src/A.ts", "src/a.ts", "src/straße.ts", "src/strasse.ts", "src/K.ts", "src/K.ts"):
+            plan["files"].append(dict(plan["files"][1], path=path, dependsOn=[]))
+        found = [f for f in self.v.validate_findings(self.load(plan)) if f["code"] == "file-path-alias"]
+        self.assertEqual([f["entry"] for f in found], ["file src/a.ts"])
 
     def test_bad_id_is_registered_once_in_the_core(self):
         """Contract 7.4: bad-id is a cross-section code; the core registers it, domain modules only emit it."""
