@@ -237,9 +237,6 @@ class ParallelWriters(IntegrityChecks, unittest.TestCase):
 
     @unittest.skipUnless(registry.exists("roadmap"), "the task command arrives with the roadmap module")
     def test_parallel_task_on_different_tasks(self):
-        if not roadmap_uses_the_lock():
-            self.skipTest("bp/roadmap.py still writes with plan.save_state (read before the lock); the routed "
-                          "patch moves set_task to core.update_state")
         p = Project(tasks=True)
         self.addCleanup(p.close)
         before = p.log_lines()
@@ -1210,29 +1207,38 @@ class ScopeAndApi(unittest.TestCase):
         self.assertEqual(event["counts"]["built"], 1, event)
         self.assertIn("built 1", out)
 
+    def test_task_repeats_the_owner_action_check_under_the_lock(self):
+        """A person marks an owner action done after `task` read state but before it takes the lock: the agent's
+        change is refused on the state as it is under the lock, and the person's done stands."""
+        from bp import plan as bplan
+        from bp import roadmap
+        plan = json.loads((self.p.bp / "blueprint.json").read_text(encoding="utf-8"))
+        plan["roster"].append({"id": "lead", "kind": "human", "role": "owner"})
+        plan["tasks"] = [{"id": "T-sign", "title": "Sign the contract", "owner": "lead", "ownerAction": True}]
+        (self.p.bp / "blueprint.json").write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
+        state = json.loads((self.p.bp / "state.json").read_text(encoding="utf-8"))
+        state["tasks"] = {"T-sign": {"status": "done", "by": "lead", "at": "2026-01-01T00:00:00Z", "note": None}}
+        (self.p.bp / "state.json").write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+        before = dict(state, tasks={})  # what task read first: not done yet
+
+        with mock.patch.object(roadmap, "read_state", lambda root, prepare=None, owned=(): prepare(json.loads(
+                json.dumps(before)))):
+            with self.assertRaises(core.BlueprintError) as cm:
+                roadmap.set_task(self.p.root, bplan.load_plan(self.p.root), "T-sign", "todo", "o1", force=True)
+        self.assertEqual((cm.exception.error, cm.exception.code), ("owner-action-human", 3))
+        self.assertEqual(self.p.state()["tasks"]["T-sign"]["status"], "done")
+
     def test_no_module_calls_save_state(self):
         import re
         callers = []
         for path in sorted(S.PACKAGE.rglob("*.py")):
             rel = path.relative_to(S.PACKAGE).as_posix()
-            if rel in PENDING_PATCH:
-                continue
             for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
                 if re.search(r"\bsave_state\(", line) and not (rel == "plan.py" and line.startswith("def save_state"))\
                         and rel != "api.py":
                     callers.append(f"{rel}:{n}: {line.strip()}")
         self.assertEqual(callers, [], "change state with core.update_state / status.change_state")
 
-
-# Modules of other workstreams that still write state with plan.save_state until the routed patch lands (W1-R:
-# roadmap.set_task; the patch moves it to core.update_state). Remove the entry when it lands.
-PENDING_PATCH = {"roadmap.py"}
-
-
-def roadmap_uses_the_lock():
-    """True once bp/roadmap.py writes state through core.update_state (the routed patch)."""
-    path = S.PACKAGE / "roadmap.py"
-    return path.is_file() and "update_state" in path.read_text(encoding="utf-8")
 
 
 if __name__ == "__main__":
