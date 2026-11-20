@@ -761,6 +761,21 @@ class DamagedState(unittest.TestCase):
         self.assertEqual(code, 1, err)
         self.assertIn('files["src/x.txt"] must be an object', err)
 
+    def test_db_check_repairs_damage_confined_to_data_live(self):
+        """db-check owns data.live and rewrites it wholesale, so damage there is repaired by db-check (as 1.3.0's rewrite
+        did) and refused by every command that only reads it."""
+        for live in ("x", 5, [1], {"source": "s"}, dict(self.RICH_DATA["live"], liveOnly="x"),
+                     dict(self.RICH_DATA["live"], tables=None)):
+            data = dict(json.loads(json.dumps(self.RICH_DATA)), live=live)
+            self.path.write_text(json.dumps(dict(self.base, data=data)) + "\n", encoding="utf-8")
+            code, out, err = self.p.run("status")
+            self.assertEqual(code, 1, (live, err))
+            code, out, err = self.p.run("db-check", "--schema-dump", "dump.sql")
+            self.assertEqual(code, 0, (live, err))
+            got = self.p.state()["data"]
+            self.assertEqual(got["live"]["source"], "dump:dump.sql")
+            self.assertEqual(got["tables"], self.RICH_DATA["tables"], "only data.live is repaired")
+
     def cases(self):
         for key in FUZZ_KEYS:
             for name, value in FUZZ_VALUES.items():
