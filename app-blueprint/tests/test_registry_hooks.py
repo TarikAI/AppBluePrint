@@ -50,6 +50,45 @@ class HermeticTest(unittest.TestCase):
         real = (S.PACKAGE / "features.py").exists()
         self.assertEqual(registry.exists("features"), real, "outside, the real tree decides")
 
+    @staticmethod
+    def parent_attrs():
+        """{name: the attribute the import system set on the parent package, or MISSING} for every later module."""
+        out = {}
+        for n in later_modules():
+            parent, _, leaf = n.rpartition(".")
+            pkg = sys.modules.get(parent)
+            out[n] = getattr(pkg, leaf, "MISSING") if pkg is not None else "NO PARENT"
+        return out
+
+    def test_parent_package_attributes_are_hidden_and_restored(self):
+        """Review of #15, M1: a from-import inside the block never returns a real module imported earlier, and after
+        the block (also when it raises) every parent attribute is what it was, so no stand-in leaks."""
+        for n in later_modules():  # make sure some real ones are imported, so their attributes exist
+            try:
+                importlib.import_module(n)
+            except Exception:  # noqa: BLE001 - not built, or a module that needs more than an import
+                pass
+        before = self.parent_attrs()
+        with extension({"features.py": "STAND_IN = True\n", "views/roadmap_md.py": "STAND_IN = True\n"}):
+            from bp import features
+            self.assertTrue(features.STAND_IN)
+            from bp.views import roadmap_md
+            self.assertTrue(roadmap_md.STAND_IN)
+            for n in later_modules():
+                if n in ("bp.features", "bp.views.roadmap_md"):
+                    continue
+                parent, _, leaf = n.rpartition(".")
+                with self.subTest(hidden=n):
+                    self.assertFalse(hasattr(sys.modules.get(parent), leaf), n)
+                    with self.assertRaises(ImportError):
+                        exec(f"from {parent} import {leaf}", {})
+        self.assertEqual({k: id(v) for k, v in self.parent_attrs().items()}, {k: id(v) for k, v in before.items()})
+        with self.assertRaises(KeyError):
+            with extension({"features.py": "STAND_IN = True\n"}):
+                from bp import features  # noqa: F401,F811
+                raise KeyError("inside")
+        self.assertEqual({k: id(v) for k, v in self.parent_attrs().items()}, {k: id(v) for k, v in before.items()})
+
     def test_non_hermetic_stand_ins_only_fill_gaps(self):
         real = (S.PACKAGE / "features.py").exists()
         with extension({"features.py": "STAND_IN = True\n"}, hermetic=False):
@@ -110,6 +149,17 @@ class RegistryTest(Hermetic, unittest.TestCase):
             self.assertEqual(registry.collect("status_lines", {}, None),
                              [("unknowns", ["bp.unknowns"]), ("features", ["bp.features"]), ("roadmap", ["bp.roadmap"])])
         self.assertEqual(registry.collect("status_lines", {}, None), [])
+
+    def test_collect_takes_domain_before_views(self):  # mutation: VIEWS loaded before DOMAIN
+        src = "def status_lines(ctx, args):\n    return [__name__]\n"
+        with extension({"views/features_md.py": src, "roadmap.py": src}):
+            self.assertEqual([n for n, _ in registry.collect("status_lines", {}, None)], ["roadmap", "views.features_md"])
+
+    def test_refusal_takes_the_first_of_two_refusals(self):  # mutation: the last message instead of the first
+        with extension({"unknowns.py": "def refuse(action, root, plan, path, by):\n    return 'from unknowns'\n",
+                        "records.py": "def refuse(action, root, plan, path, by):\n    return 'from records'\n"}):
+            self.assertEqual(registry.refusal("claim", None, {}, "a.py", "x"), "from unknowns")
+            self.assertEqual(registry.refusal("write", None, {}, "a.py", "x"), "from unknowns")
 
     def test_refusal_first_message_wins(self):
         with extension({"unknowns.py": "def refuse(action, root, plan, path, by):\n"
@@ -742,6 +792,24 @@ class ViewFileTest(CliTestBase):
             code, _, err = self.run_("render")
         self.assertEqual(code, 1, err)
         self.assertIn("BIN.md exists and was not written by blueprint.py", err)
+
+    def test_the_union_is_recorded_before_any_view_is_written(self):  # mutation: union not saved first
+        from bp.views import render
+        self.run_("sync")
+        state_path = self.root / ".blueprint" / "state.json"
+        src = "def views(ctx):\n    return {'UNION.md': " + repr(HEADER + "\n") + "}\n"
+        real_write = render.write_text_if_changed
+
+        def failing(path, text):
+            if Path(path).name == "UNION.md":
+                raise OSError("disk full while writing the view")
+            return real_write(path, text)
+
+        with extension({"views/features_md.py": src}), mock.patch.object(render, "write_text_if_changed", failing):
+            plan = quiet(bplan.load_plan, self.root)[0]
+            with self.assertRaises(OSError):
+                render.render_all(self.root, plan, bplan.load_state(self.root), quiet=True)
+        self.assertEqual(json.loads(state_path.read_text(encoding="utf-8"))["generatedViews"], ["UNION.md"])
 
     def test_a_v1_render_adds_nothing_to_state(self):
         self.write_plan(v1_plan())

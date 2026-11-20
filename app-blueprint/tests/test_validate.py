@@ -1042,6 +1042,24 @@ class FindingsTest(HermeticRoot):
             with self.assertRaises(RuntimeError):
                 self.v.classify_error("task id 'x' has the wrong form")
 
+    def test_module_examples_are_checked_against_the_core_codes(self):
+        """Review of #15, M2: a module's CODE_EXAMPLES message that a core regex claims first is refused, naming both
+        owners (here a stand-in roadmap example that bad-id would silently take)."""
+        from test_registry_hooks import extension as ext
+        src = ("CODES = [(r'is late$', 'task-late')]\n"
+               "CODE_EXAMPLES = {'task-late': \"task id 'T-a' has the wrong form and is late\"}\n")
+        with ext({"roadmap.py": src}):
+            with self.assertRaisesRegex(RuntimeError, "validate.*roadmap|roadmap.*validate"):
+                self.v.codes()
+        with ext({"roadmap.py": "CODES = [(r'^task \\S+ is late', 'task-late')]\n"
+                                "CODE_EXAMPLES = {'task-late': 'task T-a is late'}\n"}):
+            self.assertIn((r"^task \S+ is late", "task-late"), self.v.codes())
+
+    def test_the_core_examples_are_checked(self):  # mutation m19: the core example check switched off
+        with mock.patch.dict(self.v.CODE_EXAMPLES, {"bad-id": "nothing like an id error"}):
+            with self.assertRaisesRegex(RuntimeError, "core example"):
+                self.v.codes()
+
     def test_codes_lists(self):
         from bp import data, rules
         self.assertEqual(data.CODES + rules.CODES, frozen.VALIDATION_CODES)
