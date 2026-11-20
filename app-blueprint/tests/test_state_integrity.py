@@ -685,6 +685,35 @@ class DamagedState(unittest.TestCase):
                           err + out, args)
             self.assertEqual(self.path.read_bytes(), before, f"{args}: nothing is written by a command that fails")
 
+    def test_sync_repairs_damage_confined_to_the_keys_it_rewrites(self):
+        """Review round 2, ruling 2: a command that owns a key and rewrites it wholesale repairs damage confined to
+        that key, as 1.3.0 did (sync: patterns, unplanned, ignoredTracked, missingModify, data apart from data.live);
+        every other command, and damage in a key the command only reads (files above all), stays bad-state."""
+        damaged = (("patterns", 5), ("patterns", None), ("patterns", {"pat": "x"}), ("patterns", {"pat": {"instances": 7}}),
+                   ("patterns", {"pat": {"instances": [1]}}), ("unplanned", 5), ("unplanned", {"a": 1}),
+                   ("ignoredTracked", "x"), ("missingModify", 5), ("data", 5), ("data", [1]))
+        for key, value in damaged:
+            for how in ("sync", "hook post"):
+                self.path.write_text(json.dumps(dict(self.base, **{key: value})) + "\n", encoding="utf-8")
+                code, out, err = self.hook_post() if how == "hook post" else self.p.run("sync", "--quiet")
+                self.assertEqual(code, 0, (how, key, value, err))
+                st = self.p.state()
+                self.assertIsInstance(st["patterns"], dict)
+                self.assertIsInstance(st["patterns"]["pat"]["instances"], list)
+                self.assertIsInstance(st["unplanned"], list)
+                self.assertIsInstance(st["data"], dict)
+                self.assertEqual(st["files"], self.base["files"], "sync never touches file records")
+        for key, value in (("patterns", 5), ("unplanned", 5), ("data", 5)):  # a command that only reads the key
+            self.path.write_text(json.dumps(dict(self.base, **{key: value})) + "\n", encoding="utf-8")
+            for args in (["status"], ["mark", "src/f1.txt", "built", "--by", "o1"]):
+                code, out, err = self.p.run(*args)
+                self.assertEqual(code, 1, (key, args, err))
+                self.assertIn("error: .blueprint/state.json is damaged", err)
+        self.path.write_text(json.dumps(dict(self.base, files={"src/x.txt": 5})) + "\n", encoding="utf-8")
+        code, out, err = self.p.run("sync", "--quiet")  # files is read by sync, never owned: never repaired
+        self.assertEqual(code, 1, err)
+        self.assertIn('files["src/x.txt"] must be an object', err)
+
     def cases(self):
         for key in FUZZ_KEYS:
             for name, value in FUZZ_VALUES.items():
