@@ -1354,5 +1354,53 @@ class TabRoundTwoTest(TabRunTest):
         self.assertIn("7 / 9", out["text"])
 
 
+class NoMachineSpecificTextTest(TempRoot):
+    """Files in .blueprint/ are committed and shared: none may carry an absolute path or this machine's folders."""
+
+    def test_nothing_written_into_the_project_names_this_machine(self):
+        import os
+        import re
+        import tempfile
+        plan = v2_plan()
+        add_task(plan, id="T-api-keys", title="Create the API keys", owner="backend-lead")
+        self.write_plan(plan)
+        self.assertFalse((self.root / ".blueprint" / "bin").exists())  # a project without a tool copy
+        self.assertEqual(self.cli("task", "T-api-keys", "blocked", "--by", "backend-lead", "--note", "waiting on a vendor").returncode, 0)
+        self.assertEqual(self.cli("task", "T-domain", "done", "--by", "owner").returncode, 0)
+        self.assertEqual(self.cli("task", "T-domain", "done", "--by", "backend-lead").returncode, 3)  # a refused call writes nothing
+        r = self.cli("render")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        names = ("map.html", "ROADMAP.md", "ROSTER.md", "STRUCTURE.md", "state.json", "log.jsonl")
+        folder = self.root / ".blueprint"
+        self.assertTrue(all((folder / n).is_file() for n in names), [n for n in names if not (folder / n).is_file()])
+        machine = {str(self.root), self.root.as_posix(), str(self.root.resolve()), self.root.resolve().as_posix(),
+                   tempfile.gettempdir(), Path(tempfile.gettempdir()).as_posix(), str(S.SKILL), S.SKILL.as_posix(),
+                   os.path.expanduser("~"), Path(os.path.expanduser("~")).as_posix()}
+        drive = re.compile(r"(?<![A-Za-z0-9])[A-Za-z]:[\/]")  # C:\ or C:/ (not the s:/ of a URL)
+        rooted = re.compile(r"(?<![\w/.:<>\"'=,-])/(?:home|Users|tmp|var|mnt|private|root|usr|opt|etc|run|Volumes)/")
+        for name in names:
+            text = (folder / name).read_text(encoding="utf-8")
+            for bad in machine:
+                self.assertNotIn(bad, text, f"{name} contains {bad}")
+            self.assertIsNone(drive.search(text), f"{name}: {drive.search(text)}")
+            self.assertIsNone(rooted.search(text), f"{name}: {rooted.search(text)}")
+
+    def test_the_payload_and_next_texts_use_the_project_copy_form(self):
+        from bp import roadmap as rm
+        self.plan_json = v2_plan()
+        self.assertTrue(rm.BP.startswith("python .blueprint/bin/blueprint.py"))
+        self.assertNotIn(str(S.SCRIPTS), rm.BP)
+        self.write_plan(v2_plan())
+        loaded = bplan.load_plan(self.root)
+        ctx = ViewTest.ctx(self, features=[], unknowns=[])
+        blob = json.dumps(rm.map_payload(ctx))
+        for bad in (str(self.root), self.root.as_posix(), str(S.SKILL)):
+            self.assertNotIn(bad, blob)
+        with self.assertRaises(BlueprintError) as cm:
+            rm.set_task(self.root, loaded, "T-nope", "done", "owner")
+        self.assertNotIn(str(S.SCRIPTS), cm.exception.next)
+        self.assertNotIn(str(self.root), cm.exception.next)
+
+
 if __name__ == "__main__":
     unittest.main()
