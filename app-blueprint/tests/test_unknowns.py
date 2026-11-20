@@ -446,7 +446,8 @@ class BlockingTest(unittest.TestCase):
         self.assertEqual([u["id"] for u in ctx["unknowns"]], ["U-x", "U-low", "U-done"])
         self.assertEqual([u["blocking"] for u in ctx["unknowns"]], [True, False, False])
         self.assertEqual(set(ctx["unknowns"][0]), {"id", "question", "severity", "status", "blocks", "evidenceFor",
-                                                   "evidenceAgainst", "experiment", "decision", "blocking", "unresolved"})
+                                                   "evidenceAgainst", "experiment", "decision", "blocking", "unresolved",
+                                                   "decisionMissing"})
         self.assertEqual(ctx["unknowns"][2]["decision"], "D-offline")
         self.assertEqual(ctx["blocked"]["phases"], {"P2"})
         self.assertEqual(blocked_by(ctx, "phase", "P2"), ["U-x"])
@@ -1011,7 +1012,8 @@ class AllEntriesTest(unittest.TestCase):
                 self.assertIn("apps/web/link/x.ts is in phase P2", got[0])
                 r = p.cli("claim", "apps/web/link/x.ts", "--by", "frontend-engineer")
                 self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
-                self.assertEqual(p.cli("claim", "apps/web/real/x.ts", "--by", "frontend-engineer").returncode, 0)
+                self.assertEqual(p.cli("claim", "apps/web/real/x.ts", "--by", "frontend-engineer").returncode, 3,
+                                 "the same file as the blocked link")
 
     def test_the_context_list_and_the_refusal_never_disagree(self):
         plans = [v2_plan(), self.twin_plan(True), self.twin_plan(False), self.link_plan(True),
@@ -1179,7 +1181,7 @@ class NoMachinePathsTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         html = (p.root / ".blueprint" / "map.html").read_text(encoding="utf-8")
         text = re.search(r'<script id="bp" type="application/json">(.*?)</script>', html, re.S).group(1)
-        return json.loads(text.replace("<\/", "</")), html
+        return json.loads(text.replace("<\\/", "</")), html
 
     def assert_portable(self, text, p):
         for bad in (str(p.root), str(p.root).replace("\\", "/"), str(p.root).replace("\\", "\\\\"), str(S.SCRIPTS),
@@ -1212,6 +1214,139 @@ class NoMachinePathsTest(unittest.TestCase):
             unknowns.context(p.root, p.loaded(), {}, ctx)
             self.assert_portable(json.dumps(ctx["unknowns"]), p)
             self.assert_portable(json.dumps(unknowns.status_json(ctx)), p)
+
+
+class ResolvedLocationTest(unittest.TestCase):
+    """R2-B1, R2-M1: two plan entries name the same file when their resolved locations are the same."""
+
+    def linked(self, entries, patterns=()):
+        plan = with_unknowns(unknown(blocks=["P2"]))
+        for path, phase in entries:
+            add_file(plan, path, phase)
+        plan["patterns"] = list(patterns)
+        return plan
+
+    def with_link(self, plan, test):
+        with TempProject(plan) as p:
+            (p.root / "apps" / "web" / "real").mkdir(parents=True)
+            if not make_dir_link(p.root / "apps" / "web" / "link", p.root / "apps" / "web" / "real"):
+                self.skipTest("this machine cannot create a directory link")
+            test(p)
+
+    def test_the_free_target_of_a_blocked_link_is_refused_in_both_orders(self):
+        for order in (0, 1):
+            pair = [("apps/web/real/x.ts", "P1"), ("apps/web/link/x.ts", "P2")]
+            plan = self.linked(pair if order == 0 else pair[::-1])
+
+            def check(p, plan=plan):
+                loaded = p.loaded()
+                for typed in ("apps/web/real/x.ts", "apps/web/link/x.ts"):
+                    got = unknowns.refuse("claim", p.root, loaded, typed, "x")
+                    self.assertIsNotNone(got, f"{typed}, order {order}")
+                    self.assertIn("apps/web/link/x.ts is in phase P2", got[0])
+                    r = p.cli("claim", typed, "--by", "frontend-engineer")
+                    self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+                ctx = {}
+                unknowns.context(p.root, loaded, {}, ctx)
+                self.assertEqual(ctx["blocked"]["files"], {"apps/web/real/x.ts", "apps/web/link/x.ts", OFFLINE})
+            self.with_link(plan, check)
+
+    def test_a_blocked_pattern_through_a_link_refuses_the_real_path(self):
+        pat = {"id": "links", "glob": "apps/web/link/*.ts", "module": "web", "phase": "P2", "purpose": "p"}
+        plan = self.linked([("apps/web/real/x.ts", "P1")], [pat])
+
+        def check(p):
+            loaded = p.loaded()
+            got = unknowns.refuse("claim", p.root, loaded, "apps/web/real/x.ts", "x")
+            self.assertIsNotNone(got)
+            self.assertEqual(p.cli("claim", "apps/web/real/x.ts", "--by", "frontend-engineer").returncode, 3)
+            # the reverse: a blocked pattern on the real folder refuses a planned file written through the link
+        self.with_link(plan, check)
+
+        pat2 = {"id": "real", "glob": "apps/web/real/*.ts", "module": "web", "phase": "P2", "purpose": "p"}
+        plan2 = self.linked([("apps/web/link/y.ts", "P1")], [pat2])
+        self.with_link(plan2, lambda p: self.assertIsNotNone(
+            unknowns.refuse("claim", p.root, p.loaded(), "apps/web/link/y.ts", "x")))
+
+    def test_an_unblocked_link_target_stays_claimable(self):
+        plan = self.linked([("apps/web/real/x.ts", "P1"), ("apps/web/link/x.ts", "P1")])
+        self.with_link(plan, lambda p: self.assertIsNone(unknowns.refuse("claim", p.root, p.loaded(),
+                                                                         "apps/web/real/x.ts", "x")))
+
+    @unittest.skipUnless(os.name == "nt", "Windows strips trailing dots and stream suffixes")
+    def test_windows_aliases_of_a_planned_file(self):
+        for alias in ("apps/web/src/y.ts.", "apps/web/src/y.ts::$DATA", "apps/web/src/y.ts:s"):
+            for first in (True, False):
+                pair = [("apps/web/src/y.ts", "P1"), (alias, "P2")]
+                plan = self.linked(pair if first else pair[::-1])
+                with TempProject(plan) as p:
+                    got = unknowns.refuse("claim", p.root, p.loaded(), "apps/web/src/y.ts", "x")
+                    self.assertIsNotNone(got, f"{alias}, free listed first: {first}")
+
+    def test_the_resolution_is_done_once_per_path(self):
+        from unittest import mock
+        plan = self.linked([(f"apps/web/src/f{i}.ts", "P1") for i in range(50)])
+        calls = []
+        real = unknowns.project_path
+        with mock.patch.object(unknowns, "project_path", side_effect=lambda r, q: calls.append(q) or real(r, q)):
+            unknowns.context(Path(tempfile.gettempdir()), plan, {}, {})
+        self.assertLessEqual(len(calls), len(plan["files"]) + 1, "each planned path is resolved once")
+
+
+class ResolvedWithoutDecisionTest(unittest.TestCase):
+    """R2-M2: a resolved unknown that keeps blocking says why and how to fix it, everywhere."""
+
+    def plan(self, **kw):
+        return with_unknowns(unknown(status="resolved", **kw), decisions=[decision()])
+
+    def test_the_refusal_names_the_way_out_and_points_at_validate(self):
+        for kw, words in (({}, "resolved without a decision in decisions[]"),
+                          ({"decision": "D-nope"}, "its decision 'D-nope' is not in decisions[]")):
+            got = unknowns.refuse("claim", None, self.plan(**kw), OFFLINE, "x")
+            self.assertIn(words, got[0])
+            self.assertIn("blueprint.json", got[0])
+            self.assertTrue(got[2].endswith(" validate"), got[2])
+            self.assertNotIn("(high, resolved)", got[0])
+
+    def test_the_next_is_the_validate_command_that_runs(self):
+        with TempProject(self.plan()) as p:
+            got = unknowns.refuse("claim", p.root, p.loaded(), OFFLINE, "x")
+            self.assertTrue(got[2].endswith(f'validate --root "{p.root}"'), got[2])
+            r = p.cli("claim", OFFLINE, "--by", "frontend-engineer")
+            self.assertEqual(r.returncode, 3)
+            self.assertIn("resolved without a decision", r.stderr)
+
+    def test_status_counts_it_as_open_and_marks_the_line(self):
+        plan = self.plan()
+        ctx = {}
+        unknowns.context(None, plan, {}, ctx)
+        self.assertTrue(ctx["unknowns"][0]["decisionMissing"])
+        text = "\n".join(unknowns.status_lines(ctx, type("A", (), {"unknowns": True})()))
+        self.assertIn("Unknowns: 1 open or investigating, 0 resolved or dropped", text)
+        self.assertIn("U-x  high  resolved  (decision missing)  BLOCKING  blocks P2", text)
+        text = "\n".join(unknowns.status_lines(ctx, type("A", (), {"unknowns": False})()))
+        self.assertIn("decision missing", text)
+
+    def test_a_resolved_unknown_with_its_decision_is_not_marked(self):
+        plan = self.plan(decision="D-offline")
+        ctx = {}
+        unknowns.context(None, plan, {}, ctx)
+        self.assertFalse(ctx["unknowns"][0]["decisionMissing"])
+        self.assertIsNone(unknowns.refuse("claim", None, plan, OFFLINE, "x"))
+
+    @unittest.skipUnless(shutil.which("node"), "node is not installed")
+    def test_the_tab_shows_every_blocking_row(self):
+        row = {"id": "U-x", "question": "q?", "severity": "high", "status": "resolved", "blocks": ["P2"], "blocking": True,
+               "decisionMissing": True, "evidenceFor": [], "evidenceAgainst": [], "decision": None, "experiment": None}
+        r = subprocess.run(["node", "-e", MapTest.HARNESS, str(MapTest.TAB), json.dumps([{"unknowns": [row]}])],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = json.loads(r.stdout)[0]
+        self.assertEqual(out["label"], "Unknowns (1)")
+        self.assertIn("U-x", out["text"])
+        self.assertIn("1 open or investigating", out["text"])
+        self.assertIn("decision missing", out["text"])
+        self.assertNotIn("Nothing is open", out["text"])
 
 
 class ReviewNitsTest(unittest.TestCase):

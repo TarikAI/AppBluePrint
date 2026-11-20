@@ -17,12 +17,14 @@
     return list(D && D.unknowns).filter(function (u) { return u && typeof u === 'object' && !Array.isArray(u); });
   }
   function isLive(u) { return CLOSED.get(str(u.status)) !== true; }
+  /* a row counts as open while it is live or still blocking (a resolved unknown whose decision is missing blocks) */
+  function isOpen(u) { return isLive(u) || u.blocking === true; }
 
   /* blocking first, then open before closed, then the more severe, then the plan's own order */
   function ordered(items) {
     return items.map(function (u, i) { return { u: u, i: i }; }).sort(function (a, b) {
-      var ka = [a.u.blocking === true ? 0 : 1, isLive(a.u) ? 0 : 1, rank(a.u), a.i];
-      var kb = [b.u.blocking === true ? 0 : 1, isLive(b.u) ? 0 : 1, rank(b.u), b.i];
+      var ka = [a.u.blocking === true ? 0 : 1, isOpen(a.u) ? 0 : 1, rank(a.u), a.i];
+      var kb = [b.u.blocking === true ? 0 : 1, isOpen(b.u) ? 0 : 1, rank(b.u), b.i];
       for (var k = 0; k < 4; k++) if (ka[k] !== kb[k]) return ka[k] - kb[k];
       return 0;
     }).map(function (x) { return x.u; });
@@ -50,7 +52,7 @@
     return H.el('tr', null, [
       H.el('td', null, idCell),
       H.el('td', null, [pill(H, sev || 'no severity', sevKind)]),
-      H.el('td', { text: str(u.status) || 'no status' }),
+      H.el('td', { text: (str(u.status) || 'no status') + (u.decisionMissing === true ? ' (decision missing)' : '') }),
       H.el('td', null, blockCell),
       H.el('td', null, expCell),
       H.el('td', { cls: 'meta', text: evidence })
@@ -60,7 +62,7 @@
   BP_TABS.push({
     id: 'unknowns',
     label: function (D) {
-      var n = entries(D).filter(isLive).length;
+      var n = entries(D).filter(isOpen).length;
       return 'Unknowns' + (n ? ' (' + n + ')' : '');
     },
     render: function (host, D, H) {
@@ -71,7 +73,7 @@
           '.blueprint/blueprint.json with a severity, what it blocks and an experiment. Next: ' + next }));
         return;
       }
-      var live = all.filter(isLive).length, hard = all.filter(function (u) { return u.blocking === true; }).length;
+      var live = all.filter(isOpen).length, hard = all.filter(function (u) { return u.blocking === true; }).length;
       var tiles = H.el('div', { cls: 'grid tiles' });
       [[live, 'open or investigating', false], [hard, 'blocking work', hard > 0], [all.length - live, 'resolved or dropped', false]].forEach(function (t) {
         tiles.appendChild(H.el('div', { cls: 'card tile' + (t[2] ? ' warn' : '') }, [H.el('div', { cls: 'n', text: String(t[0]) }), H.el('div', { cls: 'l', text: t[1] })]));
@@ -89,7 +91,7 @@
 
       function draw() {
         while (body.firstChild) body.removeChild(body.firstChild);
-        var shown = ordered(all).filter(function (u) { return showClosed.checked || isLive(u); });
+        var shown = ordered(all).filter(function (u) { return showClosed.checked || isOpen(u); });
         shown.forEach(function (u) { body.appendChild(row(H, u)); });
         if (!shown.length) body.appendChild(H.el('tr', null, [H.el('td', { colspan: '6', cls: 'empty', text: 'Nothing is open. Tick the box to see the resolved and dropped ones.' })]));
       }
