@@ -1457,6 +1457,9 @@ class NoMachineSpecificTextTest(Isolated, TempRoot):
         self.plan_json = v2_plan()
         self.assertEqual(rm._bp(None, "status"), "python .blueprint/bin/blueprint.py status")
         self.write_plan(v2_plan())
+        with self.assertRaises(BlueprintError) as cm:  # no project copy yet: this tool, with --root (literal form)
+            rm.set_task(self.root, bplan.load_plan(self.root), "T-nope", "done", "owner")
+        self.assertEqual(cm.exception.next, f'python "{S.LAUNCHER}" status --tasks --root "{self.root}"')
         from bp.install import copy_tool
         with contextlib.redirect_stdout(io.StringIO()):
             copy_tool(self.root)  # with a project copy, every next step uses the copy form: no machine path
