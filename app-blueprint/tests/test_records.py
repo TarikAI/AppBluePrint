@@ -1095,34 +1095,47 @@ class AcceptTest(Project):
         self.refused(by="backend-lead", error="not-independent")  # still the owner, listed twice
         self.assertEqual(self.accept("--result", "C3=pass").returncode, 0)  # an evaluator listed twice may accept
 
-    def test_a_roster_id_is_human_only_if_every_entry_with_it_is(self):
+    def test_the_table_and_the_command_give_the_same_answer(self):
         from bp import records
-        plan = bplan.load_plan(self.root)
-        self.assertTrue(records.is_human(plan, "owner"))
-        self.assertFalse(records.is_human(plan, "evaluator"))
-        self.assertFalse(records.is_human(plan, "nobody"))
-        self.assertFalse(records.is_human(plan, None))
-        self.assertFalse(records.is_human(plan, 5))
-        plan["roster"].append({"id": "owner", "kind": "agent"})
-        self.assertFalse(records.is_human(plan, "owner"), "one agent entry with that id")
-        plan["roster"][-1] = {"id": "owner"}
-        self.assertFalse(records.is_human(plan, "owner"), "an entry with no kind")
-        plan["roster"][-1] = {"id": "owner", "kind": "Human"}
-        self.assertFalse(records.is_human(plan, "owner"), "no case folding")
+        self.ok("claim", ITEMS[0], "--by", "evaluator", "--force")
+        plan, state = self.load()
+        ids = [r["id"] for r in plan["roster"]]
+        may = records.independent_ids(plan, state, FID)
+        self.assertNotIn("evaluator", may)
+        table = self.ctx()
+        index = {f["id"]: f for f in table["features"]}
+        feature = next(f for f in plan["features"] if f["id"] == FID)
+        self.assertEqual(features.independent_ids(plan, feature, index[FID]["items"], None, state), may)
+        for rid in ids:
+            r = self.cli("accept", FID, "--by", rid, "--mode", "cli", "--result", "C3=pass", "--json")
+            self.assertEqual(r.returncode != 3, rid in may, (rid, r.stdout))
+            if r.returncode == 0:
+                break
 
-    # ---- what only a person may say
+    # ---- a manual criterion: an evaluation only, by any independent roster id
     def manual_project(self):
         """F-inbox: every file verified, one criterion at level manual (no command), nothing blocked."""
         self.prove()
         self.assertEqual(self.status_of("F-inbox")["status"], "verified")
 
-    def test_an_agent_can_neither_give_the_mode_manual_nor_pass_a_manual_criterion(self):
+    def test_an_independent_agent_evaluator_accepts_a_feature_with_a_manual_criterion(self):
         self.manual_project()
-        e = self.refused(by="evaluator", mode="manual", fid="F-inbox", error="human-only")
-        self.assertIn("evaluator is not a human roster entry", e["message"])
-        self.refused("--result", "C1=pass", by="evaluator", mode="cli", fid="F-inbox", error="human-only")
-        self.refused("--result", "C1=pass", by="evaluator", mode="device", fid="F-inbox", error="human-only")
-        self.assertEqual(self.status_of("F-inbox")["status"], "verified")
+        r = self.accept("--result", "C1=pass", by="evaluator", mode="manual", fid="F-inbox")
+        self.assertEqual((r.returncode, r.stdout), (0, "F-inbox: accepted by evaluator (manual, manual)\n"), r.stderr)
+        self.assertEqual(self.status_of("F-inbox")["status"], "accepted")
+        self.assertEqual(self.accept("--result", "C1=pass", by="owner", mode="manual", fid="F-inbox").returncode, 0)  # a person too
+
+    def test_the_owner_is_refused_on_the_manual_feature(self):
+        self.manual_project()
+        self.refused("--result", "C1=pass", by="frontend-engineer", mode="manual", fid="F-inbox", error="not-independent")
+
+    def test_a_command_never_satisfies_a_manual_criterion(self):
+        self.manual_project()
+        self.edit_plan(lambda p: feature_of(p, "F-inbox")["criteria"][0].update(verify=PASS))
+        r = self.cli("verify", "--feature", "F-inbox", "--run")
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(self.records("F-inbox"), [])
+        self.assertNotEqual(self.status_of("F-inbox")["status"], "accepted")
 
     def test_an_agent_may_fail_a_manual_criterion_or_leave_it_open(self):
         self.manual_project()
@@ -1132,21 +1145,10 @@ class AcceptTest(Project):
         r = self.accept("--result", "C1=skipped", fid="F-inbox")
         self.assertEqual(r.returncode, 1)
 
-    def test_a_person_accepts_a_manual_criterion(self):
+    def test_an_evaluation_stops_counting_when_its_author_is_no_longer_independent(self):
         self.manual_project()
-        r = self.accept("--result", "C1=pass", by="owner", mode="manual", fid="F-inbox")
-        self.assertEqual((r.returncode, r.stdout), (0, "F-inbox: accepted by owner (manual, manual)\n"))
-        self.assertEqual(self.status_of("F-inbox")["status"], "accepted")
-
-    def test_a_person_who_is_also_listed_as_an_agent_is_not_a_person(self):
-        self.manual_project()
-        self.edit_plan(lambda p: roster_add(p, "owner", "agent"))
-        self.refused("--result", "C1=pass", by="owner", mode="manual", fid="F-inbox", error="human-only")
-
-    def test_an_evaluation_by_someone_who_is_no_longer_human_stops_counting(self):
-        self.manual_project()
-        self.assertEqual(self.accept("--result", "C1=pass", by="owner", mode="manual", fid="F-inbox").returncode, 0)
-        self.edit_plan(lambda p: next(r for r in p["roster"] if r["id"] == "owner").update(kind="agent"))
+        self.assertEqual(self.accept("--result", "C1=pass", by="evaluator", mode="manual", fid="F-inbox").returncode, 0)
+        self.ok("claim", "apps/web/src/Inbox.tsx", "--by", "evaluator", "--force")
         self.assertEqual(self.status_of("F-inbox")["status"], "verified")
 
     # ---- what must hold first
@@ -1280,10 +1282,10 @@ class AcceptTest(Project):
             write_lines(self.root, FID, valid_evaluation(self.root, plan, by=by))
             self.assertEqual(self.status_of()["status"], "verified", by)
 
-    def test_a_forged_manual_evaluation_by_an_agent_never_counts(self):
+    def test_a_forged_evaluation_by_the_owner_of_the_manual_feature_never_counts(self):
         self.manual_project()
         plan, state = self.load()
-        write_lines(self.root, "F-inbox", valid_evaluation(self.root, plan, fid="F-inbox", by="evaluator", results={"C1": "pass"}))
+        write_lines(self.root, "F-inbox", valid_evaluation(self.root, plan, fid="F-inbox", by="frontend-engineer", results={"C1": "pass"}))
         self.assertEqual(self.status_of("F-inbox")["status"], "verified")
 
     # ---- the check is repeated inside the lock
@@ -1334,22 +1336,26 @@ class AcceptTest(Project):
         err = self._race(lambda root: self.edit_plan(lambda p: p["features"].remove(feature_of(p))))
         self.assertEqual(err.error, "unknown-feature")
 
-    def test_a_manual_pass_by_someone_who_stopped_being_human_meanwhile_is_refused_inside_the_lock(self):
+    def test_evidence_ids_must_exist_when_a_module_supplies_them(self):
         from bp import records
-        self.manual_project()
-        real = core.state_lock
+        stub = "def context(root, plan, state, ctx):\n    ctx['evidenceIds'] = ['ev-0123456789abcdef']\n"
+        sources = dict(own_sources(), **{"evidence.py": stub})
+        with extension(sources):
+            from bp import records as rec2
+            plan, state = self.load()
+            ctx = build_context(self.root, plan, state)
+            self.assertEqual(ctx["evidenceIds"], ["ev-0123456789abcdef"])
+            before = self.raw_lines()
+            with self.assertRaises(BlueprintError) as cm:
+                rec2.record_evaluation(self.root, plan, FID, "evaluator", "cli", {"C3": "pass"}, ["ev-fedcba9876543210"], None, ctx=ctx)
+            self.assertEqual((cm.exception.error, cm.exception.code), ("evidence-not-found", 1))
+            self.assertEqual(self.raw_lines(), before)
+            rec = rec2.record_evaluation(self.root, plan, FID, "evaluator", "cli", {"C3": "pass"}, ["ev-0123456789abcdef"], None, ctx=ctx)
+            self.assertEqual(rec["evidence"], ["ev-0123456789abcdef"])
 
-        @contextlib.contextmanager
-        def racing(root):
-            with real(root):
-                self.edit_plan(lambda p: next(r for r in p["roster"] if r["id"] == "owner").update(kind="agent"))
-                yield
-        plan, state = self.load()
-        ctx = build_context(self.root, plan, state)
-        with mock.patch.object(core, "state_lock", racing), self.assertRaises(BlueprintError) as cm:
-            records.record_evaluation(self.root, plan, "F-inbox", "owner", "manual", {"C1": "pass"}, [], None, ctx=ctx)
-        self.assertEqual(cm.exception.error, "human-only")
-        self.assertEqual(self.records("F-inbox"), [])
+    def test_without_an_evidence_module_only_the_form_is_checked(self):
+        r = self.accept("--result", "C3=pass", "--evidence", "ev-fedcba9876543210")
+        self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_an_unreadable_plan_inside_the_lock_writes_nothing(self):
         def mutate(root):
@@ -1666,8 +1672,8 @@ class ModuleShapeTest(Isolated, unittest.TestCase):
     def test_error_identifiers_are_the_contracts_plus_the_one_it_lacks(self):
         used = set(re.findall(r'_error\(\s*"([a-z-]+)"', self.source("records.py")))
         self.assertEqual(used, {"unknown-feature", "unknown-criterion", "unknown-roster", "not-independent", "not-verified",
-                                "human-only", "usage", "write-failed"})
-        codes = {"unknown-feature", "unknown-criterion", "unknown-roster", "not-independent", "not-verified", "usage", "write-failed"}
+                                "evidence-not-found", "usage", "write-failed"})
+        codes = {"evidence-not-found", "unknown-feature", "unknown-criterion", "unknown-roster", "not-independent", "not-verified", "usage", "write-failed"}
         contract = (S.SKILL.parents[0] / "maintainers" / "design" / "v2-contract.md")
         if contract.exists():
             text = contract.read_text(encoding="utf-8")

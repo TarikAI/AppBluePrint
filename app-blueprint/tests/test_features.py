@@ -1565,6 +1565,40 @@ class DuplicateRosterIdTest(ProjectBase):
         self.assertEqual(features.roster_ids(p), ["cto-architect", "backend-lead", "frontend-engineer", "evaluator", "owner"])
 
 
+class IndependenceTest(unittest.TestCase):
+    """One rule for who may accept (4.4): the ROSTER.md table and `accept` both call it."""
+
+    def setUp(self):
+        self.plan = v2_plan()
+        self.feature = self.plan["features"][0]  # F-log-snag: owner backend-lead, files under crates/ (backend-lead)
+        self.items = [{"path": "crates/snag-api/src/main.rs"}, {"path": "crates/snag-api/tests/snags.rs"}]
+
+    def who(self, state=None, plan=None):
+        return features.independent_ids(plan or self.plan, self.feature, self.items, None, state)
+
+    def test_owner_file_owner_and_claimer_are_not_independent(self):
+        self.assertEqual(self.who(), ["cto-architect", "frontend-engineer", "evaluator", "owner"])
+        self.plan["owners"].append({"pattern": "crates/snag-api/tests/snags.rs", "owner": "frontend-engineer"})
+        self.assertNotIn("frontend-engineer", self.who())
+        state = {"files": {"crates/snag-api/src/main.rs": {"state": "claimed", "by": "evaluator"}}}
+        self.assertNotIn("evaluator", self.who(state))
+        self.assertIn("evaluator", self.who({"files": {"other.txt": {"by": "evaluator"}}}))
+
+    def test_damaged_state_is_read_as_no_claims(self):
+        for state in (None, {}, {"files": None}, {"files": []}, {"files": {"crates/snag-api/src/main.rs": None}}, "x"):
+            self.assertIn("evaluator", self.who(state))
+
+    def test_spellings_that_fold_together_are_one_person_and_only_refuse(self):
+        self.feature["owner"] = "Backend-Lead "
+        self.assertNotIn("backend-lead", self.who())
+        for by in ("evaluator ", "Evaluator", "", " ", None, 5):
+            self.assertIsNotNone(features.independence_problem(self.plan, self.feature, self.items, by), repr(by))
+
+    def test_a_blank_roster_id_is_nobody(self):
+        self.plan["roster"].append({"id": " ", "kind": "agent"})
+        self.assertNotIn(" ", self.who())
+
+
 class ReviewRound2Test(ProjectBase):
     def test_r2_1_a_verify_level_that_is_not_a_command_level_never_passes(self):
         for vl in ("manual", "E2E", "", " unit", "unit\n", 5, ["unit"], True):

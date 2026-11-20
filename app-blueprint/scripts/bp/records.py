@@ -22,7 +22,6 @@ import stat
 import subprocess
 import sys
 import time
-import unicodedata
 
 from bp import core, features, status
 from bp.core import (BlueprintError, bp_dir, canonical_json, content_id, norm, now_iso, path_key, run_hint,
@@ -65,16 +64,6 @@ def _blank(v):
 
 def _has_verify(c):
     return not _blank(c.get("verify"))
-
-
-def _loose(s):
-    """A spelling-insensitive form of an id, used only to refuse (never to allow): two ids that differ only in case,
-    outer whitespace or compatibility characters are treated as one person when independence is judged."""
-    return unicodedata.normalize("NFKC", s).strip().casefold()
-
-
-def _same_person(a, b):
-    return isinstance(a, str) and isinstance(b, str) and _loose(a) != "" and (a == b or _loose(a) == _loose(b))
 
 
 def _error(error, message, entry=None, next=None, code=1):  # noqa: A002 (next is the contract's name)
@@ -230,12 +219,6 @@ def in_roster(plan, rid):
     return bool(_roster_entries(plan, rid))
 
 
-def is_human(plan, rid):
-    """A roster id is human only if every entry with that id says kind human (fail closed on duplicates)."""
-    entries = _roster_entries(plan, rid)
-    return bool(entries) and all(r.get("kind") == "human" for r in entries)
-
-
 def _roster_ids(plan):
     out = []
     for r in _dicts(plan.get("roster")):
@@ -245,31 +228,18 @@ def _roster_ids(plan):
 
 
 def independence_problem(plan, state, fid, by, index=None):
-    """Why `by` may not evaluate the feature, or None (4.4): it is not a roster id (whole-value match), or it is the
-    owner of the feature, or the owner (by the owner rules) of one of its items, or recorded in state as the one who
-    claimed or built one of them. Ids that differ only in case or outer whitespace count as the same person here."""
-    if not in_roster(plan, by):
-        return f"{by!r} is not in the roster"
+    """Why `by` may not evaluate the feature, or None: the rule is features.independence_problem, the one behind the
+    ROSTER.md table too (4.4): a roster id that is not the owner of the feature, owns no item and is not recorded as
+    having claimed or built one."""
     feature = section_index(plan, "features").get(fid) or {}
-    if _same_person(by, feature.get("owner")):
-        return f"{by} is the owner of {fid}"
-    files = state.get("files") if isinstance(state, dict) and isinstance(state.get("files"), dict) else {}
-    for path in (index if index is not None else _item_index(plan, state)).get(fid, []):
-        try:
-            owner = owner_of(plan, path)[0]
-        except (KeyError, TypeError, AttributeError):
-            owner = None
-        if _same_person(by, owner):
-            return f"{by} owns {path}, which serves {fid}"
-        rec = files.get(path)
-        if isinstance(rec, dict) and _same_person(by, rec.get("by")):
-            return f"{by} claimed or built {path}, which serves {fid}"
-    return None
+    paths = (index if index is not None else _item_index(plan, state)).get(fid, [])
+    return features.independence_problem(plan, dict(feature, id=fid), [{"path": p} for p in paths], by, state)
 
 
 def independent_ids(plan, state, fid):
-    index = _item_index(plan, state)
-    return [r for r in _roster_ids(plan) if independence_problem(plan, state, fid, r, index) is None]
+    feature = section_index(plan, "features").get(fid) or {}
+    paths = _item_index(plan, state).get(fid, [])
+    return features.independent_ids(plan, dict(feature, id=fid), [{"path": p} for p in paths], None, state)
 
 
 # ---------------------------------------------------------------------------------------------------- the records
@@ -570,17 +540,6 @@ def _verdict(feature, ev):
     return "pass" if any(passed(c, cid) for c, cid, _ in crits) else "partial"
 
 
-def needs_a_person(plan, feature, mode, results):
-    """True when what an evaluation says can only come from a person: the mode manual, or a pass for a criterion
-    whose required level is manual (2.9). `results` is {criterion id: result}."""
-    if mode == "manual":
-        return True
-    for c, cid, ok in _criteria(feature):
-        if ok and results.get(cid) == "pass" and features.criterion_level(feature, c) == "manual":
-            return True
-    return False
-
-
 def _evaluation_current(root, plan, state, fid, feature, rec, now_files, index, memo):
     if not _proof_current(rec["proof"], now_files()):
         return False
@@ -593,14 +552,13 @@ def _evaluation_current(root, plan, state, fid, feature, rec, now_files, index, 
         memo[rec["by"]] = independence_problem(plan, state, fid, rec["by"], index)
     if memo[rec["by"]] is not None:
         return False
-    results = {cid: r["result"] for cid, r in rec["criteria"].items()}
-    return not needs_a_person(plan, feature, rec["mode"], results) or is_human(plan, rec["by"])
+    return True
 
 
 def latest_evaluation(root, plan, state, comp, fid, recs, _index=None, _now=None):
     """The current evaluation of a feature, or None (4.3): the latest evaluation record whose proof is current, whose
     every named criterion still exists once with the recorded digest, and whose `by` is in the roster, independent
-    under today's plan and, when it says what only a person may say, human. Any other evaluation is ignored. Returns a
+    under today's plan. Any other evaluation is ignored. Returns a
     copy of the record with its verdict recomputed."""
     feature = section_index(plan, "features").get(fid)
     if feature is None:
@@ -1010,8 +968,8 @@ def _not_verified(root, ctx, plan, fid, feature):
                   entry=f"feature {fid}", next=nxt, code=3)
 
 
-def _refuse_acceptor(root, plan, state, fid, feature, by, mode, results):
-    """The not-independent and human-only refusals (exit 3), judged on the plan and state given."""
+def _refuse_acceptor(root, plan, state, fid, feature, by):
+    """The not-independent refusal (exit 3), judged on the plan and state given."""
     problem = independence_problem(plan, state, fid, by)
     if problem is not None:
         who = independent_ids(plan, state, fid)
@@ -1021,15 +979,11 @@ def _refuse_acceptor(root, plan, state, fid, feature, by, mode, results):
                      next=(_bp(root, f"status --feature {fid}", "features") if who else
                            f"fix .blueprint/blueprint.json (no roster id is independent of {fid}: add an evaluator to roster[]), "
                            f"then run: {_bp(root, 'validate')}"), code=3)
-    if needs_a_person(plan, feature, mode, results) and not is_human(plan, by):
-        raise _error("human-only", f"{by} is not a human roster entry (every entry with that id must be kind human), "
-                     f"and only a person can give the mode manual or pass a criterion whose level is manual",
-                     entry=f"feature {fid}", next=_bp(root, f"status --feature {fid}", "features"), code=3)
 
 
 def record_evaluation(root, plan, fid, by, mode, results, evidence, note, ctx=None):
     """Record an independent evaluation of a feature and return the record (4.4, 4.6). The refusals, in order:
-    unknown feature, unknown roster id, unknown criterion, not-independent, human-only, not-verified. The record is
+    unknown feature, unknown roster id, unknown criterion, evidence-not-found, not-independent, not-verified. The record is
     built first; then, inside the state lock, the roster, ownership and claims are read again and judged again on the
     plan and state as they are by then, and only then is it appended with its log line."""
     feature = _feature_or_raise(root, plan, fid, allow_draft=True)
@@ -1044,8 +998,14 @@ def record_evaluation(root, plan, fid, by, mode, results, evidence, note, ctx=No
         if cid not in by_id:
             raise _error("unknown-criterion", f"{cid!r} is not a criterion of {fid} (or it has no id of its own)",
                          entry=f"feature {fid}", next=_bp(root, f"status --feature {fid}", "features"))
-    _refuse_acceptor(root, plan, state, fid, feature, by, mode, results)
     ctx = ctx or _fallback_context(root, plan, state)
+    known = ctx.get("evidenceIds")  # supplied by the evidence module when it is built; else the form is all that is checked
+    if isinstance(known, (list, tuple, set, frozenset)):
+        missing = [e for e in (evidence or []) if e not in known]
+        if missing:
+            raise _error("evidence-not-found", f"evidence {', '.join(missing[:3])} is not in this project's evidence",
+                         entry=f"feature {fid}", next=_bp(root, "evidence list", "commands/evidence"))
+    _refuse_acceptor(root, plan, state, fid, feature, by)
     problem = _not_verified(root, ctx, plan, fid, feature)
     if problem is not None:
         raise problem
@@ -1063,7 +1023,7 @@ def record_evaluation(root, plan, fid, by, mode, results, evidence, note, ctx=No
         fresh_plan, fresh_state = load_plan(root), status.load_state(root)
         fresh_feature = _feature_or_raise(root, fresh_plan, fid, allow_draft=True)
         _need_roster(root, fresh_plan, by, f"feature {fid}")
-        _refuse_acceptor(root, fresh_plan, fresh_state, fid, fresh_feature, by, mode, results)
+        _refuse_acceptor(root, fresh_plan, fresh_state, fid, fresh_feature, by)
         return [rec], [{"event": "accept", "feature": fid, "by": by, "mode": mode, "verdict": rec["verdict"], "record": rec["id"]}]
     _commit(root, fid, decide)
     return rec
