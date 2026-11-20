@@ -566,27 +566,15 @@ def _lock_error(why):
                       f"then {AGAIN}", name=STATE_LOCK)
 
 
-def _same_file(fd, path):
-    """POSIX: the open lock file is still the one at its path (not removed or replaced since it was opened)."""
-    try:
-        a, b = os.fstat(fd), os.stat(path)
-    except OSError:
-        return False
-    return (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
-
-
 def _try_acquire(root):
     """One attempt: the fds held, or None when another process holds the lock. On POSIX the lock is flock on
-    state.lock, checked to still be the file at that path, plus flock on the .blueprint folder itself, so deleting
-    state.lock while it is held (git clean -X, a person) never lets a second writer in."""
+    state.lock plus flock on the .blueprint folder itself: deleting state.lock while it is held (git clean -X, a
+    person) makes a new file, and so a new lock, but never a second lock on the folder."""
     fd, new = _open_lock_file(root)
     fds = [fd]
     try:
         _try_lock(fd)
         if fcntl is not None:
-            if not _same_file(fd, bp_dir(root) / STATE_LOCK):
-                _unlock(fds)
-                return None, new
             fds.append(os.open(bp_dir(root), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)))
             _try_lock(fds[-1])
         return fds, new
@@ -664,10 +652,7 @@ def state_default():
     return {"files": {}, "patterns": {}, "unplanned": [], "syncedAt": None, "head": None}
 
 
-def _damage(raw):
-    """The first part of a parsed state that the commands cannot use, as words for bad-state, or None. Missing or null
-    "files" and "patterns" are empty (filled in here). Only shapes the commands dereference are checked, the ones on
-    which 1.3.0 crashed: anything 1.3.0 read without crashing is still read."""
+def _files_damage(raw):
     if raw.get("files") is None:
         raw["files"] = {}
     if not isinstance(raw["files"], dict):
@@ -675,6 +660,10 @@ def _damage(raw):
     for p, rec in raw["files"].items():
         if not isinstance(rec, dict):
             return f"files[{json.dumps(p, ensure_ascii=False)}] must be an object (got {_json_kind(rec)})"
+    return None
+
+
+def _patterns_damage(raw):
     if "patterns" in raw and raw["patterns"] is None:
         raw["patterns"] = {}
     pats = raw.get("patterns", {})
@@ -690,18 +679,44 @@ def _damage(raw):
         bad = [x for x in inst if not isinstance(x, str)] if isinstance(inst, list) else []
         if bad:
             return f"{where}.instances must hold paths (got {_json_kind(bad[0])})"
-    for key, ok, kind in (("unplanned", (list, str), "a list"), ("data", (dict,), "an object")):
-        v = raw.get(key)
-        if v and not isinstance(v, ok):
-            return f'"{key}" must be {kind} (got {_json_kind(v)})'
     return None
 
 
-def read_state(root, prepare=None):
+def _kind_damage(key, ok, kind):
+    def check(raw):
+        v = raw.get(key)
+        return f'"{key}" must be {kind} (got {_json_kind(v)})' if v and not isinstance(v, ok) else None
+    return check
+
+
+# key -> (check, the empty value an owner that rewrites the key repairs it to). Only shapes the commands dereference
+# are checked, the ones on which 1.3.0 crashed.
+_STATE_CHECKS = {"files": (_files_damage, dict), "patterns": (_patterns_damage, dict),
+                 "unplanned": (_kind_damage("unplanned", (list, str), "a list"), list),
+                 "data": (_kind_damage("data", (dict,), "an object"), dict)}
+
+
+def _damage(raw, owned=()):
+    """The first part of a parsed state that the commands cannot use, as words for bad-state, or None. Missing or null
+    "files" and "patterns" are empty (filled in here). A key in `owned` (one the calling command rewrites wholesale,
+    as sync does patterns) is repaired to its empty value in place instead, as 1.3.0's rewrite did; files is never
+    owned. Anything 1.3.0 read without crashing is still read."""
+    for key, (check, empty) in _STATE_CHECKS.items():
+        why = check(raw)
+        if why and key in owned and key != "files":
+            raw[key] = empty()
+            why = None
+        if why:
+            return why
+    return None
+
+
+def read_state(root, prepare=None, owned=()):
     """state.json as a dict (the 1.x default when there is none), then prepare(state) if given (the in-memory upgrade).
     A state.json that cannot be used is error bad-state (exit 1), raised before the command writes anything, and the
     file is left as it is: a folder, unreadable, not UTF-8, not JSON (a UTF-8 BOM included, as in 1.3.0), not an
-    object, or damaged (_damage: "files" or a file record not an object, and the like)."""
+    object, or damaged (_damage: "files" or a file record not an object, and the like). Damage confined to a key in
+    `owned`, which the caller rewrites wholesale, is repaired instead (_damage)."""
     path = bp_dir(root) / "state.json"
     fix = f"fix .blueprint/state.json or move it away (progress is then tracked from scratch), then run: " \
           f"{run_hint(root, 'sync')}"
@@ -725,11 +740,10 @@ def read_state(root, prepare=None):
                              "(nested too deeply)", fix) from None
         if not isinstance(raw, dict):
             raise _bad_state(f"must be a JSON object (got {_json_kind(raw)})", fix)
-        why = _damage(raw)
+        why = _damage(raw, owned)
         if why:
             raise _bad_state(f"is damaged: {why}", fix)
     return prepare(raw) if prepare is not None else raw
-
 
 def _json_kind(v):
     return ("null" if v is None else "boolean" if isinstance(v, bool) else "number" if isinstance(v, (int, float))
@@ -754,14 +768,15 @@ def write_state(root, state):
                          f"make .blueprint/state.json and the folder .blueprint writable, then {AGAIN}") from None
 
 
-def update_state(root, change, prepare=None):
+def update_state(root, change, prepare=None, owned=()):
     """The one way to change state.json: take state_lock, re-read state.json inside it (prepare upgrades it), apply
     change(state) in place, write it atomically, append the log events change returned (one line each), release.
     Compute before calling this; change only sets the keys and entries its command owns, so another writer's
-    different entries survive and the same entry is last-writer-wins. change may raise to write nothing; it must not
+    different entries survive and the same entry is last-writer-wins. owned: the keys change rewrites wholesale, whose
+    damage is repaired rather than refused (read_state). change may raise to write nothing; it must not
     call update_state or state_lock (never nested), but may call append_log. Returns the state written."""
     with state_lock(root):
-        state = read_state(root, prepare)
+        state = read_state(root, prepare, owned)
         events = change(state) or ()
         write_state(root, state)
         for event in events:

@@ -158,12 +158,15 @@ def _render_after(args, root, plan, state):
 def cmd_sync(args):
     """sync scans first, without the lock, then sets only the keys it owns (patterns, unplanned, ignoredTracked,
     missingModify, syncedAt, head, and data apart from db-check's data.live) on the state as it is under the lock;
-    file records written by claim, mark and verify meanwhile are kept."""
+    file records written by claim, mark and verify meanwhile are kept. Damage confined to a key sync rewrites is
+    repaired, as 1.3.0's rewrite did; damage in what it only reads (files) is bad-state."""
     from bp.data import scan_data
     from bp.status import change_state, compute, load_state, repo_files
     root = find_root(args.root)
     plan = load_plan(root)
-    state = load_state(root)
+    owned_keys = ("patterns", "unplanned", "ignoredTracked", "missingModify") + (
+        ("data",) if plan["stores"] or plan["resources"] else ())  # data is rewritten only when there is data to scan
+    state = load_state(root, owned_keys)
     ignored_tracked = []
     disk = repo_files(root, plan, ignored_tracked)
     disk_set = set(disk)
@@ -200,7 +203,7 @@ def cmd_sync(args):
             fresh["data"] = dict(data, live=(fresh.get("data") or {}).get("live"))  # db-check's live, as it is now
         return [{"event": "sync", "head": owned["head"], "counts": c, "unplanned": len(unplanned),
                  "dataIssues": len(data_issues)}]
-    state = change_state(root, change)
+    state = change_state(root, change, owned_keys)
     if not args.quiet:
         print(f"Synced {len(disk)} files on disk against {len(plan['files'])} planned files and {len(plan['patterns'])} patterns.")
         print("  " + "  ".join(f"{GLYPH[s]} {LABEL[s]} {c[s]}" for s in STATES))

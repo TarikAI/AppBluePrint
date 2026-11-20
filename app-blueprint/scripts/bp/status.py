@@ -15,15 +15,15 @@ from bp.migrate import upgrade_state
 from bp.plan import DEFAULT_IGNORE, STATES, features_of, item_verify, owner_of, phase_index, planned_file
 
 
-def load_state(root):
+def load_state(root, owned=()):
     """state.json for reading, upgraded in memory (as plan.load_state); a state that cannot be used is bad-state
     (core.read_state). Readers take no lock: writes are atomic, so a reader sees the old or the new file."""
-    return core.read_state(root, upgrade_state)
+    return core.read_state(root, upgrade_state, owned)
 
 
-def change_state(root, change):
+def change_state(root, change, owned=()):
     """The one way commands change state.json: core.update_state with the in-memory upgrade (contract 3.2)."""
-    return core.update_state(root, change, upgrade_state)
+    return core.update_state(root, change, upgrade_state, owned)
 
 
 class Hasher:
