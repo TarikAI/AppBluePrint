@@ -7,6 +7,7 @@ with a small DOM stand-in when node is installed).
 """
 import copy
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -1582,6 +1583,58 @@ class ReviewRound2Test(ProjectBase):
         self.assertEqual(row["repeat"], {"n": 3, "passed": 3})
         row["repeat"]["n"] = 99
         self.assertEqual(chk["F-log-snag"]["criteria"]["C1"]["repeat"], {"n": 3, "passed": 3})
+
+
+class NoMachineSpecificTextTest(ProjectBase):
+    """Files written into a project are committed and shared: no absolute path, no temp folder, no launcher path."""
+
+    def render(self):
+        self.assertEqual(self.run_("render")[0], 0)
+        out = {n: (self.root / ".blueprint" / n).read_text(encoding="utf-8") for n in ("map.html", "FEATURES.md")
+               if (self.root / ".blueprint" / n).exists()}  # a plan without features has no FEATURES.md
+        data = re.search(r'<script id="bp" type="application/json">(.*?)</script>', out["map.html"], re.S).group(1)
+        return out, json.loads(data.replace("<\\/", "</"))
+
+    def assertNoLeak(self, text, what):
+        root = str(self.root)
+        for spelling in {root, root.replace("\\", "/"), root.lower(), root.replace("\\", "/").lower(), root.replace("\\", "\\\\")}:
+            self.assertNotIn(spelling, text, what)
+        self.assertNotIn(str(S.SKILL), text, what)
+        self.assertNotIn(str(S.SKILL).replace("\\", "/"), text, what)
+        self.assertIsNone(re.search(r"(?<![A-Za-z])[A-Za-z]:[\\/](?!/)", text), what + ": a drive-letter path")
+        self.assertIsNone(re.search(r"(?:^|[\s`\"'(])/(?:home|Users|tmp|var|usr|mnt|private|root|etc|opt|Volumes)/", text, re.M),
+                          what + ": a leading-slash path")
+
+    def test_a_project_without_a_copy_leaks_nothing(self):
+        self.assertFalse((self.root / ".blueprint" / "bin").exists())
+        for plan in (v2_plan(), v1_plan(), dict(v2_plan(), features=[], milestones=[], tasks=[], unknowns=[])):
+            if "features" in plan and not plan.get("features"):
+                for f in plan["files"]:
+                    f.pop("features", None)
+            self.write_plan(plan)
+            out, payload = self.render()
+            for name, text in out.items():
+                self.assertNoLeak(text, name)
+            self.assertNoLeak(json.dumps(payload, ensure_ascii=False), "payload")
+            self.assertIn("<skill>/scripts/blueprint.py", payload["featureNext"])
+            self.assertIn("--root .", payload["featureNext"])
+            self.assertNotIn(".blueprint/bin", payload["featureNext"])
+
+    def test_a_project_with_a_copy_names_the_copy(self):
+        (self.root / ".blueprint" / "bin").mkdir()
+        (self.root / ".blueprint" / "bin" / "blueprint.py").write_text("# copy\n", encoding="utf-8")
+        for plan, verb in ((v2_plan(), "render"), (v1_plan(), "migrate")):
+            self.write_plan(plan)
+            ctx = self.ctx()
+            nxt = features.map_payload(ctx)["featureNext"]
+            self.assertIn("python .blueprint/bin/blueprint.py " + (verb if plan["version"] == 1 else "render"), nxt)
+            self.assertNotIn("<skill>", nxt)
+            self.assertNoLeak(nxt, "featureNext")
+
+    def test_the_tab_and_the_branch_mode_carry_no_launcher_path(self):
+        for name in ("tab-features.js", "mindmap.js"):
+            text = (S.SKILL / "assets" / name).read_text(encoding="utf-8")
+            self.assertNoLeak(text, name)
 
 
 if __name__ == "__main__":

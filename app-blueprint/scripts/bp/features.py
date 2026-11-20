@@ -11,6 +11,7 @@ status_card. FEATURES.md is the views hook of bp/views/features_md.py, which rea
 """
 import json
 import re
+from pathlib import Path
 
 from bp.core import BlueprintError, norm
 from bp.globs import pattern_instance_rx
@@ -709,16 +710,31 @@ def roster_sections(ctx):
     return sec
 
 
-FEATURE_NEXT = ("No features yet. Add features[] with acceptance criteria to blueprint.json, link files to them with "
-                "files[].features, then run: python .blueprint/bin/blueprint.py render")
-FEATURE_NEXT_V1 = ("This blueprint is schema version 1 and has no features. Run: python .blueprint/bin/blueprint.py "
-                   "migrate, then add features[] with acceptance criteria and link files to them with files[].features.")
+def _launcher(ctx):
+    """How to start the tool in text that is written into project files: `python .blueprint/bin/blueprint.py` when the
+    project has its own copy, else the placeholder form with a literal <skill>. Never the real path of this machine."""
+    root = ctx.get("root")
+    try:
+        has_copy = root is not None and (Path(root) / ".blueprint" / "bin" / "blueprint.py").is_file()
+    except (OSError, ValueError, TypeError):
+        has_copy = False
+    return ("python .blueprint/bin/blueprint.py", "") if has_copy else ("python <skill>/scripts/blueprint.py", " --root .")
+
+
+def feature_next(ctx):
+    """The one-line empty state of the Features tab: the next command, in the launcher form of _launcher."""
+    run, tail = _launcher(ctx)
+    if ctx["plan"].get("_from") == 1:
+        return ("This blueprint is schema version 1 and has no features. Run: " + run + " migrate" + tail
+                + ", then add features[] with acceptance criteria and link files to them with files[].features.")
+    return ("No features yet. Add features[] with acceptance criteria to blueprint.json, link files to them with "
+            "files[].features, then run: " + run + " render" + tail)
 
 
 def map_payload(ctx):
     return {"features": _list(ctx.get("features")), "featureStates": list(FEATURE_STATES),
             "featureGlyph": dict(FEATURE_GLYPH), "featureLabel": dict(FEATURE_LABEL), "levels": list(LEVELS),
-            "featureNext": FEATURE_NEXT_V1 if ctx["plan"].get("_from") == 1 else FEATURE_NEXT}
+            "featureNext": feature_next(ctx)}
 
 
 def status_json(ctx):
