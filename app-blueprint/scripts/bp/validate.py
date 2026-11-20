@@ -14,8 +14,11 @@ from bp import data as _data, registry, rules
 # bad-id, the id-form error of every section (contract 2.2, 7.4), which many modules emit with code="bad-id" and
 # none may register.
 CODES = [(r"^blueprint\.json is schema version 1\b", "schema-v1"),
-         (r"(?s)^[a-z ]+ id '.*' has the wrong form", "bad-id")]  # (?s): an invalid id may hold a newline
+         (r"(?s)^[a-z ]+ id '.*' has the wrong form", "bad-id"),  # (?s): an invalid id may hold a newline
+         (r"(?s)^file .*: Windows names it the same file as ", "file-path-alias")]
 CODE_EXAMPLES = {"schema-v1": "blueprint.json is schema version 1; it still works.",
+                 "file-path-alias": "file 'src/a.ts.': Windows names it the same file as 'src/a.ts' (a segment ends in "
+                                    "a dot or a space, or holds ':'); plan it as 'src/a.ts'",
                  "bad-id": "feature id 'Inbox' has the wrong form; use F- then lowercase letters, digits and hyphens"}
 
 
@@ -98,8 +101,34 @@ def validate_findings(plan, team=None, evidence_ids=None, root=None):
           code="schema-v1", entry="blueprint.json", next="blueprint.py migrate" if migrate_built else None)
     vctx = validation_context(plan, team, evidence_ids, root)
     registry.collect("validate", plan, E, W, vctx)
+    if not from_v1:  # a version 1 plan validates as in 1.3.0
+        path_aliases(plan, E)
     rules.validate_team(plan, team, E)
     return findings
+
+
+def windows_plain(path):
+    """The name Windows gives `path`: in each segment everything from the first ':' (an alternate data stream) goes,
+    then the trailing dots and spaces; a segment left empty goes too (core.project_path does the same)."""
+    segs = [s.split(":", 1)[0].rstrip(". ") for s in str(path).split("/")]
+    return "/".join(s for s in segs if s)
+
+
+def path_aliases(plan, E):
+    """file-path-alias (version 2 plans): a planned path with a segment that ends in a dot or a space or holds a ':'
+    names, on Windows, the same file as its plain spelling, so two planned entries (or a planned entry and the file a
+    claim names) could be one file with two phases, owners or blocks (review of #13, R2-M1). Paths 1.x already
+    rejects (absolute, '..', a drive) are left to the file-path error."""
+    for f in plan.get("files") or []:
+        path = f.get("path") if isinstance(f, dict) else None
+        if not isinstance(path, str) or not path or path.startswith("/") or ".." in path.split("/") \
+                or re.match(r"[A-Za-z]:", path):
+            continue
+        plain = windows_plain(path)
+        if plain != path:
+            E(f"file {path!r}: Windows names it the same file as {plain!r} (a segment ends in a dot or a space, or "
+              f"holds ':'); plan it as {plain!r}", code="file-path-alias", entry=f"file {path}",
+              next=f"write the path as {plain!r} in files[]")
 
 
 def validate_plan(plan, team=None, evidence_ids=None, root=None):
