@@ -193,7 +193,7 @@ class StoreTest(TempProject):
         self.assertNotIn("S-link", evidence.study_ids(self.root))
 
     def test_a_held_lock_is_state_busy_and_writes_nothing(self):
-        holder = subprocess.Popen([S.PY, "-c", "import sys,time; sys.path.insert(0, sys.argv[1]);"
+        holder = subprocess.Popen([S.PY, "-B", "-c", "import sys,time; sys.path.insert(0, sys.argv[1]);"
                                    "from bp import core; from pathlib import Path\n"
                                    "with core.state_lock(Path(sys.argv[2])):\n print('held', flush=True); time.sleep(30)",
                                    str(S.SCRIPTS), str(self.root)], stdout=subprocess.PIPE, text=True)
