@@ -1768,9 +1768,10 @@ class MapRoundOneTest(CliTestBase):
                         render.render_map(loaded, state, ctx["comp"], ctx)
 
     def test_render_py_holds_no_literal_line_separators(self):
-        text = (S.SCRIPTS / "bp" / "views" / "render.py").read_text(encoding="utf-8")
-        self.assertNotIn(" ", text)
-        self.assertNotIn(" ", text)
+        for rel in ("views/render.py", "views/structure.py", "commands/progress.py"):
+            text = (S.SCRIPTS / "bp" / rel).read_text(encoding="utf-8")
+            for ch in "  ":
+                self.assertNotIn(ch, text, rel)
 
 
 NETWORK = [r"https?://", r"(?<![:\w])//[A-Za-z0-9.-]+\.[A-Za-z]{2,}", r"@import", r"@font-face", r"url\(\s*['\"]?(?![#'\")]|data:)",

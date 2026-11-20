@@ -15,10 +15,11 @@ from bp import data as _data, registry, rules
 # none may register.
 CODES = [(r"^blueprint\.json is schema version 1\b", "schema-v1"),
          (r"(?s)^[a-z ]+ id '.*' has the wrong form", "bad-id"),  # (?s): an invalid id may hold a newline
-         (r"(?s)^file .*: Windows names it the same file as ", "file-path-alias")]
+         (r"(?s)^(file|pattern) .*: (not a portable name on Windows: |differs from file .* only by case; )",
+          "file-path-alias")]
 CODE_EXAMPLES = {"schema-v1": "blueprint.json is schema version 1; it still works.",
-                 "file-path-alias": "file 'src/a.ts.': Windows names it the same file as 'src/a.ts' (a segment ends in "
-                                    "a dot or a space, or holds ':'); plan it as 'src/a.ts'",
+                 "file-path-alias": "file 'src/a.ts.': not a portable name on Windows: Windows drops the trailing "
+                                    "dots and spaces, so it names the same file as 'src/a.ts'",
                  "bad-id": "feature id 'Inbox' has the wrong form; use F- then lowercase letters, digits and hyphens"}
 
 
@@ -107,28 +108,68 @@ def validate_findings(plan, team=None, evidence_ids=None, root=None):
     return findings
 
 
-def windows_plain(path):
-    """The name Windows gives `path`: in each segment everything from the first ':' (an alternate data stream) goes,
-    then the trailing dots and spaces; a segment left empty goes too (core.project_path does the same)."""
-    segs = [s.split(":", 1)[0].rstrip(". ") for s in str(path).split("/")]
-    return "/".join(s for s in segs if s)
+WINDOWS_DEVICES = {"CON", "PRN", "AUX", "NUL"} | {f"{d}{n}" for d in ("COM", "LPT") for n in range(1, 10)}
+GLOB_CHARS = set("*?[]{}")
+
+
+def windows_name_problem(path, glob=False):
+    """(reason, plain) for the first segment of `path` that Windows cannot store as written, else None. plain is the
+    path Windows would use instead, or None when there is none (review of #16, N4: say only what Windows does):
+    - ':' starts a stream name;
+    - a device name (CON, PRN, AUX, NUL, COM1-9, LPT1-9, with or without an extension) names the device;
+    - a trailing dot or space is dropped from the last segment, so it names the plain file; a folder name ending in
+      one cannot be stored as written;
+    - an empty or '.' segment.
+    With glob=True only the literal segments (no glob characters) are checked."""
+    segs = str(path).split("/")
+    for i, seg in enumerate(segs):
+        if glob and GLOB_CHARS & set(seg):
+            continue
+        last = i == len(segs) - 1
+        if ":" in seg:
+            return f"':' in {seg!r} starts a stream name on Windows", None
+        stem = seg.split(".", 1)[0].rstrip(" ").upper()
+        if stem in WINDOWS_DEVICES:
+            return f"{seg!r} is the Windows device name {stem}", None
+        if seg in ("", "."):
+            return "it has an empty or '.' segment", None
+        if seg.endswith((".", " ")):
+            kept = seg.rstrip(". ")
+            if last and kept:
+                plain = "/".join(segs[:-1] + [kept])
+                return f"Windows drops the trailing dots and spaces, so it names the same file as {plain!r}", plain
+            return f"the folder name {seg!r} ends in a dot or a space, which Windows cannot store as written", None
+    return None
 
 
 def path_aliases(plan, E):
-    """file-path-alias (version 2 plans): a planned path with a segment that ends in a dot or a space or holds a ':'
-    names, on Windows, the same file as its plain spelling, so two planned entries (or a planned entry and the file a
-    claim names) could be one file with two phases, owners or blocks (review of #13, R2-M1). Paths 1.x already
-    rejects (absolute, '..', a drive) are left to the file-path error."""
+    """file-path-alias (version 2 plans, core-owned): a planned path, or a literal segment of a pattern glob, that
+    Windows cannot store as written (windows_name_problem), and two planned paths that differ only by case (one file
+    on Windows and macOS). A plan is shared, so this fires on every OS. Paths 1.x already rejects (absolute, '..', a
+    drive) are left to the file-path error; dependsOn and other path fields are not checked (review of #16, N5)."""
+    first = {}
     for f in plan.get("files") or []:
         path = f.get("path") if isinstance(f, dict) else None
         if not isinstance(path, str) or not path or path.startswith("/") or ".." in path.split("/") \
                 or re.match(r"[A-Za-z]:", path):
             continue
-        plain = windows_plain(path)
-        if plain != path:
-            E(f"file {path!r}: Windows names it the same file as {plain!r} (a segment ends in a dot or a space, or "
-              f"holds ':'); plan it as {plain!r}", code="file-path-alias", entry=f"file {path}",
-              next=f"write the path as {plain!r} in files[]")
+        problem = windows_name_problem(path)
+        if problem:
+            why, plain = problem
+            E(f"file {path!r}: not a portable name on Windows: {why}", code="file-path-alias", entry=f"file {path}",
+              next=f"write the path as {plain!r} in files[]" if plain else "rename it in files[]")
+        twin = first.setdefault(path.casefold(), path)
+        if twin != path:
+            E(f"file {path!r}: differs from file {twin!r} only by case; Windows and macOS see one file",
+              code="file-path-alias", entry=f"file {path}", next="give the two files names that differ by more than case")
+    for p in plan.get("patterns") or []:
+        glob, pid = (p.get("glob"), p.get("id")) if isinstance(p, dict) else (None, None)
+        if not isinstance(glob, str) or not glob or glob.startswith("/") or ".." in glob.split("/"):
+            continue
+        problem = windows_name_problem(glob, glob=True)
+        if problem:
+            E(f"pattern {pid!r}: not a portable name on Windows: {problem[0]}", code="file-path-alias",
+              entry=f"pattern {pid}", next="rename it in the pattern's glob")
 
 
 def validate_plan(plan, team=None, evidence_ids=None, root=None):

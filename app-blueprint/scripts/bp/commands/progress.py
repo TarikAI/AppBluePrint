@@ -24,6 +24,7 @@ from bp.plan import GLYPH, LABEL, STATES, load_plan, load_state, owner_of, plann
 from bp.registry import command_built
 from bp.validate import validate_plan
 from bp.views.render import render_all
+from bp.views.structure import one_line
 
 # status flags of 2.0 -> the module that implements them (through its status_lines or status_card hook)
 STATUS_FLAGS = {"feature": "features", "features": "features", "milestone": "roadmap", "tasks": "roadmap",
@@ -218,17 +219,17 @@ def cmd_sync(args):
         sys.exit(1)
 
 
-def one_line(value):
-    """Plan or state text on one line: runs of whitespace (newlines included) become one space. An invalid plan can
-    hold a multi-line id, name or path; status never lets one break a line of its own output (core review)."""
-    return " ".join(str(value).split()) if value is not None else ""
+def _flat(text):
+    """roadmap.flat: runs of whitespace collapse to one space (the wording of the roadmap's unknown-milestone)."""
+    return " ".join(str(text).split())
 
 
 def _check_selectors(ctx, args):
-    """status --json: an unknown --feature or --milestone id is the error the text form gives (unknown-feature /
-    unknown-milestone, 7.3; exit 1, the failure envelope). The modules' own checks run first, through the hooks the
-    text form calls (status_card; status_lines, whose lines are dropped), so the wording and next are theirs; the
-    core's check after them is the fallback for a module that does not check."""
+    """An unknown --feature or --milestone id is one error in both forms (unknown-feature / unknown-milestone, 7.3;
+    exit 1, the failure envelope with --json), raised before status prints anything. The modules' own checks run
+    first, through the hooks the text form calls (status_card; status_lines, whose lines are dropped), so the wording
+    and next are theirs; the core's check after them is the fallback for a module that does not check, in the
+    same words as the module's."""
     from bp.plan import section_index
     plan = ctx["plan"]
     if getattr(args, "feature", None) and registry.hook("status_card") is not None:
@@ -237,21 +238,24 @@ def _check_selectors(ctx, args):
         registry.collect("status_lines", ctx, args)
     fid = getattr(args, "feature", None)
     if fid and fid not in section_index(plan, "features"):
-        raise BlueprintError("unknown-feature", f"feature {one_line(fid)} is not in the plan",
-                             entry=f"feature {one_line(fid)}", next="blueprint.py status --features")
+        raise BlueprintError("unknown-feature", f"feature {fid} is not in the plan", entry=f"feature {fid}",
+                             next="blueprint.py status --features")
     mid = getattr(args, "milestone", None)
     if mid and mid not in section_index(plan, "milestones"):
         known = list(section_index(plan, "milestones"))
-        raise BlueprintError("unknown-milestone", f"{one_line(mid)!r} is not a milestone in the plan"
-                             + (" (milestones: " + ", ".join(one_line(m) for m in known) + ")" if known else ""),
-                             entry=f"milestone {one_line(mid)}", next="blueprint.py status")
+        bp = "python .blueprint/bin/blueprint.py"
+        raise BlueprintError("unknown-milestone", f"{_flat(mid)!r} is not a milestone in the plan"
+                             + (" (milestones: " + ", ".join(_flat(m) for m in known) + ")" if known else ""),
+                             entry=f"milestone {_flat(mid)}",
+                             next=f"{bp} migrate" if plan.get("_from") == 1 else f"{bp} status")
 
 
-def _blocked_file_keys(ctx):
-    """path_key of every plan path in ctx["blocked"]["files"] (filled by the unknowns module: the planned files that
-    claim refuses); a missing key or a value that is not a list or set adds nothing."""
-    files = (ctx.get("blocked") or {}).get("files")
-    return {path_key(p) for p in files if isinstance(p, str)} if isinstance(files, (list, set, frozenset, tuple)) else set()
+def _blocked(ctx, key):
+    """The strings in ctx["blocked"][key] (phases, or files: the planned files claim refuses, filled by the unknowns
+    module); a missing, None or malformed value at any level is empty, never a crash (review of #16, N9)."""
+    blocked = ctx.get("blocked")
+    value = blocked.get(key) if isinstance(blocked, dict) else None
+    return {x for x in value if isinstance(x, str)} if isinstance(value, (list, set, frozenset, tuple)) else set()
 
 
 def cmd_status(args):
@@ -264,6 +268,7 @@ def cmd_status(args):
         if getattr(args, flag, None) and not registry.exists(module):
             raise not_built(f"status --{flag}", module)
     ctx = build_context(root, plan, state)
+    _check_selectors(ctx, args)
     comp = ctx["comp"]
     rows = comp["rows"]
     if args.owner:
@@ -271,7 +276,6 @@ def cmd_status(args):
     if args.phase:
         rows = [r for r in rows if r["phase"] == args.phase]
     if args.json:
-        _check_selectors(ctx, args)
         out = status_json(ctx, {"rows": rows, "patterns": comp["patterns"], "unplanned": state.get("unplanned", []),
                                 "syncedAt": state.get("syncedAt")})
         for flag, key in (("feature", "features"), ("milestone", "milestones")):  # the selectors of the text form
@@ -310,10 +314,10 @@ def cmd_status(args):
         for r in blocked:
             print(f"    ▲ {one_line(r['path'])} ({one_line(r['owner'])}): {one_line(r.get('note') or '')}")
     if args.next:
-        blocked = set(ctx["blocked"].get("phases") or ())
+        blocked = _blocked(ctx, "phases")
         # files claim refuses (ctx["blocked"]["files"], unknowns) are never offered; given as blocked rows, so a file
         # that depends on one waits as it does on any file not yet built
-        keys = _blocked_file_keys(ctx)
+        keys = {path_key(p) for p in _blocked(ctx, "files")}
         held = [r for r in comp["rows"] if path_key(r["path"]) in keys and r["status"] in ("planned", "claimed", "ondisk")
                 and r["phase"] not in blocked]
         held_ids = {id(r) for r in held}

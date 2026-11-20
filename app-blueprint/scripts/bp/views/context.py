@@ -51,5 +51,7 @@ def status_json(ctx, base):
 def blocked_by(ctx, kind, target):
     """The unknown ids blocking a phase, milestone or feature: ctx["blocked"]["by"] is keyed "phase:P2", "milestone:M1"
     or "feature:F-x" (one format, decided for wave 1)."""
-    by = (ctx.get("blocked") or {}).get("by") or {}
-    return list(by.get(f"{kind}:{target}") or [])
+    blocked = ctx.get("blocked")
+    by = blocked.get("by") if isinstance(blocked, dict) else None
+    ids = by.get(f"{kind}:{target}") if isinstance(by, dict) else None
+    return [x for x in ids if isinstance(x, str)] if isinstance(ids, (list, tuple, set, frozenset)) else []

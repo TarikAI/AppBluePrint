@@ -5,6 +5,7 @@ return (ROADMAP.md, FEATURES.md, contract 8) and map.html. The map gets the map_
 and every tab-*.js asset inlined at the template's /*__TABS_JS__*/ placeholder, in sorted order (8.4).
 """
 import json
+import math
 import os
 import re
 import stat
@@ -13,7 +14,7 @@ from pathlib import Path
 
 from bp.version import TOOL_VERSION
 from bp import registry
-from bp.core import TOOL_HOME, BlueprintError, bp_dir, find_asset, write_text_if_changed
+from bp.core import TOOL_HOME, BlueprintError, bp_dir, copy_json, find_asset, write_text_if_changed
 from bp.plan import GLYPH, LABEL, STATES, save_state
 from bp.data import data_view
 from bp.status import compute
@@ -41,7 +42,9 @@ def tab_scripts():
 
 
 def _script(text):
-    return text.replace("</script", "<\\/script")
+    """An asset's text, safe inside a script element: '</script' in any case and '<!--' cannot close the element or
+    start the HTML parser's escaped-comment state (review of #16, N1)."""
+    return re.sub(r"(?i)</(script)", r"<\\/\1", text).replace("<!--", "<\\!--")
 
 
 def render_map(plan, state, comp, ctx=None):
@@ -60,23 +63,57 @@ def render_map(plan, state, comp, ctx=None):
     mm_js = _script(mm.read_text(encoding="utf-8")) if mm else "function mindMap(host){host.textContent='Mind map unavailable: run init --refresh-tool.';return {expandAll:function(){},collapseAll:function(){},zoom:function(){},fit:function(){}};}"
     values = {"__APP_NAME__": _html_escape(plan["app"].get("name", "App")), "__BLUEPRINT_DATA__": script_json(data),
               "/*__MINDMAP_JS__*/": mm_js, "/*__TABS_JS__*/": "\n;\n".join(_script(t) for t in tab_scripts())}
+    text = tpl.read_text(encoding="utf-8")
+    missing = [name for name in values if name not in text]
+    if missing:  # a broken template copy is a bug, never a map with a hole in it (review of #16, N11)
+        raise RuntimeError(f"{tpl} has no {', '.join(missing)} placeholder: run init --refresh-tool")
     # One pass over the template: text put in for one placeholder is never searched for another (core review C4).
-    return _PLACEHOLDER.sub(lambda m: values[m.group(0)], tpl.read_text(encoding="utf-8"))
+    return _PLACEHOLDER.sub(lambda m: values[m.group(0)], text)
 
 
 _PLACEHOLDER = re.compile(r"__APP_NAME__|__BLUEPRINT_DATA__|/\*__MINDMAP_JS__\*/|/\*__TABS_JS__\*/")
-_SCRIPT_UNSAFE = {"<": "\\u003c", ">": "\\u003e", "&": "\\u0026", " ": "\\u2028", " ": "\\u2029"}
+# what script_json writes as a \u escape: <, >, &, U+2028, U+2029 and every surrogate (written as escapes, not
+# literal characters, here: many tools treat a literal U+2028 as a line break)
+_SCRIPT_UNSAFE = re.compile("[<>&\u2028\u2029\ud800-\udfff]")
+
+
+def _finite(value):
+    """value with every non-finite float (NaN, Infinity, -Infinity, at any depth) as None: a browser's JSON.parse
+    rejects them, although Python's JSON reader accepts them in a plan (review of #16, M2). A copy only when needed,
+    made without recursion."""
+    try:
+        json.dumps(value, allow_nan=False)
+        return value
+    except ValueError:
+        pass
+    root = copy_json(value)
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        keys = node.keys() if isinstance(node, dict) else range(len(node))
+        for k in keys:
+            v = node[k]
+            if isinstance(v, float) and not math.isfinite(v):
+                node[k] = None
+            elif isinstance(v, (dict, list)):
+                stack.append(v)
+    return root
 
 
 def script_json(value):
-    """JSON safe to embed in a script element: <, >, & and U+2028/U+2029 become \\u escapes, so no plan text can
-    close the element, open a comment or a CDATA section, or end a line in an older JavaScript parser. Those
-    characters occur only inside JSON strings, where the escape stands for the same character: it parses back equal."""
-    return re.sub("[<>&  ]", lambda m: _SCRIPT_UNSAFE[m.group(0)], json.dumps(value, ensure_ascii=False))
+    """Strict JSON, safe to embed in a script element: non-finite numbers become null; <, >, &, U+2028, U+2029 and
+    lone surrogates become \\u escapes, so no plan text can close the element, open a comment or a CDATA section,
+    end a line in an older JavaScript parser or make the file unencodable (review of #16, M3). Those characters occur
+    only inside JSON strings, where the escape stands for the same character: the value parses back equal."""
+    text = json.dumps(_finite(value), ensure_ascii=False, allow_nan=False)
+    return _SCRIPT_UNSAFE.sub(lambda m: "\\u%04x" % ord(m.group(0)), text)
 
 
 def _html_escape(s):
-    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+    """Text for an HTML element; a lone surrogate becomes a character reference (shown as U+FFFD), so the page
+    stays encodable (review of #16, M3)."""
+    text = str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+    return re.sub("[\ud800-\udfff]", lambda m: "&#x%x;" % ord(m.group(0)), text)
 
 
 def _hook_views(ctx):
