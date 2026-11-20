@@ -681,7 +681,7 @@ class ManifestTest(CopyTestBase):
         install.write_manifest(self.bin, self.manifest()[1] + ["bp/records.py"])
         install._REQUIRED.pop(self.bin, None)
         self.assertTrue(install.listed_missing("records", home=self.bin))
-        self.assertFalse(install.listed_missing("roadmap", home=self.bin))
+        self.assertFalse(install.listed_missing("zz_never_a_module", home=self.bin))  # not listed: may be absent
 
     def test_required_modules_rule(self):
         from bp import install
