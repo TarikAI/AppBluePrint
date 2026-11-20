@@ -224,10 +224,17 @@ def one_line(value):
     return " ".join(str(value).split()) if value is not None else ""
 
 
-def _check_selectors(plan, args):
-    """The --feature and --milestone ids must be in the plan, for the text and the JSON form alike: unknown-feature /
-    unknown-milestone (7.3), exit 1, the failure envelope with --json. Checked here once, before any hook runs."""
+def _check_selectors(ctx, args):
+    """status --json: an unknown --feature or --milestone id is the error the text form gives (unknown-feature /
+    unknown-milestone, 7.3; exit 1, the failure envelope). The modules' own checks run first, through the hooks the
+    text form calls (status_card; status_lines, whose lines are dropped), so the wording and next are theirs; the
+    core's check after them is the fallback for a module that does not check."""
     from bp.plan import section_index
+    plan = ctx["plan"]
+    if getattr(args, "feature", None) and registry.hook("status_card") is not None:
+        registry.hook("status_card")(ctx, args.feature)
+    if getattr(args, "milestone", None):
+        registry.collect("status_lines", ctx, args)
     fid = getattr(args, "feature", None)
     if fid and fid not in section_index(plan, "features"):
         raise BlueprintError("unknown-feature", f"feature {one_line(fid)} is not in the plan",
@@ -256,7 +263,6 @@ def cmd_status(args):
     for flag, module in STATUS_FLAGS.items():  # 2.0 flags need their module (7.2); read with getattr (1.4)
         if getattr(args, flag, None) and not registry.exists(module):
             raise not_built(f"status --{flag}", module)
-    _check_selectors(plan, args)
     ctx = build_context(root, plan, state)
     comp = ctx["comp"]
     rows = comp["rows"]
@@ -265,6 +271,7 @@ def cmd_status(args):
     if args.phase:
         rows = [r for r in rows if r["phase"] == args.phase]
     if args.json:
+        _check_selectors(ctx, args)
         out = status_json(ctx, {"rows": rows, "patterns": comp["patterns"], "unplanned": state.get("unplanned", []),
                                 "syncedAt": state.get("syncedAt")})
         for flag, key in (("feature", "features"), ("milestone", "milestones")):  # the selectors of the text form
