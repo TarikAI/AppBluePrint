@@ -622,12 +622,13 @@ class HintsTest(MigrateCase):
 
     def test_validate(self):
         r = self.cli("validate")
+        hint = f'python "{S.SCRIPTS / "blueprint.py"}" migrate --root "{self.root.resolve()}"'
         self.assertIn("warning: blueprint.json is schema version 1; it still works. "
-                      "To use milestones, features, tasks and unknowns, run: blueprint.py migrate", r.stdout)
+                      f"To use milestones, features, tasks and unknowns, run: {hint}", r.stdout)
         data = json.loads(self.cli("validate", "--json").stdout)["data"]
         w = [x for x in data["warnings"] if x["code"] == "schema-v1"][0]
         # the finding's next runs as printed and names no path of this machine (core follow-up, item 2)
-        self.assertEqual((w["entry"], w["next"]), ("blueprint.json", "python <skill>/scripts/blueprint.py migrate --root ."))
+        self.assertEqual((w["entry"], w["next"]), ("blueprint.json", hint))
 
     def test_status(self):
         r = self.cli("status")
@@ -1170,6 +1171,60 @@ class StateLockTest(MigrateCase):
         self.assertEqual(self.plan_path.read_bytes(), migrated)
         self.assertFalse((self.bp / "blueprint.v1.json").exists())
         self.assertNotIn("stateVersion", self.state())
+
+    @unittest.skipUnless(os.name == "nt", "the read is retried on Windows only, where a replace makes it fail for a moment")
+    def test_a_plan_busy_on_the_first_read_is_read_again(self):
+        """Review of #17, F4: another migrate replacing blueprint.json makes a read fail for a moment on Windows
+        (PermissionError). The read goes through the core's Windows retry."""
+        real = Path.read_bytes
+        calls = {"n": 0}
+
+        def flaky(path, *a, **k):
+            if path.name == "blueprint.json":
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise PermissionError(13, "Permission denied")
+            return real(path, *a, **k)
+
+        with mock.patch.object(Path, "read_bytes", flaky):
+            code, err = self.run_in_process()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.plan()["version"], 2)
+
+    def test_a_plan_that_cannot_be_read_is_a_clean_error(self):
+        """F4: a read that still fails after the retry is bad-json (exit 1), never an incident; nothing is written."""
+        real = Path.read_bytes
+
+        def always(path, *a, **k):
+            if path.name == "blueprint.json":
+                raise PermissionError(13, "Permission denied")
+            return real(path, *a, **k)
+
+        shot = snapshot(self.root)
+        out = io.StringIO()
+        with mock.patch.object(Path, "read_bytes", always), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as cm:
+                cmd.cmd_migrate(Namespace(root=str(self.root), dry_run=False, force=True, json=True))
+        self.assertEqual((cm.exception.code, cm.exception.error), (1, "bad-json"))
+        self.assertIn("cannot be read", cm.exception.message)
+        self.assertEqual(snapshot(self.root), shot)
+
+    def test_the_plan_is_read_once(self):
+        """F11: one read before the lock (checked and migrated from the same bytes), one under it (5b)."""
+        real = Path.read_bytes
+        calls = {"n": 0}
+
+        def counting(path, *a, **k):
+            if path.name == "blueprint.json":
+                calls["n"] += 1
+            return real(path, *a, **k)
+
+        with mock.patch.object(Path, "read_bytes", counting), mock.patch.object(cmd, "_render_quietly", lambda root: None), \
+                mock.patch.object(bplan, "read_json", side_effect=AssertionError("the plan is read with read_bytes")):
+            code, err = self.run_in_process()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(calls["n"], 2)
 
 
 if __name__ == "__main__":

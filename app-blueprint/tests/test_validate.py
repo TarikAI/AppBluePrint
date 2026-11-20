@@ -1404,10 +1404,130 @@ class LoadNextTest(TempRoot):
     def test_schema_v1_warning(self):
         self.write_plan(v1_plan())
         first = json.loads(self.cli("validate", "--json").stdout)["data"]["warnings"][0]
-        self.assertEqual((first["code"], first["next"]), ("schema-v1", "python <skill>/scripts/blueprint.py migrate --root ."))
+        self.assertEqual((first["code"], first["next"]), ("schema-v1", self.hint("migrate")))  # F3, F10: runnable
         self.copy("commands/migrate")
         first = json.loads(self.cli("validate", "--json").stdout)["data"]["warnings"][0]
         self.assertEqual(first["next"], "python .blueprint/bin/blueprint.py migrate")
+
+
+# ---------------------------------------------------------------------------------- next texts that run as printed
+
+PORTABLE_NOTE = " (run from the project folder)"
+# folder names a shell would run or expand when pasted inside double quotes (bash, PowerShell, cmd)
+HOSTILE_DIRS = ["a$(touch PWNED)b", "a`touch PWNED`b", "a%PATH%b", "a!b", "a&b", "a;b", "a'b", "a$HOME", "a^b"]
+if os.name != "nt":
+    HOSTILE_DIRS += ['a"b', "a\\"]
+SAFE_DIRS = ["plain", "with space", "p(1)[2]", "a+b,c@d=e", "été 日本", "x-y_z.w"]
+
+
+class RunHintTest(unittest.TestCase):
+    """Review of #17, F8: run_hint never prints a command that runs something else when pasted. A path goes inside the
+    command only when every character is literal inside double quotes in bash, PowerShell and cmd (letters and
+    digits, non-ASCII ones too, space and - _ . / \\ : + , @ = ( ) [ ], not ending in a backslash). Otherwise: the copy
+    form when the project's copy has the command, else the portable form with the <skill> placeholder."""
+
+    def setUp(self):
+        self.base = Path(tempfile.mkdtemp(prefix="bp-hint-"))
+        self.addCleanup(shutil.rmtree, self.base, True)
+
+    def project(self, name, plan=True):
+        root = self.base / name
+        (root / ".blueprint").mkdir(parents=True)
+        if plan:
+            (root / ".blueprint" / "blueprint.json").write_text(json.dumps(v2_plan(), indent=2), encoding="utf-8")
+        return root
+
+    def test_the_rule(self):
+        for name in SAFE_DIRS:
+            with self.subTest(name=name):
+                root = self.project(name)
+                self.assertEqual(core.run_hint(root, "status"), f'python "{core.TOOL_HOME / "blueprint.py"}" status --root "{root}"')
+        for name in HOSTILE_DIRS:
+            with self.subTest(name=name):
+                root = self.project(name)
+                hint = core.run_hint(root, "status")
+                self.assertEqual(hint, "python <skill>/scripts/blueprint.py status --root ." + PORTABLE_NOTE)
+                bin_ = root / ".blueprint" / "bin"
+                (bin_ / "bp").mkdir(parents=True)
+                (bin_ / "blueprint.py").write_text("# copy\n", encoding="utf-8")
+                self.assertEqual(core.run_hint(root, "status"), "python .blueprint/bin/blueprint.py status")
+                self.assertEqual(core.run_hint(root, "migrate", "commands/migrate"),
+                                 "python <skill>/scripts/blueprint.py migrate --root ." + PORTABLE_NOTE)
+        root = self.project("plain2")
+        with mock.patch.object(core, "TOOL_HOME", Path(str(self.base / "tool$(x)"))):
+            self.assertEqual(core.run_hint(root, "status"), "python <skill>/scripts/blueprint.py status --root ." + PORTABLE_NOTE)
+        with mock.patch.object(core, "TOOL_HOME", Path(str(self.base / "tool"))):  # use_copy=False: never the copy
+            bin_ = root / ".blueprint" / "bin"
+            (bin_ / "bp").mkdir(parents=True)
+            (bin_ / "blueprint.py").write_text("# copy\n", encoding="utf-8")
+            self.assertEqual(core.run_hint(root, "init --refresh-tool", use_copy=False),
+                             f'python "{self.base / "tool" / "blueprint.py"}" init --refresh-tool --root "{root}"')
+
+    def shells(self):
+        """(name, how to run a pasted line) for the shells of this OS: the line is written to a script file, as pasting
+        it into an interactive prompt would run it."""
+        out = []
+        if os.name == "nt":
+            if shutil.which("powershell"):
+                out.append(("powershell", ".ps1", lambda f: ["powershell", "-NoProfile", "-NonInteractive",
+                                                             "-ExecutionPolicy", "Bypass", "-File", str(f)]))
+            out.append(("cmd", ".cmd", lambda f: ["cmd", "/d", "/c", str(f)]))
+        elif shutil.which("bash"):
+            out.append(("bash", ".sh", lambda f: ["bash", "--norc", str(f)]))
+        return out
+
+    def paste(self, line, cwd, suffix, argv):
+        script = self.base / ("pasted" + suffix)
+        text = ("@echo off\r\nchcp 65001 >nul\r\n" + line + "\r\n") if suffix == ".cmd" else line + "\n"
+        script.write_text(text, encoding="utf-8-sig" if suffix == ".ps1" else "utf-8")
+        env = S.tool_env(PYTHONIOENCODING="utf-8")
+        exe = os.path.dirname(sys.executable)
+        env["PATH"] = exe + os.pathsep + env.get("PATH", "")
+        if os.name == "nt" and not (Path(exe) / "python.exe").is_file():
+            self.skipTest("no python.exe on PATH for the shells")
+        return subprocess.run(argv(script), cwd=str(cwd), capture_output=True, text=True, encoding="utf-8", errors="replace",
+                              env=env, timeout=120)
+
+    def test_pasted_commands_run_and_run_nothing_else(self):
+        shells = self.shells()
+        if not shells:
+            self.skipTest("no shell to paste into")
+        if os.name == "nt" and not shutil.which("python"):
+            self.skipTest("python is not on PATH")
+        for name in SAFE_DIRS:  # the path form, pasted: it runs status on that project
+            root = self.project(name)
+            line = core.run_hint(root, "status")
+            for shell, suffix, argv in shells:
+                with self.subTest(name=name, shell=shell):
+                    r = self.paste(line, self.base, suffix, argv)
+                    self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                    self.assertIn("Snag Desk: 5 planned files", r.stdout)
+        for name in HOSTILE_DIRS:  # no path printed; the copy form, pasted in the project, runs the copy only
+            root = self.project(name)
+            r = S.run_script(S.LAUNCHER, ["init", "--refresh-tool", "--root", root], root)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            line = core.run_hint(root, "status")
+            self.assertEqual(line, "python .blueprint/bin/blueprint.py status")
+            for shell, suffix, argv in shells:
+                with self.subTest(name=name, shell=shell):
+                    r = self.paste(line, root, suffix, argv)
+                    self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                    self.assertIn("Snag Desk: 5 planned files", r.stdout)
+        self.assertEqual([p for p in self.base.rglob("PWNED*")], [])
+
+
+class SchemaV1ConsoleTest(TempRoot):
+    def test_the_console_warning_runs_as_printed(self):
+        """F10: the console schema-v1 warning names migrate in the runnable form, like the finding's next (F3: printed
+        text may carry real paths; one form for the console and the envelope)."""
+        self.write_plan(v1_plan())
+        hint = f'python "{S.SCRIPTS / "blueprint.py"}" migrate --root "{self.root.resolve()}"'
+        r = self.cli("validate")
+        self.assertIn("warning: blueprint.json is schema version 1; it still works. To use milestones, features, tasks "
+                      f"and unknowns, run: {hint}", r.stdout)
+        first = json.loads(self.cli("validate", "--json").stdout)["data"]["warnings"][0]
+        self.assertEqual(first["next"], hint)
+        self.assertIn(f"run: {hint}", first["message"])
 
 
 @unittest.skipUnless(os.name == "nt", "a junction is a Windows link")

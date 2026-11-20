@@ -2193,6 +2193,241 @@ class RunnableNextTest(CliTestBase):
         self.assertIn(f"next: move or rename the file(s) named above, then run: {self.hint('render')}", err)
 
 
+class PatternVerifyRoundOneTest(PatternVerifyTest):
+    """Review of #17: recorded instances are proven only when they are this project's paths that match their glob (F5);
+    an instance covered by two commands is proven only when both pass (F6); the --owner and --phase filters and the
+    planned-file skip hold (F13: M22, M23, M24)."""
+
+    def set_instances(self, instances, pattern="screen"):
+        state = self.state()
+        state["patterns"][pattern]["instances"] = instances
+        (self.root / ".blueprint" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+
+    def test_instances_that_are_not_project_paths_are_skipped(self):
+        outside = self.root.parent / (self.root.name + "-outside.txt")
+        outside.write_text("x\n", encoding="utf-8")
+        self.addCleanup(outside.unlink)
+        bad = ["../" + outside.name, str(outside), "src\\screens\\A.ts", "src/screens/../screens/A.ts",
+               ".blueprint/state.json", "src/other/X.ts", "src/screens/sub/../B.ts"]
+        if hasattr(os, "symlink"):
+            try:
+                os.symlink(outside, self.root / "src" / "screens" / "L.ts")
+                bad.append("src/screens/L.ts")
+            except (OSError, NotImplementedError):
+                pass
+        self.touch("src/other/X.ts")
+        self.set_instances(bad + ["src/screens/A.ts"])
+        code, out, err = self.run_("verify", "--run")
+        self.assertEqual(code, 0, out + err)
+        self.assertIn(f"skipped {len(bad)} recorded instance(s) that are not project paths", out)
+        self.assertIn(f"$ {self.other}\n  passed for 1 file(s)", out)
+        files = self.state()["files"]
+        self.assertTrue(files["src/screens/A.ts"]["verified"]["ok"])
+        for p in bad:
+            self.assertNotIn(p, files, p)
+        self.assertFalse(any(os.path.isabs(k) or ".." in k.split("/") or "\\" in k for k in files), list(files))
+
+    def test_an_instance_under_two_commands_needs_both(self):
+        fail = f'{PY} -c "import sys; sys.exit(1)"'
+        for first_fails in (True, False):
+            with self.subTest(first_fails=first_fails):
+                plan = json.loads(json.dumps(self.plan))
+                two = {"id": "two", "glob": "src/screens/*.ts", "module": plan["modules"][0]["id"],
+                       "phase": plan["phases"][0]["id"], "purpose": "again", "instance": "one",
+                       "verify": fail if first_fails else self.other}
+                plan["patterns"][0]["verify"] = self.other if first_fails else fail
+                plan["patterns"].insert(0, two)
+                self.write_plan(plan)
+                state = self.state()
+                state["files"] = {}
+                state["patterns"]["two"] = {"instances": ["src/screens/A.ts"]}
+                state["patterns"]["screen"]["instances"] = ["src/screens/A.ts"]
+                (self.root / ".blueprint" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+                code, out, err = self.run_("verify", "--run")
+                self.assertEqual(code, 1, out + err)
+                self.assertIs(self.state()["files"]["src/screens/A.ts"]["verified"]["ok"], False)
+
+    def test_owner_and_phase_filters_and_the_planned_file_skip(self):
+        from bp.verify import verify_groups
+        plan = json.loads(json.dumps(self.plan))
+        plan["owners"].append({"pattern": "src/screens/", "owner": "frontend-engineer"})
+        plan["patterns"][1]["phase"] = plan["phases"][1]["id"]
+        plan["files"].append({"path": "src/screens/B.ts", "action": "create", "module": plan["modules"][0]["id"],
+                              "phase": plan["phases"][0]["id"], "purpose": "a planned instance", "verify": self.ok})
+        self.write_plan(plan)
+        loaded = quiet(bplan.load_plan, self.root)[0]
+        state = bplan.load_state(self.root)
+        flat = lambda g: sorted(p for ps in g.values() for p in ps)  # noqa: E731
+        everything = verify_groups(loaded, state=state, root=self.root)
+        self.assertEqual(flat(everything).count("src/screens/B.ts"), 1, everything)  # proven once, as the planned file
+        self.assertEqual(everything[self.other], ["src/screens/A.ts"])
+        by_owner = flat(verify_groups(loaded, owner="frontend-engineer", state=state, root=self.root))
+        self.assertIn("src/screens/A.ts", by_owner)
+        self.assertNotIn("src/same/C.ts", by_owner)
+        by_phase = flat(verify_groups(loaded, phase=plan["phases"][0]["id"], state=state, root=self.root))
+        self.assertIn("src/screens/A.ts", by_phase)
+        self.assertNotIn("src/same/C.ts", by_phase)
+        self.assertIn("src/same/C.ts", flat(verify_groups(loaded, phase=plan["phases"][1]["id"], state=state, root=self.root)))
+
+    def test_a_version_1_listing_never_reads_state(self):  # M12: 1.3.0's verify listing ignores state.json
+        v1 = v1_plan()
+        for m in v1["modules"]:
+            m["verify"] = self.ok
+        self.write_plan(v1)
+        (self.root / ".blueprint" / "state.json").write_text("{not json", encoding="utf-8")
+        code, out, err = self.run_("verify")
+        self.assertEqual(code, 0, out + err)
+
+
+class RecordedViewNamesWindowsSafeTest(CliTestBase):
+    def test_a_name_that_only_starts_like_a_view_is_never_deleted(self):
+        """F12: 'NOTES.md.bak' starts like a view name; with match instead of fullmatch it would count as recorded and
+        be deleted. Every OS can store it."""
+        from bp.views.render import render_all
+        bp = self.root / ".blueprint"
+        (bp / "NOTES.md.bak").write_text("mine\n", encoding="utf-8")
+        state = {"files": {}, "patterns": {}, "unplanned": [], "syncedAt": None, "head": None,
+                 "generatedViews": ["NOTES.md.bak"]}
+        (bp / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        plan = quiet(bplan.load_plan, self.root)[0]
+        self.assertNotIn("NOTES.md.bak", render_all(self.root, plan, bplan.load_state(self.root), quiet=True, check=True))
+        quiet(render_all, self.root, plan, bplan.load_state(self.root), True)
+        self.assertEqual((bp / "NOTES.md.bak").read_text(encoding="utf-8"), "mine\n")
+
+
+class FallbackModuleTest(CliTestBase):
+    def test_the_v1_unknown_milestone_next_needs_a_copy_with_migrate(self):
+        """M9: a version 1 plan's unknown-milestone next is migrate; a copy without commands/migrate.py cannot run it, so
+        the next is this tool's form, not the copy's."""
+        self.write_plan(v1_plan())
+        bin_ = self.root / ".blueprint" / "bin"
+        (bin_ / "bp").mkdir(parents=True)
+        (bin_ / "blueprint.py").write_text("# copy\n", encoding="utf-8")
+        with extension({"roadmap.py": "def status_json(ctx):\n    return {}\n"}):
+            code, out, err = self.run_("status", "--json", "--milestone", "M9")
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(out)["error"]["next"], RunnableNextTest.hint(self, "migrate"))
+
+
+HOSTILE_CELL = "h<i>&amp;j|k\\l`m``n\nz"
+
+
+def table_rows(text):
+    """[(header cells, [row cell lists])] of every pipe table in a Markdown text, split as GFM does: a backslash escapes
+    the next character, an unescaped | separates cells."""
+    def split(line):
+        cells, cur, i = [], "", 0
+        while i < len(line):
+            c = line[i]
+            if c == "\\" and i + 1 < len(line):
+                cur += line[i:i + 2]
+                i += 2
+                continue
+            if c == "|":
+                cells.append(cur)
+                cur = ""
+            else:
+                cur += c
+            i += 1
+        cells.append(cur)
+        return cells[1:-1]
+    tables, lines = [], text.splitlines()
+    for i, line in enumerate(lines):
+        if line.startswith("|") and i + 1 < len(lines) and re.fullmatch(r"\|(---\|)+", lines[i + 1]):
+            rows, j = [], i + 2
+            while j < len(lines) and lines[j].startswith("|"):
+                rows.append(split(lines[j]))
+                j += 1
+            tables.append((split(line), rows))
+    return tables
+
+
+def outside_code_spans(cell):
+    """The text of a cell with its code spans removed (a span opens and closes with the same run of backticks)."""
+    out, i = "", 0
+    while i < len(cell):
+        if cell[i] == "`":
+            n = len(cell[i:]) - len(cell[i:].lstrip("`"))
+            end = cell.find("`" * n, i + n)
+            while end != -1 and (cell[end + n:end + n + 1] == "`" or cell[end - 1:end] == "`"):
+                end = cell.find("`" * n, end + 1)
+            if end != -1:
+                i = end + n
+                continue
+        out += cell[i]
+        i += 1
+    return out
+
+
+class TablesWalkTest(CliTestBase):
+    """F1: every table the core writes in STRUCTURE.md and ROSTER.md for a version 2 plan keeps its columns and holds
+    no raw '<' outside code spans, whichever plan-supplied field holds a hostile value; code spans are backtick-safe."""
+
+    def views(self, plan):
+        from bp.status import compute
+        from bp.views.roster import render_roster
+        from bp.views.structure import render_structure
+        self.write_plan(plan)
+        try:
+            loaded = quiet(bplan.load_plan, self.root)[0]
+        except SystemExit:
+            return None
+        state = bplan.load_state(self.root)
+        comp = compute(self.root, loaded, state)
+        return render_structure(loaded, state, comp) + "\n" + render_roster(loaded, state, comp)
+
+    @staticmethod
+    def leaves(node, path=()):
+        if isinstance(node, str):
+            yield path
+        elif isinstance(node, dict):
+            for k, v in node.items():
+                yield from TablesWalkTest.leaves(v, path + (k,))
+        elif isinstance(node, list):
+            for i, v in enumerate(node):
+                yield from TablesWalkTest.leaves(v, path + (i,))
+
+    def test_every_field(self):
+        base = v2_plan()
+        base["patterns"] = [{"id": "screen", "glob": "apps/web/src/screens/*.tsx", "module": "web", "phase": "P1",
+                             "purpose": "screens", "instance": "one screen", "features": ["F-inbox"]}]
+        base["files"][0]["contract"] = True
+        base["files"][0]["produces"] = ["Workspace"]
+        base["stores"] = [{"id": "db", "kind": "postgres", "schema": ["migrations/*.sql"], "purpose": "data"}]
+        base["resources"] = [{"id": "snags", "kind": "table", "store": "db", "owner": "backend-lead", "purpose": "rows"}]
+        checked = 0
+        for path in self.leaves(base):
+            if path[0] in ("version",):
+                continue
+            plan = json.loads(json.dumps(base))
+            node = plan
+            for k in path[:-1]:
+                node = node[k]
+            node[path[-1]] = HOSTILE_CELL
+            text = self.views(plan)
+            if text is None:
+                continue
+            checked += 1
+            for header, rows in table_rows(text):
+                for row in rows:
+                    with self.subTest(field=path, row=row):
+                        self.assertEqual(len(row), len(header), row)
+                        for cell in row:
+                            self.assertNotIn("<", outside_code_spans(cell))
+        self.assertGreater(checked, 50)
+
+    def test_code_spans_are_backtick_safe(self):
+        from bp.views.structure import code_span
+        for value, want in (("a", "`a`"), ("a`b", "`` a`b ``"), ("``x", "``` ``x ```"), ("a|b\\", "`a\\|b\\\\`"),
+                            ("x\ny", "`x y`")):
+            with self.subTest(value=value):
+                self.assertEqual(code_span(value), want)
+
+    def test_text_cell_is_still_importable_from_views_roster(self):  # F7: contract 1.3 names it there
+        from bp.views import roster, structure
+        self.assertIs(roster.text_cell, structure.text_cell)
+
+
 class EndToEndExtensionTest(unittest.TestCase):
     """A temp copy of the skill gains a later workstream's files (modules and a tab script); the real CLI, run as a
     process from that copy, picks every one of them up. Nothing of W0-A2 is edited."""
