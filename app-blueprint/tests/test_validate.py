@@ -1056,6 +1056,26 @@ class FindingsTest(HermeticRoot):
                 errs = [f for f in self.v.validate_findings(raw) if f["level"] == "error"]
                 self.assertEqual((errs[0]["message"], errs[0]["code"]), ("version must be 1 or 2", "version"))
 
+    def test_windows_alias_paths(self):
+        """file-path-alias (version 2 only): a segment ending in a dot or a space, or holding ':', is another spelling
+        of the plain path on Windows, so the plan must use the plain one (review of #13, R2-M1)."""
+        spellings = {"apps/web/y.ts.": "apps/web/y.ts", "apps/web/z.ts::$DATA": "apps/web/z.ts",
+                     "apps/web.. /a.ts": "apps/web/a.ts", "docs/notes.md:alt": "docs/notes.md"}
+        plan = v2_plan()
+        for path in spellings:
+            plan["files"].append(dict(plan["files"][1], path=path, dependsOn=[]))
+        found = [f for f in self.v.validate_findings(self.load(plan)) if f["code"] == "file-path-alias"]
+        self.assertEqual([(f["level"], f["entry"]) for f in found], [("error", f"file {p}") for p in spellings])
+        for f, plain in zip(found, spellings.values()):
+            self.assertIn(f"the same file as {plain!r}", f["message"])
+            self.assertEqual(self.v.classify_error(f["message"]), "file-path-alias")
+            self.assertEqual(f["next"], f"write the path as {plain!r} in files[]")
+        self.assertEqual([f["code"] for f in self.v.validate_findings(self.load(v2_plan()))], [])
+        v1 = v1_plan()
+        v1["files"].append(dict(v1["files"][1], path="apps/web/y.ts.", dependsOn=[]))
+        self.assertNotIn("file-path-alias", [f["code"] for f in self.v.validate_findings(self.load(v1))],
+                         "a version 1 plan validates as in 1.3.0")
+
     def test_bad_id_is_registered_once_in_the_core(self):
         """Contract 7.4: bad-id is a cross-section code; the core registers it, domain modules only emit it."""
         self.assertIn((r"(?s)^[a-z ]+ id '.*' has the wrong form", "bad-id"), self.v.CODES)

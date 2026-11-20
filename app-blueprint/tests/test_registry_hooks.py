@@ -1559,6 +1559,41 @@ class OneLineStatusTest(CliTestBase):
             self.assertNotRegex(line, r"^(Desk|skeleton|\.toml|architect|for it)\b", line)
 
 
+class RosterCellsTest(CliTestBase):
+    """ROSTER.md's 1.x tables in a version 2 plan: a value ending in a backslash or holding a pipe or a newline stays
+    in its cell; a version 1 plan keeps 1.3.0's bytes."""
+
+    @staticmethod
+    def cells(line):
+        return re.split(r"(?<!\\)\|", line.replace("\\\\", "\0"))[1:-1]
+
+    def roster(self, plan):
+        from bp.views.roster import render_roster
+        self.write_plan(plan)
+        loaded = quiet(bplan.load_plan, self.root)[0]
+        state = bplan.load_state(self.root)
+        from bp.status import compute
+        return render_roster(loaded, state, compute(self.root, loaded, state))
+
+    def hostile(self, plan):
+        plan["roster"][0]["role"] = "lead\\"
+        plan["roster"][0]["harness"] = "a|b\nc"
+        return plan
+
+    def test_version_2_cells(self):
+        text = self.roster(self.hostile(v2_plan()))
+        rid = v2_plan()["roster"][0]["id"]
+        line = next(l for l in text.splitlines() if l.startswith(f"| {rid} |"))
+        self.assertEqual(len(self.cells(line)), 7, line)
+        self.assertIn("| a\\|b c | lead\\\\ |", line)
+
+    def test_version_1_keeps_1_3_0_bytes(self):
+        text = self.roster(self.hostile(v1_plan()))
+        rid = v1_plan()["roster"][0]["id"]
+        line = next(l for l in text.splitlines() if l.startswith(f"| {rid} |"))
+        self.assertIn("| a\\|b c | lead\\ |", line)
+
+
 class EndToEndExtensionTest(unittest.TestCase):
     """A temp copy of the skill gains a later workstream's files (modules and a tab script); the real CLI, run as a
     process from that copy, picks every one of them up. Nothing of W0-A2 is edited."""
