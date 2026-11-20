@@ -35,7 +35,6 @@ STUDY_ID = re.compile(r"S-[a-z0-9][a-z0-9-]{0,47}")  # every id, level and date 
 
 LEVEL_RX = r"((level|verifyLevel) must be unit, integration(, e2e or manual| or e2e)|level manual needs an evaluation)"
 CODES = [
-    (r"(?s)^[a-z ]+ id '.*' has the wrong form", "bad-id"),  # every section's id (2.2): one owner for the whole code
     (r"(?s)^feature .*?: needs title, statement, kind and owner", "feature-incomplete"),
     (r"(?s)^feature .*?: kind must be add, change, fix or refactor", "feature-kind"),
     (r"(?s)^feature .*?: owner .* is not a roster entry", "feature-owner"),
@@ -53,7 +52,6 @@ CODES = [
 ]
 
 CODE_EXAMPLES = {
-    "bad-id": "feature id 'Inbox' has the wrong form; use F- then lowercase letters, digits and hyphens",
     "feature-incomplete": "feature F-x: needs title, statement, kind and owner (missing: kind)",
     "feature-kind": "feature F-x: kind must be add, change, fix or refactor (got 'big')",
     "feature-owner": "feature F-x: owner 'ghost' is not a roster entry",
@@ -680,7 +678,9 @@ def independent_ids(plan, feature, items, _roster=None):
 
 
 def _cell(v):
-    return str(v if v is not None else "").replace("|", "\\|").replace("\n", " ")
+    """A table cell: one line, `&` and `<` as entities (as FEATURES.md does), a backslash escaped, then the pipe."""
+    text = re.sub(r"\s+", " ", str(v if v is not None else "")).strip()
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace("\\", "\\\\").replace("|", "\\|")
 
 
 def roster_sections(ctx):

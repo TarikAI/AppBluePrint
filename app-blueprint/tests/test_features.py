@@ -5,6 +5,7 @@ synthetic `checks` (plus the "not" path of each), the hooks (file_tags, roster_s
 exact FEATURES.md of the version 2 example, and the map's Features tab and "by feature" mind map branch (run under node
 with a small DOM stand-in when node is installed).
 """
+import contextlib
 import copy
 import json
 import re
@@ -21,7 +22,27 @@ from bp.views.context import build_context
 from bp.views.render import render_all, render_map
 
 from test_registry_hooks import run_cli
-from test_validate import TempRoot, quiet, v1_plan, v2_plan
+from test_validate import TempRoot, extension, quiet, v1_plan, v2_plan
+
+
+
+def own_modules():
+    """This workstream's real module files, read from disk: dropped into a hermetic package they are the only
+    non-core modules, so a test of features does not depend on which sibling modules (roadmap, unknowns, records) exist."""
+    return {"features.py": (S.PACKAGE / "features.py").read_text(encoding="utf-8"),
+            "views/features_md.py": (S.PACKAGE / "views" / "features_md.py").read_text(encoding="utf-8")}
+
+
+class Own:
+    """Mixin: every test runs in a hermetic package holding the core and the features modules only. Behaviour that
+    depends on a sibling module has its own test (SiblingsTest) with both variants stated."""
+
+    def setUp(self):
+        super().setUp()
+        stack = contextlib.ExitStack()
+        stack.enter_context(extension(own_modules()))
+        self.addCleanup(stack.close)
+
 
 FILES = ("crates/snag-api/src/main.rs", "crates/snag-api/tests/snags.rs", "apps/web/src/Inbox.tsx", "apps/web/src/offline.ts")
 
@@ -43,7 +64,7 @@ def file_(plan, path):
     return next(f for f in plan["files"] if f["path"] == path)
 
 
-class CodeTest(unittest.TestCase):
+class CodeTest(Own, unittest.TestCase):
     """Every validation code of 2.5, 2.7 and 2.8: the plan that triggers it, the nearest plan that does not."""
 
     def assertCode(self, plan, code, text=None, level="error"):
@@ -575,7 +596,7 @@ class DeriveStatusTest(unittest.TestCase):
 
 # ------------------------------------------------------------------------------------------- context and views
 
-class ProjectBase(TempRoot):
+class ProjectBase(Own, TempRoot):
     """A temp project holding the version 2 example, with the four planned files on disk when asked."""
 
     def setUp(self):
@@ -821,7 +842,8 @@ class HooksTest(ProjectBase):
         self.assertIn("Latest evaluation: evaluator · browser · pass · 2027-01-02", card)
 
     def test_the_hooks_have_one_owner_each(self):
-        self.assertIs(registry.hook("status_card"), features.status_card)
+        card = registry.hook("status_card")
+        self.assertEqual((card.__module__, card.__name__), ("bp.features", "status_card"))
         self.assertTrue(registry.exists("features") and registry.exists("views.features_md"))
         mods = [n for n, _ in registry.collect("map_payload", self.ctx())]
         self.assertIn("features", mods)
@@ -1106,7 +1128,7 @@ def features_rows(feature, chk=None):
     return ctx["features"][0]["criteria"]
 
 
-class ReviewValidationTest(unittest.TestCase):
+class ReviewValidationTest(Own, unittest.TestCase):
     def test_a_command_criterion_cannot_require_manual(self):
         p = v2_plan()
         feat(p, "F-log-snag")["criteria"][0]["level"] = "manual"
@@ -1474,7 +1496,7 @@ class PerformanceTest(TempRoot):
         self.assertLess(time.time() - started, 2.0)
 
 
-class WholeValueTest(unittest.TestCase):
+class WholeValueTest(Own, unittest.TestCase):
     """Every id, level and kind matches the whole string: a trailing newline, a carriage return or a leading space is
     never accepted (re.fullmatch, not re.match with $)."""
     BAD = ("{}\n", "{}\r\n", " {}", "{} ", "{}\r")
@@ -1635,6 +1657,69 @@ class NoMachineSpecificTextTest(ProjectBase):
         for name in ("tab-features.js", "mindmap.js"):
             text = (S.SKILL / "assets" / name).read_text(encoding="utf-8")
             self.assertNoLeak(text, name)
+
+
+class RosterSectionSafetyTest(ProjectBase):
+    def test_cells_escape_backslash_then_pipe_and_write_entities(self):
+        p = v2_plan()
+        evil = "a\\|b <i>&\n## x"
+        p["roster"].append({"id": evil, "kind": "agent"})
+        feat(p, "F-inbox")["owner"] = evil
+        self.write_plan(p)
+        sections = dict(features.roster_sections(self.ctx()))
+        cell = "a\\\\\\|b &lt;i>&amp; ## x"  # backslash doubled, pipe escaped, < and & as entities, one line
+        owned = sections["Features owned"].splitlines()
+        self.assertIn(f"| {cell} | F-inbox |", owned)
+        accept = sections["Who may accept what"].splitlines()
+        self.assertTrue(any(line.startswith("| F-log-snag |") and cell in line for line in accept), accept)
+        for body in sections.values():
+            self.assertNotIn("<i>", body)
+            self.assertFalse(any(line.startswith("##") for line in body.splitlines()))
+        for line in owned[2:]:  # every table row has the same number of unescaped cells
+            self.assertEqual(len(line.replace("\\\\", "").replace("\\|", "").split("|")), 4, line)
+
+    def test_a_hostile_feature_id_in_the_may_accept_table(self):
+        p = v2_plan()
+        p["features"][0]["id"] = "F-a|b\\<c&"
+        for f in p["files"]:
+            f["features"] = [("F-a|b\\<c&" if x == "F-log-snag" else x) for x in f.get("features", [])] or None
+            if f["features"] is None:
+                del f["features"]
+        self.write_plan(p)
+        row = dict(features.roster_sections(self.ctx()))["Who may accept what"].splitlines()[4]
+        self.assertTrue(row.startswith("| F-a\\|b\\\\&lt;c&amp; |"), row)
+
+
+class SiblingsTest(TempRoot):
+    """What depends on a sibling module, with both variants stated: without the unknowns module nothing is blocked; with
+    it (a stand-in here, the real module in the third test) the example's F-inbox is blocked by U-offline, because its
+    file offline.ts is in phase P2."""
+    UNKNOWNS = '''
+def context(root, plan, state, ctx):
+    ctx["blocked"] = {"phases": {"P2"}, "milestones": set(), "features": set(), "by": {"phase:P2": ["U-offline"]}}
+'''
+
+    def statuses(self, files=None, hermetic=True):
+        self.write_plan(v2_plan())
+        plan = quiet(bplan.load_plan, self.root)[0]
+        with extension(files if files is not None else own_modules(), hermetic=hermetic):
+            ctx = build_context(self.root, plan, bplan.load_state(self.root))
+        return {f["id"]: (f["status"], f["blockedBy"]) for f in ctx["features"]}
+
+    def test_without_unknowns_nothing_is_blocked(self):
+        self.assertEqual(self.statuses(), {"F-log-snag": ("planned", []), "F-inbox": ("planned", [])})
+
+    def test_with_unknowns_the_feature_with_a_file_in_the_blocked_phase_is_blocked(self):
+        got = self.statuses(dict(own_modules(), **{"unknowns.py": self.UNKNOWNS}))
+        self.assertEqual(got, {"F-log-snag": ("planned", []), "F-inbox": ("blocked", ["U-offline"])})
+
+    def test_in_the_real_tree_it_depends_on_whether_unknowns_exists(self):
+        got = self.statuses({}, hermetic=False)
+        if registry.exists("unknowns"):
+            self.assertEqual(got["F-inbox"], ("blocked", ["U-offline"]))
+        else:
+            self.assertEqual(got["F-inbox"], ("planned", []))
+        self.assertEqual(got["F-log-snag"], ("planned", []))
 
 
 if __name__ == "__main__":
