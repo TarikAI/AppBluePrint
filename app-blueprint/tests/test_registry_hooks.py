@@ -925,7 +925,8 @@ class GuardRefusalTest(CliTestBase):
             self.assertEqual(code, 3, err)
             self.assertIn("blocked by unknown U-offline", err)
             self.assertEqual(self.run_("claim", "apps/web/src/Inbox.tsx", "--by", "frontend-engineer")[0], 0)
-            self.assertIn("next: blueprint.py status --unknowns", err)  # review N5: a refusal names the next step
+            # review N5: a refusal names the next step, in a form that runs as printed (core.run_hint; follow-up item 2)
+            self.assertIn(f"next: {RunnableNextTest.hint(self, 'status --unknowns')}", err)
             self.assertEqual(self.run_("claim", "apps/web/src/offline.ts", "--by", "frontend-engineer", "--force")[0], 0)
         self.assertEqual(self.run_("claim", "apps/web/src/offline.ts", "--by", "frontend-engineer")[0], 0)
         tuple_src = ("def refuse(action, root, plan, path, by):\n"
