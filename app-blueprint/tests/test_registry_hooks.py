@@ -12,6 +12,7 @@ import importlib
 import io
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -1372,6 +1373,190 @@ class SignalsTest(CliTestBase):
             self.run_("verify", "--run")
         self.assertEqual((self.root / "signals.txt").read_text().splitlines(),
                          ["guard guard-unplanned", "guard guard-wrong-owner", "verify verify-fail"])
+
+
+HOSTILE = ["</script>", "<!--", "<!--<script>", "]]>", "a b c", "&amp;<b>", "__BLUEPRINT_DATA__",
+           "__APP_NAME__", "/*__MINDMAP_JS__*/", "/*__TABS_JS__*/"]
+SVG_NS = "http://www.w3.org/2000/svg"
+
+
+class MapSafetyTest(CliTestBase):
+    """Core review items: plan text can never break the map page, every placeholder is substituted once, and the
+    page loads nothing from the network."""
+
+    def render(self, plan, exts=None):
+        from bp.views import render
+        from bp.views.context import build_context
+        self.write_plan(plan)
+        with extension(exts or {}):
+            loaded = quiet(bplan.load_plan, self.root)[0]
+            state = bplan.load_state(self.root)
+            ctx = build_context(self.root, loaded, state)
+            with mock.patch.object(render, "tab_scripts", lambda: []):
+                return render.render_map(loaded, state, ctx["comp"], ctx)
+
+    @staticmethod
+    def payload(html):
+        start = html.index('<script id="bp" type="application/json">') + len('<script id="bp" type="application/json">')
+        return html[start:html.index("</script>", start)]
+
+    def hostile_plan(self, version):
+        plan = v1_plan() if version == 1 else v2_plan()
+        text = " | ".join(HOSTILE)
+        plan["app"]["name"] = "Snag " + text
+        plan["files"][0]["purpose"] = text
+        plan["files"][0]["path"] = "dir/" + "".join(c for c in text if c not in '<>:"|?*\\  ') + ".txt"
+        plan["modules"][0]["purpose"] = text
+        plan["phases"][0]["name"] = text
+        return plan
+
+    def test_hostile_plan_text_keeps_the_page_whole(self):
+        exts = {"features.py": "def map_payload(ctx):\n    return {'features': [{'id': 'F-x', 'title': "
+                               + repr(" ".join(HOSTILE)) + "}]}\n"}
+        for version in (1, 2):
+            with self.subTest(version=version):
+                plan = self.hostile_plan(version)
+                html = self.render(plan, exts if version == 2 else None)
+                raw = self.payload(html)
+                for ch in "<>&  ":
+                    self.assertNotIn(ch, raw, "embedded data never holds a character the HTML parser reacts to")
+                data = json.loads(raw)
+                self.assertEqual(data["app"]["name"], plan["app"]["name"])
+                self.assertEqual(data["rows"][0]["purpose"], plan["files"][0]["purpose"])
+                self.assertEqual(data["modules"][0]["purpose"], plan["modules"][0]["purpose"])
+                if version == 2:
+                    self.assertEqual(data["features"][0]["title"], " ".join(HOSTILE))
+                self.assertEqual(html.count('<script id="bp" type="application/json">'), 1)
+                tpl = (S.SKILL / "assets" / "map.template.html").read_text(encoding="utf-8")
+                self.assertEqual(html.count("<script"), tpl.count("<script"), "no script element added or lost")
+
+    def test_every_placeholder_is_substituted_once(self):
+        for name in ("__BLUEPRINT_DATA__", "__APP_NAME__", "/*__MINDMAP_JS__*/", "/*__TABS_JS__*/"):
+            with self.subTest(name=name):
+                plan = v2_plan()
+                plan["app"]["name"] = "A " + name + " B"
+                plan["files"][1]["purpose"] = "P " + name
+                html = self.render(plan)
+                title = html[html.index("<title>") + 7:html.index("</title>")]
+                self.assertIn(name.replace("<", "&lt;"), title)
+                self.assertNotIn('"tool"', title, "the payload is never pasted into the title")
+                data = json.loads(self.payload(html))
+                self.assertEqual((data["app"]["name"], data["rows"][1]["purpose"]), (plan["app"]["name"], "P " + name))
+
+    def test_no_network_requests(self):
+        """The map page and every asset name no http(s) URL a browser would load (the SVG namespace is an identifier)."""
+        found = {}
+        for p in sorted((S.SKILL / "assets").iterdir()):
+            if p.suffix in (".html", ".js", ".css"):
+                urls = set(re.findall(r"https?://[^\s'\"<>)]+", p.read_text(encoding="utf-8"))) - {SVG_NS}
+                if urls:
+                    found[p.name] = sorted(urls)
+        html = self.render(v2_plan())
+        urls = set(re.findall(r"https?://[^\s'\"<>)]+", html)) - {SVG_NS}
+        plan_urls = {s["docs"] for s in v2_plan()["stack"]}  # plan text shown as text, never fetched
+        self.assertEqual(found, {})
+        self.assertEqual(urls - plan_urls, set())
+        tpl = (S.SKILL / "assets" / "map.template.html").read_text(encoding="utf-8")
+        self.assertNotIn("<link", tpl)
+        self.assertIn('"IBM Plex Sans"', tpl, "the same family is named first, used when installed locally")
+
+
+class StatusSelectorsTest(CliTestBase):
+    """status --json honours --feature and --milestone as the text form does; an unknown id is the same error."""
+
+    EXTS = {"features.py": '''
+                def status_json(ctx):
+                    return {"features": [{"id": f["id"]} for f in ctx["plan"]["features"]]}
+
+                def status_card(ctx, fid):
+                    return ["card " + fid]
+            ''',
+            "roadmap.py": '''
+                def status_json(ctx):
+                    return {"milestones": [{"id": m["id"]} for m in ctx["plan"]["milestones"]] + [{"id": "M2"}]}
+
+                def status_lines(ctx, args):
+                    return []
+            '''}
+
+    def test_selectors_and_unknown_ids(self):
+        plan = v2_plan()
+        plan["milestones"].append({"id": "M2", "name": "Two", "goal": "g"})
+        self.write_plan(plan)
+        with extension(self.EXTS):
+            code, out, err = self.run_("status", "--json", "--feature", "F-inbox")
+            self.assertEqual(code, 0, err)
+            self.assertEqual(json.loads(out)["features"], [{"id": "F-inbox"}])
+            code, out, err = self.run_("status", "--json", "--milestone", "M2")
+            self.assertEqual(code, 0, err)
+            self.assertEqual(json.loads(out)["milestones"], [{"id": "M2"}])
+            for argv, error in ((["--feature", "F-nope"], "unknown-feature"), (["--milestone", "M9"], "unknown-milestone")):
+                with self.subTest(argv=argv):
+                    code, out, err = self.run_("status", "--json", *argv)
+                    self.assertEqual(code, 1, err)
+                    env = json.loads(out)
+                    self.assertEqual((env["ok"], env["error"]["code"]), (False, error))
+                    self.assertIn(argv[1], env["error"]["message"])
+                    code, out, err = self.run_("status", *argv)
+                    self.assertEqual(code, 1)
+                    self.assertIn(argv[1], err)
+
+
+class ViewNameTest(CliTestBase):
+    def test_a_view_name_with_a_trailing_newline_is_refused(self):  # whole-value patterns use fullmatch
+        from bp.views.render import render_all
+        with extension({"views/features_md.py": "def views(ctx):\n    return {'NOTES.md\\n': " + repr(HEADER + "\n") + "}\n"}):
+            plan = quiet(bplan.load_plan, self.root)[0]
+            with self.assertRaisesRegex(RuntimeError, "features_md"):
+                render_all(self.root, plan, bplan.load_state(self.root), quiet=True)
+
+
+class NextSkipsBlockedFilesTest(CliTestBase):
+    """status --next skips the files ctx["blocked"]["files"] lists (compared with core.path_key) and says how many."""
+
+    UNKNOWNS = '''
+        def context(root, plan, state, ctx):
+            ctx["blocked"]["files"] = ["apps/web/src/INBOX.tsx" if __import__("os").name == "nt" else "apps/web/src/Inbox.tsx"]
+    '''
+
+    def test_blocked_files_are_skipped(self):
+        code, out, _ = self.run_("status", "--next")
+        self.assertIn("apps/web/src/Inbox.tsx", out.split("Ready to build next:")[1])
+        with extension({"unknowns.py": self.UNKNOWNS}):
+            code, out, err = self.run_("status", "--next")
+        self.assertEqual(code, 0, err)
+        ready = out.split("Ready to build next:")[1]
+        self.assertNotIn("apps/web/src/Inbox.tsx", ready)
+        self.assertIn("(1 file(s) skipped: every feature they serve is blocked; see status --unknowns)", ready)
+        self.assertIn("Cargo.toml", ready)
+
+    def test_the_blocked_shape_has_files(self):
+        from bp.views.context import build_context
+        plan = quiet(bplan.load_plan, self.root)[0]
+        ctx = build_context(self.root, plan, bplan.load_state(self.root))
+        self.assertEqual(ctx["blocked"], {"phases": set(), "milestones": set(), "features": set(), "files": [], "by": {}})
+
+
+class OneLineStatusTest(CliTestBase):
+    """Every plan-supplied value the core's status prints stays on one line (an invalid plan can hold newlines)."""
+
+    def test_multi_line_values(self):
+        plan = v2_plan()
+        plan["app"]["name"] = "Snag\nDesk"
+        plan["phases"][0]["name"] = "Walking\nskeleton"
+        plan["files"][0]["path"] = "Cargo\n.toml"
+        plan["roster"][0]["id"] = "cto\narchitect"
+        plan["owners"][0]["owner"] = "cto\narchitect"
+        self.write_plan(plan)
+        state = {"stateVersion": 2, "tasks": {}, "files": {"Cargo\n.toml": {"state": "blocked", "note": "wait\nfor it"}},
+                 "patterns": {}, "unplanned": []}
+        (self.root / ".blueprint" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        code, out, err = self.run_("status", "--next")
+        self.assertEqual(code, 0, err)
+        for needle in ("Snag Desk", "Walking skeleton", "Cargo .toml", "cto architect", "wait for it"):
+            self.assertIn(needle, out)
+        for line in out.splitlines():
+            self.assertNotRegex(line, r"^(Desk|skeleton|\.toml|architect|for it)\b", line)
 
 
 class EndToEndExtensionTest(unittest.TestCase):
