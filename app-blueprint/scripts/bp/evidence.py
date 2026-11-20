@@ -883,6 +883,23 @@ def freshness(root, study, rec, target=None, resolvers=None):
                                                                      "unknown")
 
 
+# Three answers for readers (fail closed): fresh; confirmed gone or changed (CHANGED: stale or missing); cannot tell
+# (unknown). A record whose file or member is gone can no longer be confirmed, so missing counts with stale.
+CHANGED = ("stale", "missing")
+
+
+def is_changed(state):
+    """True for a freshness that says the evidence no longer matches its target: stale or missing."""
+    return state in CHANGED
+
+
+def all_changed(states):
+    """True when there is at least one state and every one is stale or missing (study check's behaviour-stale and
+    study adopt's refusal, 5.6). An unknown or fresh state makes it False."""
+    states = list(states)
+    return bool(states) and all(is_changed(s) for s in states)
+
+
 def freshness_counts(states):
     counts = {s: 0 for s in FRESHNESS}
     for s in states.values():

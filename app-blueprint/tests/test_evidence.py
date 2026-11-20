@@ -468,7 +468,8 @@ class EvidenceCommandTest(TempProject):
     def test_evidence_stale_with_a_target_outside_the_project(self):
         p = FA.make_apk(self.tmp / "vendor.apk", FA.SNAGDESK_MANIFEST, None, None, files={"a.txt": "a"})
         engine.run_study(self.root, "mobile", p, own=True, lanes=[MOBILE])
-        r = self.cli("evidence", "stale", "--study", "S-vendor", "--json", extra={})
+        r = self.cli("evidence", "stale", "--study", "S-vendor", "--strict", "--json", extra={})
+        self.assertEqual(r.returncode, 0)  # unknown (cannot tell) is counted, never a failure
         self.assertEqual(json.loads(r.stdout)["data"]["studies"]["S-vendor"]["unknown"], 2)
         r = self.cli("evidence", "stale", "--study", "S-vendor", "--target", p, "--json", extra={})
         self.assertEqual(json.loads(r.stdout)["data"]["studies"]["S-vendor"]["fresh"], 2)
@@ -476,6 +477,52 @@ class EvidenceCommandTest(TempProject):
         r = self.cli("evidence", "stale", "--study", "S-vendor", "--target", p, "--strict", extra={})
         self.assertEqual(r.returncode, 1)
         self.assertIn("⚠ stale", r.stdout)
+
+    def test_missing_fails_closed_like_stale(self):
+        self.put("docs/a.md", "a\n")
+        self.put("docs/b.md", "b\n")
+        for name in ("a", "b"):
+            self.assertEqual(self.cli("evidence", "add", "--kind", "note.doc", "--key", name, "--claim", "A doc.",
+                                      "--basis", "observed", "--path", f"docs/{name}.md", extra={}).returncode, 0)
+        self.assertEqual(self.cli("evidence", "stale", "--strict", extra={}).returncode, 0)
+        (self.root / "docs/a.md").unlink()
+        r = self.cli("evidence", "stale", "--strict", "--json", extra={})
+        self.assertEqual(r.returncode, 1)
+        data = json.loads(r.stdout)["data"]
+        self.assertEqual((data["studies"]["S-notes"]["missing"], data["stale"]["S-notes"]), (1, []))
+        self.assertEqual(len(data["missing"]["S-notes"]), 1)
+        self.assertIn("⚠ missing", self.cli("evidence", "stale", extra={}).stdout)
+        self.put("docs/b.md", "b changed\n")
+        r = self.cli("evidence", "list", "--stale", "--json", extra={})
+        self.assertEqual(sorted(x["freshness"] for x in json.loads(r.stdout)["data"]["records"]), ["missing", "stale"])
+        text = self.cli("evidence", "list", "--stale", extra={}).stdout
+        self.assertIn("⚠ missing", text)
+        self.assertIn("⚠ stale", text)
+
+    def test_the_three_answers_for_readers(self):
+        self.assertEqual(evidence.CHANGED, ("stale", "missing"))
+        self.assertEqual([evidence.is_changed(s) for s in ("fresh", "stale", "missing", "unknown", None)],
+                         [False, True, True, False, False])
+        self.assertTrue(evidence.all_changed(["stale", "missing"]))
+        self.assertTrue(evidence.all_changed(["missing"]))
+        for states in ([], ["stale", "unknown"], ["stale", "fresh"], ["unknown"]):
+            self.assertFalse(evidence.all_changed(states), states)
+
+
+class PrivateCoreHelperTest(unittest.TestCase):
+    """evidence.write_text depends on core._retry_windows (private) until the core offers a public atomic text
+    writer: fail loudly if it disappears or changes its call shape."""
+
+    def test_retry_windows_still_has_the_shape_write_text_uses(self):
+        import inspect
+        self.assertTrue(callable(getattr(core, "_retry_windows", None)), "core._retry_windows is gone")
+        params = list(inspect.signature(core._retry_windows).parameters.values())
+        self.assertEqual([(p.name, p.kind) for p in params[:2]],
+                         [("fn", inspect.Parameter.POSITIONAL_OR_KEYWORD), ("args", inspect.Parameter.VAR_POSITIONAL)])
+        self.assertEqual(core._retry_windows(lambda a, b: a + b, 2, 3), 5)
+        calls = []
+        self.assertIsNone(core._retry_windows(lambda: calls.append(1)))
+        self.assertEqual(calls, [1])
 
 
 class HooksTest(TempProject):

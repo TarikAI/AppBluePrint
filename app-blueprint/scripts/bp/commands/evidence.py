@@ -178,7 +178,7 @@ def _studies(root, sid):
 
 def _tags(rec, state):
     from bp import evidence
-    out = ["⚠ stale" if state == "stale" else state]
+    out = ["⚠ " + state if state in evidence.CHANGED else state]
     if rec.get("superseded") is True:
         out.append("superseded")
     if evidence.edited(rec):
@@ -196,7 +196,7 @@ def _list(args, root):
             records = [r for r in records if r.get("kind") == args.kind]
         states = freshness_of(root, sid, study, records)
         if args.stale:
-            records = [r for r in records if states.get(r["id"]) == "stale"]
+            records = [r for r in records if evidence.is_changed(states.get(r["id"]))]
         if not records:
             continue
         lines.append(f"{sid} ({len(records)} record{'s' if len(records) != 1 else ''})")
@@ -259,20 +259,21 @@ def _stale(args, root):
         if not target.exists():
             raise BlueprintError("target-not-found", "nothing exists at the --target path given",
                                  next=f"{AGAIN} with the path of the studied file or folder")
-    out, stale, lines = {}, {}, []
+    out, stale, missing, lines = {}, {}, {}, []
     for sid, study in _studies(root, args.study):
         records = evidence.load(root, sid)
         states = freshness_of(root, sid, study, records, target)
         out[sid] = evidence.freshness_counts(states)
         stale[sid] = sorted(i for i, s in states.items() if s == "stale")
+        missing[sid] = sorted(i for i, s in states.items() if s == "missing")
         c = out[sid]
         lines.append(f"{sid}: {c['fresh']} fresh, {c['stale']} stale, {c['missing']} missing, {c['unknown']} unknown")
-        lines += [f"  ⚠ stale {i}" for i in stale[sid]]
+        lines += [f"  ⚠ stale {i}" for i in stale[sid]] + [f"  ⚠ missing {i}" for i in missing[sid]]
     if not out:
         lines = ["No studies yet."]
-    emit(args, args.cmd, {"studies": out, "stale": stale}, lines)
-    if args.strict and any(stale.values()):
-        sys.exit(1)
+    emit(args, args.cmd, {"studies": out, "stale": stale, "missing": missing}, lines)
+    if args.strict and (any(stale.values()) or any(missing.values())):
+        sys.exit(1)  # fail closed: evidence that changed or is gone fails; unknown (cannot tell) is only counted
 
 
 def _export(args, root):
