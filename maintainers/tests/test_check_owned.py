@@ -821,10 +821,10 @@ class RealPlanTests(unittest.TestCase):
     def test_the_dogfood_plan_gives_the_expected_owners(self):
         tool, plan = self.plan()
         want = {"app-blueprint/scripts/bp/roadmap.py": "W1-R", "app-blueprint/scripts/bp/core.py": "W0-A2",
-                "app-blueprint/scripts/bp/data.py": "W0-A2", "app-blueprint/scripts/bp/views/__init__.py": "W0-A1",
+                "app-blueprint/scripts/bp/data.py": "W0-A2", "app-blueprint/scripts/bp/views/__init__.py": "W0-A2",
                 "app-blueprint/scripts/bp/version.py": "orchestrator", "app-blueprint/scripts/blueprint.py": "orchestrator",
                 "CHANGELOG.md": "orchestrator", "app-blueprint/tests/fixtures_text.py": "W2-FX2",
-                "app-blueprint/tests/data/android/sub/deep.bin": "W2-FX1", "app-blueprint/tests/data/v1/a/b.json": "W0-A1",
+                "app-blueprint/tests/data/android/sub/deep.bin": "W2-FX1", "app-blueprint/tests/data/v1/a/b.json": "W0-A2",
                 "maintainers/learn.py": "W3-L", "README.md": "W3-R2",
                 "examples/snag-desk/.blueprint/state.json": "orchestrator", ".blueprint/blueprint.json": "orchestrator",
                 "maintainers/check_owned.py": "W0-C", "maintainers/tests/test_check_owned.py": "W0-C"}
