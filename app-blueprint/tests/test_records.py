@@ -1019,6 +1019,7 @@ class AcceptTest(Project):
     def test_a_fail_makes_the_feature_failed_and_a_later_pass_accepts_it_again(self):
         r = self.accept("--result", "C3=fail")
         self.assertEqual((r.returncode, r.stdout), (1, "F-log-snag: failed (C3 fail)\n"))
+        self.assertEqual(self.records()[-1]["verdict"], "fail")
         self.assertEqual(self.status_of()["status"], "failed")
         self.accepted()  # re-evaluation is allowed from failed, and the later evaluation decides
         r = self.accept("--result", "C3=pass")  # and from accepted
@@ -1991,6 +1992,11 @@ class ReviewOneTest(Project):
         self.ok("verify", "--feature", FID, "--run", "--by", "evaluator")
 
     # ---- F3: everyone who ever worked on an item
+    def test_a_forged_evaluation_by_someone_outside_the_roster_counts_for_nothing(self):
+        plan, state = self.load()
+        write_lines(self.root, FID, valid_evaluation(self.root, plan, by="nobody"))
+        self.assertEqual(self.status_of()["status"], "verified")
+
     def test_f3_workedby_covers_past_builders(self):
         plan, state = self.load()
         feature = feature_of(plan)
@@ -2066,6 +2072,18 @@ class ReviewOneTest(Project):
         for bad in ("sha256:abc", "SHA256:" + "0" * 64, "0" * 64, "sha256:" + "0" * 64 + "\n", "sha256:" + "G" * 64):
             r = self.cli("accept", FID, "--by", "evaluator", "--mode", "cli", "--proof", bad, "--json")
             self.assertEqual((r.returncode, json.loads(r.stdout)["error"]["code"]), (64, "usage"), bad)
+
+    def test_f4_a_wrong_pin_is_refused_before_the_lock_is_taken(self):
+        from bp import records
+        plan, state = self.load()
+        ctx = build_context(self.root, plan, state)
+
+        def no_lock(root):
+            raise AssertionError("the lock was taken for a pin that is already wrong")
+        with mock.patch.object(core, "state_lock", no_lock), self.assertRaises(BlueprintError) as cm:
+            records.record_evaluation(self.root, plan, FID, "evaluator", "cli", {"C3": "pass"}, [], None, ctx=ctx,
+                                      proof="sha256:" + "0" * 64)
+        self.assertEqual(cm.exception.error, "proof-changed")
 
     def test_f4_a_change_after_the_check_but_before_the_write_is_seen_inside_the_lock(self):
         from bp import records

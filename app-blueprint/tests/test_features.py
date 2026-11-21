@@ -1591,7 +1591,7 @@ class IndependenceTest(unittest.TestCase):
     def test_spellings_that_fold_together_are_one_person_and_only_refuse(self):
         self.feature["owner"] = "Backend-Lead "
         self.assertNotIn("backend-lead", self.who())
-        for by in ("evaluator ", "Evaluator", "", " ", None, 5):
+        for by in ("evaluator ", "Evaluator", "", " ", None, 5, "nobody"):
             self.assertIsNotNone(features.independence_problem(self.plan, self.feature, self.items, by), repr(by))
 
     def test_everyone_who_ever_claimed_or_marked_an_item_is_not_independent(self):
