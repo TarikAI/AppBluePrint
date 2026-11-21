@@ -1598,7 +1598,10 @@ class IndependenceTest(unittest.TestCase):
         """The core grows `workedBy` with each claim and mark; the latest `by` alone forgets the first builder."""
         state = {"files": {"crates/snag-api/src/main.rs": {"state": "built", "by": "backend-lead", "workedBy": ["evaluator", "backend-lead"]}}}
         self.assertNotIn("evaluator", self.who(state))
-        self.assertIn("evaluator", self.who({"files": {"crates/snag-api/src/main.rs": {"by": "backend-lead", "workedBy": "evaluator"}}}))
+        self.assertEqual(self.who({"files": {"crates/snag-api/src/main.rs": {"by": "backend-lead", "workedBy": "evaluator"}}}), [],
+                         "a damaged workedBy: nobody can be shown to be independent")
+        self.assertNotIn("evaluator", self.who({"files": {"crates/snag-api/src/main.rs": {"by": "evaluator", "workedBy": ["backend-lead"]}}}),
+                         "the latest by is always read too")
         self.assertEqual(features.worked_by({"by": "a", "workedBy": ["b", 5, "c"]}).count("b"), 1)
         self.assertEqual(features.worked_by(None), [])
 

@@ -314,10 +314,10 @@ class ReaderTest(Isolated, TempRoot):
         write_lines(self.root, FID, other, dict(good, id="vr-ABCDEF012345"), dict(good, id="vr-" + "0" * 13), dict(good, id=7))
         self.assertEqual(self.read(), ([], 4))
 
-    def test_the_first_of_two_records_with_one_id_wins(self):
+    def test_the_first_of_two_records_with_one_id_keeps_its_place_and_the_copy_is_damage(self):
         good = valid_check(self.root, self.plan)
         write_lines(self.root, FID, good, good)
-        self.assertEqual(self.read(), ([good], 0))
+        self.assertEqual(self.read(), ([good], 1))
 
     def test_a_file_that_is_a_folder_or_a_link_reads_as_empty_and_damaged(self):
         (self.root / ".blueprint" / "verification" / f"{FID}.jsonl").mkdir(parents=True)
@@ -1068,8 +1068,12 @@ class AcceptTest(Project):
         self.ok("claim", ITEMS[0], "--by", "evaluator", "--force")
         e = self.refused("--result", "C3=pass", error="not-independent")
         self.assertIn(f"evaluator claimed or built {ITEMS[0]}", e["message"])
-        self.ok("claim", ITEMS[0], "--by", "backend-lead")  # the owner takes it back: the last claim decides
-        self.assertEqual(self.accept("--result", "C3=pass").returncode, 0)
+        self.ok("claim", ITEMS[0], "--by", "backend-lead")  # the owner takes it back
+        state = json.loads((self.root / ".blueprint" / "state.json").read_text(encoding="utf-8"))
+        if "workedBy" in state["files"][ITEMS[0]]:  # the core remembers everyone who claimed or marked it: still refused
+            self.refused("--result", "C3=pass", error="not-independent")
+        else:  # without the core's writer only the latest `by` is on record
+            self.assertEqual(self.accept("--result", "C3=pass").returncode, 0)
 
     def test_no_flag_skips_the_independence_check(self):
         for flag in ("--force", "--skip-independent", "--allow-owner"):
@@ -1938,7 +1942,7 @@ class ReviewOneTest(Project):
         self.assertEqual(got, ["fail", "pass", "fail"])
         self.assertEqual(self.ctx()["checks"][FID]["criteria"]["C1"]["result"], "fail")
 
-    def test_f1_a_hand_copied_line_keeps_its_last_place(self):
+    def test_f1_a_repeated_id_is_damage_and_the_first_keeps_its_place(self):
         from bp import records
         plan, state = self.load()
         a = valid_check(self.root, plan, cid="C1")
@@ -1948,7 +1952,8 @@ class ReviewOneTest(Project):
         for name in (FID,):
             (path / f"{name}.jsonl").unlink(missing_ok=True)
         write_lines(self.root, FID, a, b, a)
-        self.assertEqual([r["id"] for r in records.read_records(self.root, FID)[0]], [b["id"], a["id"]])
+        got, damaged = records.read_records(self.root, FID)
+        self.assertEqual(([r["id"] for r in got], damaged), ([a["id"], b["id"]], 1))
 
     # ---- F2: the latest current evaluation decides, whoever wrote it
     def _fail_then_lose_independence(self, how):
@@ -2005,11 +2010,15 @@ class ReviewOneTest(Project):
         self.assertIn("claimed or built", features.independence_problem(plan, feature, items, "evaluator", state))
         self.assertIsNotNone(features.independence_problem(plan, feature, items, "evaluator", {"files": {ITEMS[1]: {"workedBy": ["evaluator"]}}}))
         self.assertIsNone(features.independence_problem(plan, feature, items, "evaluator", {"files": {"other": {"workedBy": ["evaluator"]}}}))
-        for junk in (None, 5, "evaluator", [5], {"a": 1}):
-            got = features.independence_problem(plan, feature, items, "evaluator", {"files": {ITEMS[0]: {"workedBy": junk}}})
-            self.assertIsNone(got, junk)  # a damaged list names nobody; the latest by still does
+        for junk in (5, "evaluator", [5], {"a": 1}, [None], True):  # damaged: nobody can be shown to be independent
+            for who in ("evaluator", "cto-architect", "nobody"):
+                got = features.independence_problem(plan, feature, items, who, {"files": {ITEMS[0]: {"workedBy": junk}}})
+                self.assertIn("damaged", got or "", (junk, who))
+                self.assertIn("repair .blueprint/state.json", got)
+        self.assertIsNone(features.independence_problem(plan, feature, items, "evaluator", {"files": {ITEMS[0]: {"workedBy": None}}}))  # null: absent
         self.assertIsNotNone(features.independence_problem(plan, feature, items, "evaluator",
-                                                             {"files": {ITEMS[0]: {"by": "evaluator", "workedBy": 5}}}))
+                                                             {"files": {ITEMS[0]: {"by": "evaluator", "workedBy": []}}}))
+        self.assertEqual(features.independent_ids(plan, feature, items, None, {"files": {ITEMS[1]: {"workedBy": 5}}}), [])
 
     def test_f3_the_reviewers_sequence_through_accept(self):
         """The evaluator claims and marks, the owner re-marks: with the core's workedBy the evaluator is still refused."""
@@ -2205,3 +2214,192 @@ class ReviewOneTest(Project):
                                           evidence_ids=known)
             self.assertEqual(cm.exception.error, "evidence-not-found", known)
         records.record_evaluation(self.root, plan, FID, "evaluator", "cli", {"C3": "pass"}, [], None, ctx=ctx, evidence_ids=5)  # nothing cited
+
+
+# ======================================================================================= review round 2
+
+class ReviewTwoTest(Project):
+    """The findings of the second review (R2-1 to R2-8)."""
+
+    def setUp(self):
+        super().setUp()
+        self.ready()
+
+    def proof(self, fid=FID):
+        return json.loads(self.ok("verify", "--feature", fid, "--json").stdout)["data"]["proof"]
+
+    def ready_after_edit(self):
+        self.prove()
+        self.ok("verify", "--feature", FID, "--run", "--by", "evaluator")
+
+    # ---- R2-1: the pin covers the files, every criterion and the feature's level
+    def test_r2_1_anything_the_evaluator_judged_against_is_pinned(self):
+        edits = {
+            "criterion text": lambda p: feature_of(p)["criteria"][2].update(expected="It shows, and the snag list is wiped"),
+            "criterion scenario": lambda p: feature_of(p)["criteria"][2].update(scenario="another start"),
+            "criterion level": lambda p: feature_of(p)["criteria"][2].update(level="integration"),
+            "criterion verify": lambda p: feature_of(p)["criteria"][0].update(verify="exit 0 "),
+            "criterion verifyLevel": lambda p: feature_of(p)["criteria"][0].update(verifyLevel="e2e"),
+            "criterion added": lambda p: feature_of(p)["criteria"].append({"id": "C4", "scenario": "s", "action": "a", "expected": "e"}),
+            "criterion removed": lambda p: feature_of(p)["criteria"].pop(1),
+            "feature level": lambda p: feature_of(p).update(level="unit"),
+        }
+        for name, edit in edits.items():
+            self.write_plan(base_plan())
+            for rel in ALL_FILES:
+                self.touch(rel)
+            self.ready()
+            digest = self.proof()
+            self.edit_plan(edit)
+            self.ready_after_edit()
+            before = self.raw_lines()
+            r = self.accept("--result", "C3=pass", "--proof", digest, "--json")
+            out = json.loads(r.stdout)
+            self.assertEqual((r.returncode, out["error"]["code"]), (1, "proof-changed"), (name, r.stdout))
+            self.assertEqual(self.raw_lines(), before, name)
+
+    def test_r2_1_the_digest_is_the_same_when_nothing_changed_and_the_record_stores_its_pin(self):
+        digest = self.proof()
+        self.assertEqual(self.proof(), digest)
+        r = self.accept("--result", "C3=pass", "--proof", digest, "--json")
+        self.assertEqual(json.loads(r.stdout)["data"]["proof"], digest)
+        self.assertEqual(self.records()[-1]["pin"], digest)
+        self.assertEqual(set(self.records()[-1]["proof"]), {"files"})
+        self.assertEqual(self.status_of()["status"], "accepted")
+
+    def test_r2_1_the_criteria_are_pinned_inside_the_lock_too(self):
+        from bp import records
+        digest = self.proof()
+        real = core.state_lock
+
+        @contextlib.contextmanager
+        def racing(root):
+            with real(root):
+                self.edit_plan(lambda p: feature_of(p)["criteria"][2].update(expected="changed in the race"))
+                yield
+        plan, state = self.load()
+        ctx = build_context(self.root, plan, state)
+        before = self.raw_lines()
+        with mock.patch.object(core, "state_lock", racing), self.assertRaises(BlueprintError) as cm:
+            records.record_evaluation(self.root, plan, FID, "evaluator", "cli", {"C3": "pass"}, [], None, ctx=ctx, proof=digest)
+        self.assertEqual(cm.exception.error, "proof-changed")
+        self.assertEqual(self.raw_lines(), before)
+
+    # ---- R2-6: the check inside the lock does not trust the hash cache
+    def test_r2_6_a_same_size_edit_with_the_time_restored_is_seen_inside_the_lock(self):
+        from bp import records
+        digest = self.proof()
+        path = self.root / ITEMS[0]
+        real = core.state_lock
+
+        @contextlib.contextmanager
+        def racing(root):
+            with real(root):
+                st = os.stat(path)
+                data = path.read_bytes()
+                path.write_bytes(bytes([data[0] ^ 1]) + data[1:])  # same size, different content
+                os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))  # the time restored: the cache key is unchanged
+                yield
+        plan, state = self.load()
+        ctx = build_context(self.root, plan, state)
+        before = self.raw_lines()
+        with mock.patch.object(core, "state_lock", racing), self.assertRaises(BlueprintError) as cm:
+            records.record_evaluation(self.root, plan, FID, "evaluator", "cli", {"C3": "pass"}, [], None, ctx=ctx, proof=digest)
+        self.assertEqual(cm.exception.error, "proof-changed")
+        self.assertEqual(self.raw_lines(), before)
+
+    def test_r2_8_what_the_record_holds_is_what_was_pinned(self):
+        """The record built before the lock has other files than the pin (they changed and changed back): the record is
+        written again from the files read under the lock."""
+        from bp import records
+        digest = self.proof()
+        plan, state = self.load()
+        ctx = build_context(self.root, plan, state)
+        real = records.current_proof
+        calls = []
+
+        def odd(root, plan_, state_, fid, fresh=False):
+            pin, files = real(root, plan_, state_, fid, fresh)
+            if not fresh and not calls:
+                calls.append(1)
+                return pin, files
+            if not fresh:  # the second unfresh call is the one that builds the record
+                return "sha256:" + "1" * 64, {"other.txt": "sha256:" + "2" * 64}
+            return pin, files
+        with mock.patch.object(records, "current_proof", odd):
+            rec = records.record_evaluation(self.root, plan, FID, "evaluator", "cli", {"C3": "pass"}, [], None, ctx=ctx, proof=digest)
+        self.assertEqual((rec["pin"], sorted(rec["proof"]["files"])), (digest, sorted(ITEMS)))
+        self.assertEqual(self.records()[-1]["id"], rec["id"])
+
+    # ---- R2-5: a copied line cannot move an old pass behind a later fail
+    def test_r2_5_copying_an_old_pass_line_does_not_accept(self):
+        self.edit_plan(lambda p: roster_add(p, "eval2"))
+        self.assertEqual(self.accept("--result", "C3=pass").returncode, 0)
+        lines = [x for x in self.raw_lines() if x]
+        old_pass = lines[-1]
+        self.assertEqual(self.accept("--result", "C3=fail", by="eval2").returncode, 1)
+        self.assertEqual(self.status_of()["status"], "failed")
+        with open(self.root / ".blueprint" / "verification" / f"{FID}.jsonl", "ab") as f:
+            f.write(old_pass + b"\n")
+        self.assertEqual(self.status_of()["status"], "failed")
+
+    # ---- R2-3 / R2-4 with the state a core copy would leave
+    def test_r2_3_the_latest_by_is_always_read_even_when_workedby_lacks_it(self):
+        for rec in ({"by": "evaluator", "workedBy": ["backend-lead"]}, {"by": "evaluator"}, {"by": "evaluator", "workedBy": []}):
+            self.assertIn("evaluator", features.worked_by(rec), rec)
+        fake = mock.Mock(return_value=["backend-lead"])
+        from bp import status as st
+        with mock.patch.object(st, "worked_by", fake, create=True):
+            self.assertEqual(sorted(set(features.worked_by({"by": "evaluator", "workedBy": ["x"]}))), ["backend-lead", "evaluator", "x"])
+            plan, state = self.load()
+            state["files"][ITEMS[0]] = {"state": "built", "by": "evaluator", "workedBy": ["backend-lead"]}
+            self.assertIsNotNone(features.independence_problem(plan, feature_of(plan), [{"path": ITEMS[0]}], "evaluator", state))
+
+    def test_r2_4_a_damaged_workedby_in_state_json_refuses_every_acceptor_through_accept(self):
+        path = self.root / ".blueprint" / "state.json"
+        state = json.loads(path.read_text(encoding="utf-8"))
+        state["files"].setdefault(ITEMS[0], {})["workedBy"] = "evaluator"
+        path.write_text(json.dumps(state), encoding="utf-8")
+        for by in ("evaluator", "cto-architect"):
+            r = self.cli("accept", FID, "--by", by, "--mode", "cli", "--result", "C3=pass", "--json")
+            out = json.loads(r.stdout)
+            self.assertEqual((r.returncode, out["error"]["code"]), (3, "not-independent"), r.stdout)
+        # the core may call this bad-state first; this module never reads it as "nobody worked on it"
+
+    # ---- R2-7 and R2-8: evidence
+    def test_r2_7_a_string_or_bytes_cannot_answer_membership(self):
+        from bp import records
+        plan, state = self.load()
+        ctx = build_context(self.root, plan, state)
+        for known in ("ev-0123456789abcdef0", b"ev-0123456789abcdef0", bytearray(b"ev-0123456789abcdef"), 5, object()):
+            with self.assertRaises(BlueprintError) as cm:
+                records.record_evaluation(self.root, plan, FID, "evaluator", "cli", {"C3": "pass"}, ["ev-0123456789abcdef"], None, ctx=ctx,
+                                          evidence_ids=known)
+            self.assertEqual(cm.exception.error, "evidence-not-found", repr(known))
+        for known in ({"ev-0123456789abcdef"}, ["ev-0123456789abcdef"], ("ev-0123456789abcdef",), frozenset({"ev-0123456789abcdef"}),
+                      {"ev-0123456789abcdef": 1}):
+            records.record_evaluation(self.root, plan, FID, "evaluator", "cli", {"C3": "pass"}, ["ev-0123456789abcdef"], None, ctx=ctx,
+                                      evidence_ids=known)
+
+    def test_r2_8_the_command_reads_evidence_ids_from_validate_context(self):
+        import argparse
+        stub = "def validate_context(root, plan):\n    return {'evidenceIds': ['ev-0123456789abcdef']}\n"
+        with extension(dict(own_sources(), **{"evidence.py": stub})):
+            from bp.commands import records as cr
+            def run(evidence):
+                args = argparse.Namespace(root=str(self.root), feature=FID, by="evaluator", mode="cli", result=["C3=pass"],
+                                          evidence=evidence, proof=None, note=None, json=True)
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
+                    try:
+                        cr.cmd_accept(args)
+                    except SystemExit as e:
+                        return e, buf.getvalue()
+                return None, buf.getvalue()
+            before = self.raw_lines()
+            e, _ = run(["ev-fedcba9876543210"])
+            self.assertEqual((getattr(e, "error", None), getattr(e, "code", None)), ("evidence-not-found", 1))
+            self.assertEqual(self.raw_lines(), before)
+            e, out = run(["ev-0123456789abcdef"])
+            self.assertEqual(getattr(e, "code", None), 0)
+            self.assertEqual(self.records()[-1]["evidence"], ["ev-0123456789abcdef"])

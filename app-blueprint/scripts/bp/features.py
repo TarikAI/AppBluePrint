@@ -680,21 +680,36 @@ def _same_person(a, b):
     return isinstance(a, str) and isinstance(b, str) and _fold(a) != "" and (a == b or _fold(a) == _fold(b))
 
 
+def worked_damage(rec):
+    """True when a file record's `workedBy` is present but is not a list of strings (null counts as absent), or the
+    record itself is neither an object nor null: nobody can then be shown to be independent of that file."""
+    if rec is None:
+        return False
+    if not isinstance(rec, dict):
+        return True
+    wb = rec.get("workedBy")
+    return wb is not None and not (isinstance(wb, list) and all(isinstance(x, str) for x in wb))
+
+
 def worked_by(rec):
-    """Every id recorded as having claimed or marked a file: the core's `status.worked_by` when it has one, else the
-    same reading here (`workedBy`, a list of strings, plus the latest `by`). A damaged value names nobody."""
+    """Every id recorded as having claimed or marked a file: always the union of the core's `status.worked_by` answer
+    (when the core has that reader), the `workedBy` list of the record and its latest `by`. A damaged `workedBy`
+    contributes nothing here; `worked_damage` says it is damaged and `independence_problem` then refuses everyone."""
+    ids = []
     try:
         from bp import status
         reader = getattr(status, "worked_by", None)
-        if callable(reader):
+        if callable(reader) and isinstance(rec, dict):
             got = reader(rec)
-            return [x for x in got if isinstance(x, str)] if isinstance(got, (list, tuple, set)) else []
-    except ImportError:
+            ids += [x for x in got if isinstance(x, str)] if isinstance(got, (list, tuple, set)) else []
+    except (ImportError, TypeError, ValueError, AttributeError):
         pass
-    if not isinstance(rec, dict):
-        return []
-    ids = [x for x in rec.get("workedBy") if isinstance(x, str)] if isinstance(rec.get("workedBy"), list) else []
-    return ids + ([rec["by"]] if isinstance(rec.get("by"), str) else [])
+    if isinstance(rec, dict):
+        if isinstance(rec.get("workedBy"), list):
+            ids += [x for x in rec["workedBy"] if isinstance(x, str)]
+        if isinstance(rec.get("by"), str):
+            ids.append(rec["by"])
+    return ids
 
 
 def independence_problem(plan, feature, items, by, state=None, _roster=None):
@@ -705,12 +720,17 @@ def independence_problem(plan, feature, items, by, state=None, _roster=None):
     feature's items, not the files they depend on: someone who wrote a `dependsOn` file may still accept.
     Ids are compared whole-value, except that two ids that fold to the same value (NFKC, case, outer whitespace)
     count as one person: that can only refuse."""
+    files = state.get("files") if isinstance(state, dict) and isinstance(state.get("files"), dict) else {}
+    for it in items:  # a damaged record is judged first, for every id: nobody can be shown to be independent of it
+        path = it.get("path") if isinstance(it, dict) else None
+        if isinstance(path, str) and worked_damage(files.get(path)):
+            return (f"the record of {path} in .blueprint/state.json is damaged (workedBy must be a list of ids), so nobody can be "
+                    "shown to be independent of it: repair .blueprint/state.json")
     roster = _roster if _roster is not None else roster_ids(plan)
     if not isinstance(by, str) or not by.strip() or by not in roster:
         return f"{by!r} is not in the roster"
     if _same_person(by, feature.get("owner")):
         return f"{by} is the owner of {_s(feature.get('id')) or 'the feature'}"
-    files = state.get("files") if isinstance(state, dict) and isinstance(state.get("files"), dict) else {}
     for it in items:
         path = it.get("path") if isinstance(it, dict) else None
         if not isinstance(path, str):

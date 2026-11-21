@@ -27,7 +27,8 @@ def register(name, p):
                    help="what you saw for a criterion you actually checked: pass, fail, skipped or unknown (repeat the flag)")
     p.add_argument("--evidence", action="append", default=[], metavar="ev-ID", help="an evidence id for what you observed (repeat the flag)")
     p.add_argument("--proof", metavar="DIGEST",
-                   help="the proof digest that `verify --feature F` showed when you looked: refused if the files have changed since")
+                   help="the `proof` digest that `verify --feature F` showed when you looked; it covers the files, every criterion "
+                        "(text, level, verify, verifyLevel) and the feature's level, and accept refuses if any of them changed since")
     p.add_argument("--note", help="free text, kept redacted")
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_accept)
@@ -106,7 +107,7 @@ def cmd_accept(args):
     _refresh_views(args, root, fresh or plan)
     fails = sorted(cid for cid, r in rec["criteria"].items() if r["result"] == "fail")
     accepted = after == "accepted" and rec["verdict"] == "pass"
-    digest = records.proof_digest(rec["proof"]["files"])
+    digest = rec["pin"]
     if accepted:
         line = f"{fid}: accepted by {rec['by']} ({rec['mode']}, {rec['level']})"
         if pin is None:

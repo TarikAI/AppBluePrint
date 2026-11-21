@@ -191,11 +191,21 @@ def _present(root, paths):
     return out
 
 
-def _now_files(root, plan, state, fid, index=None):
-    """The files of a feature's proof as they are now: proof_inputs of the item paths that exist (4.5)."""
+def _now_files(root, plan, state, fid, index=None, fresh=False):
+    """The files of a feature's proof as they are now: proof_inputs of the item paths that exist (4.5). With `fresh`
+    every file is read and hashed again, never taken from the per-process hash cache (the check inside the lock)."""
     paths = (index if index is not None else _item_index(plan, state)).get(fid, [])
     present = _present(root, paths)
-    return status.proof_inputs(root, plan, present) if present else {}
+    files = status.proof_inputs(root, plan, present) if present else {}
+    if fresh:
+        again = {}
+        for p in files:
+            try:
+                again[p] = core.proof_digest(root / p)
+            except OSError:
+                pass  # a file that cannot be read now is not in the proof: the pin then differs
+        files = again
+    return files
 
 
 def feature_proof(root, plan, state, comp, fid):
@@ -285,6 +295,8 @@ def _valid_record(rec, fid=None):
                     and _int(rep["passed"]) and rep["passed"] <= rep["n"]
                     and (rec["result"] != "pass" or (rep["passed"] == rep["n"] and rec.get("exit") == 0)))  # pass: every run, exit 0
         crit = rec.get("criteria")
+        if "pin" in rec and not (isinstance(rec["pin"], str) and DIGEST.fullmatch(rec["pin"])):
+            return False
         return (rec.get("verdict") in VERDICTS and rec.get("mode") in MODES and rec.get("level") == MODES[rec["mode"]]
                 and isinstance(crit, dict)
                 and all(isinstance(k, str) and isinstance(v, dict) and v.get("result") in RESULT_ARGS
@@ -325,7 +337,7 @@ def read_records(root, fid):
     """(records, damaged): the readable records of one feature in file order, and how many non-blank lines were
     ignored. A line is damaged when it is truncated, not UTF-8, not JSON, nested too deeply, holds NaN or Infinity,
     is not a whole record of its kind (4.6, wrong types included), names another feature, or carries an id that is not
-    the content id of the record (a hand edit); the first of two records with one id wins. A file that is a link or
+    the content id of the record (a hand edit), or repeats an id already read (a copy: the first keeps its place). A file that is a link or
     not a regular file is read as empty and counted damaged. Never raises."""
     try:
         path = records_path(root, fid)
@@ -353,7 +365,9 @@ def read_records(root, fid):
                 if not _valid_record(rec, fid) or _rec_id(rec) != rec["id"]:
                     damaged += 1
                     continue
-                out.pop(rec["id"], None)  # the same line twice (a hand copy): the last one holds the position
+                if rec["id"] in out:  # a nonce makes equal ids impossible for real events: a copy is damage, the first stays
+                    damaged += 1
+                    continue
                 out[rec["id"]] = rec
         return list(out.values()), damaged
     except (OSError, ValueError, RecursionError):
@@ -872,7 +886,7 @@ def verify_feature(args, ctx):
         if as_json:  # the envelope carries the proof too (the hook may add nothing to {"records": ...} itself)
             print(json.dumps({"ok": True, "command": "verify", "data": {"records": [], "proof": digest}}, indent=2, ensure_ascii=False))
             sys.exit(0)
-        say(f"proof: {digest}    # pin it with: accept {fid} --proof <this digest> ...")
+        say(f"proof: {digest}    # covers the files, every criterion and the feature's level; pin it with: accept {fid} --proof <this digest> ...")
         return listed, 0
     outcome = run_feature_checks(root, plan, fid, criterion, repeat, timeout, by, quiet=as_json, state=state)
     for cid, cmd, rec in outcome.lines:
@@ -1012,21 +1026,26 @@ def _refuse_acceptor(root, plan, state, fid, feature, by):
                            f"then run: {_bp(root, 'validate')}"), code=3)
 
 
-def proof_digest(files):
-    """The digest an evaluator pins with `accept --proof` and sees in `verify --feature F`: sha256 of the canonical JSON
-    of the feature proof's files, in the form `sha256:<64 hex>`."""
-    return sha256_bytes(canonical_json({"files": files}))
+def pin_digest(files, criteria, level):
+    """The digest an evaluator pins with `accept --proof` and sees in `verify --feature F` (shown as `proof`): sha256
+    of the canonical JSON of {"files": the feature proof's files, "criteria": {id: criterion digest} for every
+    criterion with an id of its own, "level": the feature's required level}, in the form `sha256:<64 hex>`. It covers
+    what the evaluator judged against: the files, the text of every criterion (and its level, verify and verifyLevel)
+    and the feature's level. The record's own `proof` stays the files alone; the record also stores this as `pin`."""
+    return sha256_bytes(canonical_json({"files": files, "criteria": criteria, "level": level}))
 
 
-def current_proof(root, plan, state, fid):
-    """(digest, files) of the feature's proof as it is now."""
-    files = _now_files(root, plan, state, fid)
-    return proof_digest(files), files
+def current_proof(root, plan, state, fid, fresh=False):
+    """(pin, files) of the feature as it is now: the pin digest and the files of the proof it contains."""
+    feature = section_index(plan, "features").get(fid) or {}
+    files = _now_files(root, plan, state, fid, fresh=fresh)
+    criteria = {cid: _digest_or_none(c) for c, cid, ok in _criteria(feature) if ok}
+    return pin_digest(files, criteria, features.feature_level(feature)), files
 
 
 def _proof_changed(root, fid, pinned, now):
-    return _error("proof-changed", f"the files of {fid} are not the ones you looked at (you pinned {pinned}, they are now {now}); "
-                  "look again, then accept what you saw", entry=f"feature {fid}",
+    return _error("proof-changed", f"{fid} is not what you looked at: its files, its criteria or its level changed (you pinned "
+                  f"{pinned}, it is now {now}); look again, then accept what you saw", entry=f"feature {fid}",
                   next=_bp(root, f"verify --feature {fid}", "commands/progress"))
 
 
@@ -1035,9 +1054,9 @@ def _check_evidence(root, fid, evidence, known):
     1.4) when it is supplied: anything that is not None is a supplied value, and one that cannot answer `in` refuses."""
     if known is None or not evidence:
         return
-    try:
+    if isinstance(known, (list, tuple, set, frozenset, dict)):
         missing = [e for e in evidence if e not in known]
-    except TypeError:
+    else:  # a str or bytes would answer by substring, anything else cannot answer: it cannot be checked, so it refuses
         missing = list(evidence)
     if missing:
         raise _error("evidence-not-found", f"evidence {', '.join(missing[:3])} is not in this project's evidence",
@@ -1074,8 +1093,9 @@ def record_evaluation(root, plan, fid, by, mode, results, evidence, note, ctx=No
         if now != proof:
             raise _proof_changed(root, fid, proof, now)
     level = MODES[mode]
+    pin_now, pin_files = current_proof(root, plan, state, fid)
     rec = {"at": now_iso(), "tool": TOOL_VERSION, "kind": "evaluation", "feature": fid, "by": by,
-           "proof": feature_proof(root, plan, state, ctx.get("comp"), fid), "note": _clean_note(note, root),
+           "proof": {"files": pin_files}, "pin": pin_now, "note": _clean_note(note, root),
            "verdict": "partial", "mode": mode, "level": level,
            "criteria": {cid: {"result": r, "note": None, "digest": criterion_digest(by_id[cid])} for cid, r in results.items()},
            "evidence": list(evidence or []), "independent": True}
@@ -1089,12 +1109,12 @@ def record_evaluation(root, plan, fid, by, mode, results, evidence, note, ctx=No
         _need_roster(root, fresh_plan, by, f"feature {fid}")
         _refuse_acceptor(root, fresh_plan, fresh_state, fid, fresh_feature, by)
         out = rec
-        if proof is not None:  # the files, digested again under the lock (unchanged files come from the hash cache)
-            now, files = current_proof(root, fresh_plan, fresh_state, fid)
+        if proof is not None:  # the one hashing under the lock: the files read and digested afresh, never from the cache
+            now, files = current_proof(root, fresh_plan, fresh_state, fid, fresh=True)
             if now != proof:
                 raise _proof_changed(root, fid, proof, now)
-            if files != rec["proof"]["files"]:
-                out = _finish({k: v for k, v in dict(rec, proof={"files": files}).items() if k not in ("id", "nonce")})
+            if files != rec["proof"]["files"] or now != rec["pin"]:  # what the record holds is what was pinned
+                out = _finish({k: v for k, v in dict(rec, proof={"files": files}, pin=now).items() if k not in ("id", "nonce")})
         return [out], [{"event": "accept", "feature": fid, "by": by, "mode": mode, "verdict": out["verdict"], "record": out["id"]}]
     saved = _commit(root, fid, decide)
     return saved[0]
