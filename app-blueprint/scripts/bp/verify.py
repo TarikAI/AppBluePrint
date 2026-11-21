@@ -68,14 +68,16 @@ def verify_groups(plan, phase=None, owner=None, only=None, state=None, root=None
 def project_instance(root, inst):
     """True for a recorded instance that names a file of this project as it is written: normalised (forward slashes,
     no '.' or '..' segment), relative, not in .blueprint/, and core.project_path resolves it to itself (no link
-    leading elsewhere, nothing outside the root)."""
+    leading elsewhere, nothing outside the root), and it is a file now."""
     if not inst or inst != norm(inst) or inst.startswith("/") or "\\" in inst or ":" in inst:
         return False
     segs = inst.split("/")
     if any(s in ("", ".", "..") for s in segs) or segs[0] == ".blueprint":
         return False
     resolved = project_path(root, inst)
-    return resolved is not None and path_key(resolved) == path_key(inst)
+    if resolved is None or path_key(resolved) != path_key(inst):
+        return False
+    return (root / inst).is_file()  # gone since the last sync, or a device name such as CON.ts on Windows (R2-6)
 
 
 def stale_instances(root, plan, state):

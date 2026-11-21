@@ -489,7 +489,9 @@ _HELD = set()  # the lock files this process holds: the lock is never nested, so
 
 # characters that are literal inside double quotes in bash, PowerShell and cmd (besides letters and digits, which
 # str.isalnum accepts in any script): a path made only of these can be printed inside a command (review of #17, F8)
-PASTE_SAFE = frozenset(" -_./\\:+,@=()[]~")  # ~ is literal inside double quotes too; 8.3 short names hold it
+# ~ is literal inside double quotes too (8.3 short names hold it); a backslash only on Windows: bash reads \\\\ inside
+# double quotes as one backslash (review of #17, R2-3)
+PASTE_SAFE = frozenset(" -_./:+,@=()[]~" + ("\\" if os.name == "nt" else ""))
 PORTABLE_NOTE = " (run from the project folder)"
 
 
@@ -509,9 +511,10 @@ def run_hint(root, args, module=None, use_copy=True):
     copy = bp_dir(root) / "bin"
     if use_copy and (copy / "blueprint.py").is_file() and (module is None or (copy / "bp" / (module + ".py")).is_file()):
         return f"python .blueprint/bin/blueprint.py {args}"
-    # the long form where the platform has one (an 8.3 short name such as RUNNER~1 resolved), so the printed paths
-    # read as the user knows them; the allowlist still decides
-    launcher, where = os.path.realpath(TOOL_HOME / "blueprint.py"), os.path.realpath(root)
+    # as given, made absolute, never resolved (review of #17, R2-0): an 8.3 short name such as RUNNER~1 stays as the
+    # caller spelled it, a link still names the same project (the state lock is keyed by the real path); the
+    # allowlist alone decides between this form and the fallback
+    launcher, where = os.path.abspath(TOOL_HOME / "blueprint.py"), os.path.abspath(root)
     if paste_safe(launcher) and paste_safe(where):
         return f'python "{launcher}" {args} --root "{where}"'
     return f"python <skill>/scripts/blueprint.py {args} --root .{PORTABLE_NOTE}"
@@ -773,7 +776,7 @@ def _files_damage(raw):
     for p, rec in raw["files"].items():
         if not isinstance(rec, dict):
             return f"files[{json.dumps(p, ensure_ascii=False)}] must be an object (got {_json_kind(rec)})"
-        ids = rec.get("workedBy", [])
+        ids = rec.get("workedBy") or []  # null reads as empty, like the sibling keys (review of #17, R2-5)
         if not isinstance(ids, list) or any(not isinstance(x, str) for x in ids):
             bad = ids if not isinstance(ids, list) else next(x for x in ids if not isinstance(x, str))
             return (f"files[{json.dumps(p, ensure_ascii=False)}].workedBy must be a list of ids "

@@ -266,12 +266,14 @@ def require_owner(plan, path, by, force):
 def worked_by(entry):
     """Every id that claimed or marked a file entry: the ids of state.files[p].workedBy in first-seen order, then the
     entry's latest by when it is not among them (an older copy of the tool sets by without growing the list; an entry
-    written before the key existed reads as [by]). A missing or null by adds nothing; no entry is []. A workedBy that
+    written before the key existed, or with a null list, reads as [by]). A missing or null by adds nothing; no entry
+    is []. A workedBy that
     is not a list of strings raises bad-state, as the state reader does: never an empty list a caller would read as
     nobody. Public: the features and records modules read it."""
     if not isinstance(entry, dict):
         return []
-    ids = entry.get("workedBy", [])  # null is damaged too, as at load (core._files_damage)
+    ids = entry.get("workedBy")
+    ids = [] if ids is None else ids  # missing or null reads as empty, as at load (core._files_damage)
     if not isinstance(ids, list) or any(not isinstance(x, str) for x in ids):
         raise BlueprintError("bad-state", ".blueprint/state.json is damaged: a file entry's workedBy must be a list of ids",
                              entry=".blueprint/state.json",
