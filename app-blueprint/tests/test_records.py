@@ -2267,6 +2267,30 @@ class ReviewTwoTest(Project):
         self.assertEqual(set(self.records()[-1]["proof"]), {"files"})
         self.assertEqual(self.status_of()["status"], "accepted")
 
+    def test_r2_1_without_a_pin_the_record_still_stores_the_digest_of_what_it_judged(self):
+        digest = self.proof()
+        self.assertEqual(self.accept("--result", "C3=pass").returncode, 0)
+        self.assertEqual(self.records()[-1]["pin"], digest)
+
+    def test_r2_8_a_record_with_the_right_files_but_another_pin_is_written_again(self):
+        from bp import records
+        digest = self.proof()
+        plan, state = self.load()
+        ctx = build_context(self.root, plan, state)
+        real = records.current_proof
+        seen = []
+
+        def odd(root, plan_, state_, fid, fresh=False):
+            pin, files = real(root, plan_, state_, fid, fresh)
+            if not fresh:
+                seen.append(1)
+                if len(seen) > 1:  # the call that builds the record
+                    return "sha256:" + "3" * 64, files
+            return pin, files
+        with mock.patch.object(records, "current_proof", odd):
+            rec = records.record_evaluation(self.root, plan, FID, "evaluator", "cli", {"C3": "pass"}, [], None, ctx=ctx, proof=digest)
+        self.assertEqual(rec["pin"], digest)
+
     def test_r2_1_the_criteria_are_pinned_inside_the_lock_too(self):
         from bp import records
         digest = self.proof()
