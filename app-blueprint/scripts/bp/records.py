@@ -8,8 +8,11 @@ a status, so a record that is stale, damaged, too weak or from the wrong person 
 its evidence (4.3). Entry and evaluation always agree because both are read from the same record.
 
 The module is fail closed throughout: a line it cannot read is ignored (and counted), an id spelled differently from the
-roster's is not the same id, a duplicated roster id has a property only if every entry with that id has it, and a
-criterion that cannot be told apart from another is never recorded as checked.
+roster's is not the same id, and a criterion that cannot be told apart from another is never recorded as checked. A
+record file is a log of events: every record carries a nonce that is part of its id, so two events never share one, and
+if a line really is repeated (a hand copy) the last copy holds the position. Among the evaluations that still judge the
+files and criteria as they are, the latest decides whoever wrote it; its failures always count, its passes only while
+its author is independent. An evaluator can pin the files it looked at (`accept --proof`).
 
 Every write happens inside `core.state_lock` after the record is built (checks run, proofs hashed, the evaluation
 computed) and never while a check runs; a record is one whole line and its log line goes in the same hold (decision 39).
@@ -35,6 +38,7 @@ MODES = {"browser": "e2e", "device": "e2e", "cli": "e2e", "api": "integration", 
 RESULT_ARGS = ("pass", "fail", "skipped", "unknown")  # what accept --result may say
 RECORD_ID = re.compile(r"vr-[0-9a-f]{12}")
 EVIDENCE_ID = re.compile(r"ev-[0-9a-f]{16}")
+NONCE = re.compile(r"[0-9a-f]{8}")
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 SAFE_WORD = re.compile(r"[A-Za-z0-9._-]+")
 VERDICTS = ("pass", "fail", "partial")
@@ -264,6 +268,8 @@ def _valid_record(rec, fid=None):
             return False
         if not (isinstance(rec.get("at"), str) and isinstance(rec.get("tool"), str)):
             return False
+        if not (isinstance(rec.get("nonce"), str) and NONCE.fullmatch(rec["nonce"])):
+            return False
         if not (rec.get("by") is None or isinstance(rec["by"], str)) or not (rec.get("note") is None or isinstance(rec["note"], str)):
             return False
         if not _valid_proof(rec.get("proof")):
@@ -330,7 +336,7 @@ def read_records(root, fid):
             return [], 0
         if _is_linked(path) or _is_linked(path.parent) or not path.is_file() or path.stat().st_size > MAX_FILE:
             return [], 1
-        out, seen, damaged = [], set(), 0
+        out, damaged = {}, 0
         with open(path, "rb") as f:
             for raw in f:
                 line = raw.strip()
@@ -347,11 +353,9 @@ def read_records(root, fid):
                 if not _valid_record(rec, fid) or _rec_id(rec) != rec["id"]:
                     damaged += 1
                     continue
-                if rec["id"] in seen:
-                    continue
-                seen.add(rec["id"])
-                out.append(rec)
-        return out, damaged
+                out.pop(rec["id"], None)  # the same line twice (a hand copy): the last one holds the position
+                out[rec["id"]] = rec
+        return list(out.values()), damaged
     except (OSError, ValueError, RecursionError):
         return [], 1
 
@@ -374,15 +378,19 @@ def load_records(root):
 
 
 def _clean_note(text, root=None):
-    """A note as stored: valid text (no lone surrogates), redacted of paths, addresses and tokens (learn.redact plus
-    UNC paths and the project folder in every spelling), at most 500 characters."""
+    """A note as stored: valid text (no lone surrogates), the project folder replaced in either separator (and in any
+    case on Windows), then learn.redact plus UNC paths, at most 500 characters. What else counts as a secret (a
+    password=..., a key) is learn.redact's scope, not promised here: put no secret in a note."""
     if text is None:
         return None
     s = str(text).encode("utf-8", "replace").decode("utf-8", "replace")
     if root is not None:
+        flags = re.IGNORECASE if os.name == "nt" else 0  # Windows paths are not case-sensitive
         for spelling in {str(root), root.as_posix(), str(root.resolve()), root.resolve().as_posix()}:
-            if spelling and len(spelling) > 3:
-                s = s.replace(spelling, "<project>")
+            if len(spelling) > 3:
+                parts = [re.escape(x) for x in re.split(r"[\\/]+", spelling) if x]
+                lead = "[\\\\/]" if spelling[0] in "\\/" else ""
+                s = re.sub(lead + "[\\\\/]+".join(parts), "<project>", s, flags=flags)
     s = _RX_UNC.sub("<path>", redact(s, root))
     s = s.strip()
     return s[:MAX_NOTE] or None
@@ -414,6 +422,9 @@ def _write_lines(root, fid, recs):
         if not folder.is_dir() or (path.exists() and not path.is_file()):
             raise _error("write-failed", f"cannot write {rel}: something that is not a file is in the way", entry=rel,
                          next=f"remove or rename it, then {core.AGAIN}")
+        if path.exists() and path.stat().st_nlink > 1:
+            raise _error("write-failed", f"cannot write {rel}: it has more than one hard link, so the tool would also write "
+                         "to another file", entry=rel, next=f"copy it to a new file, remove the old one, then {core.AGAIN}")
         prefix = b""
         if path.exists() and path.stat().st_size:
             with open(path, "rb") as f:
@@ -429,8 +440,10 @@ def _write_lines(root, fid, recs):
 
 
 def _finish(rec):
-    """rec with its id: content_id of the record without it (4.6). Returns a new dict, id first."""
+    """rec with its nonce (8 random hex, part of what the id is computed from, so two events never share an id) and
+    its id: content_id of the record without it (4.6). Returns a new dict, id first."""
     body = {k: v for k, v in rec.items() if k != "id"}
+    body.setdefault("nonce", os.urandom(4).hex())
     return dict({"id": content_id("vr-", body, 12)}, **body)
 
 
@@ -540,7 +553,10 @@ def _verdict(feature, ev):
     return "pass" if any(passed(c, cid) for c, cid, _ in crits) else "partial"
 
 
-def _evaluation_current(root, plan, state, fid, feature, rec, now_files, index, memo):
+def _evaluation_current(root, plan, state, fid, feature, rec, now_files):
+    """The evaluation judges the files as they are and the criteria as they are (4.3): its proof is current and every
+    criterion it names still exists once with the recorded digest. Who wrote it is judged separately (the passes of an
+    author who is not independent count for nothing, `latest_evaluation`)."""
     if not _proof_current(rec["proof"], now_files()):
         return False
     by_id = {cid: c for c, cid, ok in _criteria(feature) if ok}
@@ -548,29 +564,30 @@ def _evaluation_current(root, plan, state, fid, feature, rec, now_files, index, 
         c = by_id.get(cid)
         if c is None or _digest_or_none(c) != r["digest"]:
             return False
-    if rec["by"] not in memo:  # one judgement per person, however many records they wrote
-        memo[rec["by"]] = independence_problem(plan, state, fid, rec["by"], index)
-    if memo[rec["by"]] is not None:
-        return False
     return True
 
 
 def latest_evaluation(root, plan, state, comp, fid, recs, _index=None, _now=None):
-    """The current evaluation of a feature, or None (4.3): the latest evaluation record whose proof is current, whose
-    every named criterion still exists once with the recorded digest, and whose `by` is in the roster, independent
-    under today's plan. Any other evaluation is ignored. Returns a
-    copy of the record with its verdict recomputed."""
+    """The current evaluation of a feature, or None (4.3): among the evaluations whose proof is current and whose every
+    named criterion still exists once with the recorded digest, the LATEST decides, whoever wrote it, and nothing older
+    is consulted. Its fail, skipped and unknown results always count; its passes count only while its author is a
+    roster id that is independent now (a pass of anyone else is read as unknown, so the feature is not accepted until
+    a new evaluation is recorded). Returns a copy of the record with its verdict recomputed."""
     feature = section_index(plan, "features").get(fid)
     if feature is None:
         return None
     index = _index if _index is not None else _item_index(plan, state)
     now = _now or _lazy_now(root, plan, state, fid, index)
-    memo = {}
     for rec in reversed([r for r in recs or [] if isinstance(r, dict) and r.get("kind") == "evaluation"]):
-        if _evaluation_current(root, plan, state, fid, feature, rec, now, index, memo):
-            ev = json.loads(json.dumps(rec))
-            ev["verdict"] = _verdict(feature, ev)
-            return ev
+        if not _evaluation_current(root, plan, state, fid, feature, rec, now):
+            continue
+        ev = json.loads(json.dumps(rec))
+        if independence_problem(plan, state, fid, rec["by"], index) is not None:
+            for r in ev["criteria"].values():
+                if r["result"] == "pass":
+                    r["result"] = "unknown"
+        ev["verdict"] = _verdict(feature, ev)
+        return ev
     return None
 
 
@@ -731,6 +748,16 @@ def _need_roster(root, plan, by, entry):
                      entry=entry, next=_bp(root, "status --features", "features"))
 
 
+def check_run_arguments(root, fid, repeat, timeout):
+    """--repeat is a whole number from 1 to 100 and --timeout at least 1 second, with or without --run (usage, 64)."""
+    if not _int(repeat, 1) or repeat > MAX_REPEAT:
+        raise _error("usage", f"--repeat must be a whole number from 1 to {MAX_REPEAT}", entry=f"feature {fid}",
+                     next=_bp(root, f"verify --feature {fid} --run --repeat 3", "commands/progress"), code=64)
+    if not _int(timeout, 1):
+        raise _error("usage", "--timeout must be 1 second or more", entry=f"feature {fid}",
+                     next=_bp(root, f"verify --feature {fid} --run", "commands/progress"), code=64)
+
+
 def run_feature_checks(root, plan, fid, criterion=None, repeat=1, timeout=DEFAULT_TIMEOUT, by=None, out=None,
                        quiet=False, state=None):
     """Run the `verify` commands of a feature's criteria and save one check record per criterion (4.6).
@@ -743,12 +770,7 @@ def run_feature_checks(root, plan, fid, criterion=None, repeat=1, timeout=DEFAUL
     feature = _feature_or_raise(root, plan, fid)
     if by is not None:
         _need_roster(root, plan, by, f"feature {fid}")
-    if not _int(repeat, 1) or repeat > MAX_REPEAT:
-        raise _error("usage", f"--repeat must be a whole number from 1 to {MAX_REPEAT}", entry=f"feature {fid}",
-                     next=_bp(root, f"verify --feature {fid} --run --repeat 3"), code=64)
-    if not _int(timeout, 1):
-        raise _error("usage", "--timeout must be 1 second or more", entry=f"feature {fid}",
-                     next=_bp(root, f"verify --feature {fid} --run"), code=64)
+    check_run_arguments(root, fid, repeat, timeout)
     say = out or (lambda text: print(text, file=sys.stderr if quiet else sys.stdout, flush=True))
     result = Outcome()
     rows = _criteria(feature)
@@ -843,8 +865,15 @@ def verify_feature(args, ctx):
     timeout = getattr(args, "timeout", None)
     timeout = DEFAULT_TIMEOUT if timeout is None else timeout
     by = getattr(args, "by", None)
+    check_run_arguments(root, fid, repeat, timeout)
     if not run:
-        return _list_checks(root, plan, feature, fid, criterion, say), 0
+        digest, _ = current_proof(root, plan, state, fid)
+        listed = _list_checks(root, plan, feature, fid, criterion, say)
+        if as_json:  # the envelope carries the proof too (the hook may add nothing to {"records": ...} itself)
+            print(json.dumps({"ok": True, "command": "verify", "data": {"records": [], "proof": digest}}, indent=2, ensure_ascii=False))
+            sys.exit(0)
+        say(f"proof: {digest}    # pin it with: accept {fid} --proof <this digest> ...")
+        return listed, 0
     outcome = run_feature_checks(root, plan, fid, criterion, repeat, timeout, by, quiet=as_json, state=state)
     for cid, cmd, rec in outcome.lines:
         say("  " + _check_text(rec))
@@ -894,28 +923,28 @@ def _list_checks(root, plan, feature, fid, criterion, say):
 
 # --------------------------------------------------------------------------------------------------------- accepting
 
-def parse_results(items):
+def parse_results(items, root=None):
     """{criterion id: result} from `--result C1=pass` arguments: the whole value after the last `=` must be pass, fail,
     skipped or unknown, the id is taken as written, and an id given twice is a usage error."""
     out = {}
+    again = _bp(root, "accept --help", "commands/records")
     for raw in items or []:
         cid, eq, value = str(raw).rpartition("=")
         if not eq or not cid or value not in RESULT_ARGS:
             raise _error("usage", f"--result must look like C1=pass (pass, fail, skipped or unknown); got {raw!r}",
-                         next="python .blueprint/bin/blueprint.py accept --help", code=64)
+                         next=again, code=64)
         if cid in out:
-            raise _error("usage", f"--result names {cid!r} twice", next="python .blueprint/bin/blueprint.py accept --help",
-                         code=64)
+            raise _error("usage", f"--result names {cid!r} twice", next=again, code=64)
         out[cid] = value
     return out
 
 
-def parse_evidence(items):
+def parse_evidence(items, root=None):
     out = []
     for raw in items or []:
         if not isinstance(raw, str) or not EVIDENCE_ID.fullmatch(raw):
             raise _error("usage", f"--evidence must be an evidence id such as ev-0123456789abcdef; got {raw!r}",
-                         next="python .blueprint/bin/blueprint.py accept --help", code=64)
+                         next=_bp(root, "accept --help", "commands/records"), code=64)
         if raw not in out:
             out.append(raw)
     return out
@@ -940,7 +969,7 @@ def _not_verified(root, ctx, plan, fid, feature):
     """None when the feature stands verified without any evaluation (4.4: every item verified and every command
     criterion passing), else the not-verified error. A blocked or draft feature is refused too."""
     fobj = next((f for f in ctx.get("features") or [] if isinstance(f, dict) and f.get("id") == fid), None)
-    nxt = _bp(root, f"verify --feature {fid} --run", "commands/progress")
+    nxt = _bp(root, f"verify --feature {fid} --run", "commands/progress")  # fid passed the id check of _feature_or_raise
     if fobj is None:
         return _error("not-verified", f"{fid} has no status to judge (the features module is not built)", entry=f"feature {fid}",
                       next=nxt, code=3)
@@ -964,6 +993,8 @@ def _not_verified(root, ctx, plan, fid, feature):
         why.append("criteria without a passing, current check: " + ", ".join((x or "?") for x in open_checks[:5]))
     if any(not ok for _, _, ok in _criteria(feature)):
         why.append("a criterion has no id of its own")
+    if items:  # the files come first: their proofs are what the feature's checks are recorded against
+        nxt = _bp(root, "verify --run", "commands/progress")
     return _error("not-verified", f"{fid} is {fobj.get('status')}, not verified: " + ("; ".join(why) or "its checks do not hold"),
                   entry=f"feature {fid}", next=nxt, code=3)
 
@@ -981,11 +1012,45 @@ def _refuse_acceptor(root, plan, state, fid, feature, by):
                            f"then run: {_bp(root, 'validate')}"), code=3)
 
 
-def record_evaluation(root, plan, fid, by, mode, results, evidence, note, ctx=None):
+def proof_digest(files):
+    """The digest an evaluator pins with `accept --proof` and sees in `verify --feature F`: sha256 of the canonical JSON
+    of the feature proof's files, in the form `sha256:<64 hex>`."""
+    return sha256_bytes(canonical_json({"files": files}))
+
+
+def current_proof(root, plan, state, fid):
+    """(digest, files) of the feature's proof as it is now."""
+    files = _now_files(root, plan, state, fid)
+    return proof_digest(files), files
+
+
+def _proof_changed(root, fid, pinned, now):
+    return _error("proof-changed", f"the files of {fid} are not the ones you looked at (you pinned {pinned}, they are now {now}); "
+                  "look again, then accept what you saw", entry=f"feature {fid}",
+                  next=_bp(root, f"verify --feature {fid}", "commands/progress"))
+
+
+def _check_evidence(root, fid, evidence, known):
+    """Cited evidence ids must be in `known` (the evidenceIds the evidence module supplies through validate_context,
+    1.4) when it is supplied: anything that is not None is a supplied value, and one that cannot answer `in` refuses."""
+    if known is None or not evidence:
+        return
+    try:
+        missing = [e for e in evidence if e not in known]
+    except TypeError:
+        missing = list(evidence)
+    if missing:
+        raise _error("evidence-not-found", f"evidence {', '.join(missing[:3])} is not in this project's evidence",
+                     entry=f"feature {fid}", next=_bp(root, "evidence list", "commands/evidence"))
+
+
+def record_evaluation(root, plan, fid, by, mode, results, evidence, note, ctx=None, proof=None, evidence_ids=None):
     """Record an independent evaluation of a feature and return the record (4.4, 4.6). The refusals, in order:
-    unknown feature, unknown roster id, unknown criterion, evidence-not-found, not-independent, not-verified. The record is
-    built first; then, inside the state lock, the roster, ownership and claims are read again and judged again on the
-    plan and state as they are by then, and only then is it appended with its log line."""
+    unknown feature, unknown roster id, unknown criterion, evidence-not-found, not-independent, not-verified,
+    proof-changed. The record is built first; then, inside the state lock, the roster, ownership and claims are read
+    again and judged again on the plan and state as they are by then (and, when `proof` is given, the files are
+    digested again and must still be the ones the evaluator pinned), and only then is it appended with its log line.
+    `evidence_ids`: what the evidence module supplies (None when no module does)."""
     feature = _feature_or_raise(root, plan, fid, allow_draft=True)
     state = status.load_state(root)
     _need_roster(root, plan, by, f"feature {fid}")
@@ -999,16 +1064,15 @@ def record_evaluation(root, plan, fid, by, mode, results, evidence, note, ctx=No
             raise _error("unknown-criterion", f"{cid!r} is not a criterion of {fid} (or it has no id of its own)",
                          entry=f"feature {fid}", next=_bp(root, f"status --feature {fid}", "features"))
     ctx = ctx or _fallback_context(root, plan, state)
-    known = ctx.get("evidenceIds")  # supplied by the evidence module when it is built; else the form is all that is checked
-    if isinstance(known, (list, tuple, set, frozenset)):
-        missing = [e for e in (evidence or []) if e not in known]
-        if missing:
-            raise _error("evidence-not-found", f"evidence {', '.join(missing[:3])} is not in this project's evidence",
-                         entry=f"feature {fid}", next=_bp(root, "evidence list", "commands/evidence"))
+    _check_evidence(root, fid, evidence, evidence_ids)
     _refuse_acceptor(root, plan, state, fid, feature, by)
     problem = _not_verified(root, ctx, plan, fid, feature)
     if problem is not None:
         raise problem
+    if proof is not None:
+        now, _ = current_proof(root, plan, state, fid)
+        if now != proof:
+            raise _proof_changed(root, fid, proof, now)
     level = MODES[mode]
     rec = {"at": now_iso(), "tool": TOOL_VERSION, "kind": "evaluation", "feature": fid, "by": by,
            "proof": feature_proof(root, plan, state, ctx.get("comp"), fid), "note": _clean_note(note, root),
@@ -1024,9 +1088,16 @@ def record_evaluation(root, plan, fid, by, mode, results, evidence, note, ctx=No
         fresh_feature = _feature_or_raise(root, fresh_plan, fid, allow_draft=True)
         _need_roster(root, fresh_plan, by, f"feature {fid}")
         _refuse_acceptor(root, fresh_plan, fresh_state, fid, fresh_feature, by)
-        return [rec], [{"event": "accept", "feature": fid, "by": by, "mode": mode, "verdict": rec["verdict"], "record": rec["id"]}]
-    _commit(root, fid, decide)
-    return rec
+        out = rec
+        if proof is not None:  # the files, digested again under the lock (unchanged files come from the hash cache)
+            now, files = current_proof(root, fresh_plan, fresh_state, fid)
+            if now != proof:
+                raise _proof_changed(root, fid, proof, now)
+            if files != rec["proof"]["files"]:
+                out = _finish({k: v for k, v in dict(rec, proof={"files": files}).items() if k not in ("id", "nonce")})
+        return [out], [{"event": "accept", "feature": fid, "by": by, "mode": mode, "verdict": out["verdict"], "record": out["id"]}]
+    saved = _commit(root, fid, decide)
+    return saved[0]
 
 
 # -------------------------------------------------------------------------------------------------- protected paths
@@ -1039,14 +1110,14 @@ GENERATED_VIEWS = ("STRUCTURE.md", "ROSTER.md", "ROADMAP.md", "FEATURES.md", "ma
 def _protected_command(root, plan, parts):
     """The command that writes a protected path (a console text, run as printed), from what the plan confirms: a
     feature id from the file name is used only when the plan has that feature."""
-    head = path_key(parts[0])
-    if head in {path_key(n) for n in ("state.json", core.STATE_LOCK, ".gitignore", "log.jsonl")}:
+    head = parts[0].casefold()
+    if head in {n.casefold() for n in ("state.json", core.STATE_LOCK, ".gitignore", "log.jsonl")}:
         return _bp(root, "status")
-    if head in {path_key(n) for n in GENERATED_VIEWS}:
+    if head in {n.casefold() for n in GENERATED_VIEWS}:
         return _bp(root, "render")
-    if head == path_key("bin"):
+    if head == "bin":
         return _bp(root, "init --refresh-tool")
-    if head == path_key("studies"):
+    if head == "studies":
         return _bp(root, "study list", "commands/study")
     name = parts[1] if len(parts) == 2 else ""
     fid = name[:-len(".jsonl")] if name.endswith(".jsonl") else None
@@ -1058,16 +1129,18 @@ def _protected_command(root, plan, parts):
 def protected(path):
     """True when `path` (core.project_path's root-relative form) is a file or folder only blueprint.py writes (4.8):
     state.json, state.lock, .gitignore, log.jsonl, the generated views, everything under verification/ and bin/, and
-    studies/<id>/study.json. Compared with core.path_key, so every spelling the guard resolves is covered."""
-    parts = path_key(path).split("/") if isinstance(path, str) else []
-    if len(parts) < 2 or parts[0] != path_key(".blueprint"):
+    studies/<id>/study.json. Compared with core.path_key and then case-folded on every platform, so every spelling the
+    guard resolves is covered, and a differently cased name is refused even on a case-sensitive disk (the safe side:
+    a case-insensitive mount under Linux is one file)."""
+    parts = [x.casefold() for x in path_key(path).split("/")] if isinstance(path, str) else []
+    if len(parts) < 2 or parts[0] != ".blueprint":
         return False
     rest = parts[1:]
-    if len(rest) == 1 and rest[0] in {path_key(n) for n in PROTECTED_FILES + GENERATED_VIEWS}:
+    if len(rest) == 1 and rest[0] in {n.casefold() for n in PROTECTED_FILES + GENERATED_VIEWS}:
         return True
-    if rest[0] in {path_key(n) for n in PROTECTED_FOLDERS}:
+    if rest[0] in {n.casefold() for n in PROTECTED_FOLDERS}:
         return True
-    return len(rest) == 3 and rest[0] == path_key("studies") and rest[2] == path_key("study.json")
+    return len(rest) == 3 and rest[0] == "studies" and rest[2] == "study.json"
 
 
 def refuse(action, root, plan, path, by):

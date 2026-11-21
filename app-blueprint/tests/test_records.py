@@ -730,7 +730,7 @@ class VerifyFeatureTest(Project):
                           ("check", "C2", "pass", "integration", None, "exit 0", 0, {"n": 1, "passed": 1})])
         for x in recs:
             self.assertEqual(set(x), {"id", "at", "tool", "kind", "feature", "by", "proof", "note", "criterion", "criterionDigest",
-                                      "cmd", "result", "level", "exit", "durationMs", "repeat"})
+                                      "cmd", "result", "level", "exit", "durationMs", "repeat", "nonce"})
             self.assertRegex(x["at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
             self.assertEqual(sorted(x["proof"]["files"]), sorted(ITEMS))
         added = self.log()[before:]
@@ -974,7 +974,8 @@ class AcceptTest(Project):
     # ---- success
     def test_an_independent_evaluator_accepts(self):
         r = self.accept("--result", "C3=pass", "--note", "clicked through the flow")
-        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "F-log-snag: accepted by evaluator (cli, e2e)\n", ""))
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        self.assertRegex(r.stdout, r"^F-log-snag: accepted by evaluator [(]cli, e2e[)]; the files as they are now [(]sha256:[0-9a-f]{64}[)], not pinned with --proof$")
         ev = self.records()[-1]
         self.assertEqual((ev["kind"], ev["by"], ev["mode"], ev["level"], ev["verdict"], ev["independent"], ev["evidence"], ev["note"]),
                          ("evaluation", "evaluator", "cli", "e2e", "pass", True, [], "clicked through the flow"))
@@ -1122,7 +1123,8 @@ class AcceptTest(Project):
     def test_an_independent_agent_evaluator_accepts_a_feature_with_a_manual_criterion(self):
         self.manual_project()
         r = self.accept("--result", "C1=pass", by="evaluator", mode="manual", fid="F-inbox")
-        self.assertEqual((r.returncode, r.stdout), (0, "F-inbox: accepted by evaluator (manual, manual)\n"), r.stderr)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(r.stdout.startswith("F-inbox: accepted by evaluator (manual, manual)"), r.stdout)
         self.assertEqual(self.status_of("F-inbox")["status"], "accepted")
         self.assertEqual(self.accept("--result", "C1=pass", by="owner", mode="manual", fid="F-inbox").returncode, 0)  # a person too
 
@@ -1158,7 +1160,7 @@ class AcceptTest(Project):
         e = self.refused("--result", "C3=pass", error="not-verified")
         self.assertIn("not verified", e["message"])
         self.assertIn("file(s) not verified", e["message"])
-        self.assertIn("verify --feature F-log-snag --run", e["next"])
+        self.assertIn("verify --run", e["next"])
 
     def test_a_failing_or_stale_command_check_blocks_acceptance(self):
         self.prove()
@@ -1221,9 +1223,11 @@ class AcceptTest(Project):
             self.ok("verify", "--feature", FID, "--run")
             f = self.status_of()
             self.assertEqual(f["status"], "verified", name)
-            if name == "new criterion":  # the evaluation still stands for what it saw; the new criterion is unknown
-                self.assertEqual(f["evaluation"]["verdict"], "partial")
-                self.assertEqual(f["awaitingEvaluation"], 1)
+            if name in ("new criterion", "feature owner", "file owner", "roster", "claim"):
+                # the evaluation still stands as the latest one (nothing older revives); its passes count for nothing
+                # when its author is no longer independent, and the new criterion is unknown
+                self.assertEqual(f["evaluation"]["verdict"], "partial", name)
+                self.assertEqual(f["awaitingEvaluation"], 1, name)
             else:
                 self.assertIsNone(f["evaluation"], name)
 
@@ -1236,13 +1240,16 @@ class AcceptTest(Project):
         self.assertEqual(self.status_of()["status"], "verified")
 
     def test_the_latest_current_evaluation_decides(self):
-        """B passes after A failed: accepted. B then loses independence: A's fail stands again."""
+        """B passes after A failed: accepted. B then loses independence: B is still the latest, its pass counts for
+        nothing, and A's older fail is not consulted again (the feature waits for a new evaluation)."""
         self.edit_plan(lambda p: roster_add(p, "second-evaluator"))
         self.assertEqual(self.accept("--result", "C3=fail").returncode, 1)
         self.assertEqual(self.accept("--result", "C3=pass", by="second-evaluator").returncode, 0)
         self.assertEqual(self.status_of()["status"], "accepted")
         self.edit_plan(lambda p: feature_of(p).update(owner="second-evaluator"))
-        self.assertEqual(self.status_of()["status"], "failed")
+        self.assertEqual(self.status_of()["status"], "verified")
+        self.assertEqual(self.accept("--result", "C3=pass").returncode, 0)
+        self.assertEqual(self.status_of()["status"], "accepted")
 
     def test_entries_and_the_evaluation_always_agree(self):
         from bp import records
@@ -1336,23 +1343,6 @@ class AcceptTest(Project):
     def test_the_feature_removed_meanwhile_is_seen_inside_the_lock(self):
         err = self._race(lambda root: self.edit_plan(lambda p: p["features"].remove(feature_of(p))))
         self.assertEqual(err.error, "unknown-feature")
-
-    def test_evidence_ids_must_exist_when_a_module_supplies_them(self):
-        from bp import records
-        stub = "def context(root, plan, state, ctx):\n    ctx['evidenceIds'] = ['ev-0123456789abcdef']\n"
-        sources = dict(own_sources(), **{"evidence.py": stub})
-        with extension(sources):
-            from bp import records as rec2
-            plan, state = self.load()
-            ctx = build_context(self.root, plan, state)
-            self.assertEqual(ctx["evidenceIds"], ["ev-0123456789abcdef"])
-            before = self.raw_lines()
-            with self.assertRaises(BlueprintError) as cm:
-                rec2.record_evaluation(self.root, plan, FID, "evaluator", "cli", {"C3": "pass"}, ["ev-fedcba9876543210"], None, ctx=ctx)
-            self.assertEqual((cm.exception.error, cm.exception.code), ("evidence-not-found", 1))
-            self.assertEqual(self.raw_lines(), before)
-            rec = rec2.record_evaluation(self.root, plan, FID, "evaluator", "cli", {"C3": "pass"}, ["ev-0123456789abcdef"], None, ctx=ctx)
-            self.assertEqual(rec["evidence"], ["ev-0123456789abcdef"])
 
     def test_without_an_evidence_module_only_the_form_is_checked(self):
         r = self.accept("--result", "C3=pass", "--evidence", "ev-fedcba9876543210")
@@ -1570,7 +1560,7 @@ class NoMachineSpecificTextTest(Project):
         run = subprocess.run(runnable(nxt), shell=True, cwd=str(self.root), capture_output=True, text=True, encoding="utf-8", env=S.tool_env())
         self.assertIn(run.returncode, (0, 1), run.stderr)
         self.assertNotIn("unrecognized", run.stderr)
-        self.assertTrue((self.root / ".blueprint" / "verification").exists(), "the next step is the real verify command")
+        self.assertIn("verify --run", nxt)
 
 
 # ================================================================================================= in parallel
@@ -1673,7 +1663,7 @@ class ModuleShapeTest(Isolated, unittest.TestCase):
     def test_error_identifiers_are_the_contracts_plus_the_one_it_lacks(self):
         used = set(re.findall(r'_error\(\s*"([a-z-]+)"', self.source("records.py")))
         self.assertEqual(used, {"unknown-feature", "unknown-criterion", "unknown-roster", "not-independent", "not-verified",
-                                "evidence-not-found", "usage", "write-failed"})
+                                "evidence-not-found", "proof-changed", "usage", "write-failed"})
         codes = {"evidence-not-found", "unknown-feature", "unknown-criterion", "unknown-roster", "not-independent", "not-verified", "usage", "write-failed"}
         contract = (S.SKILL.parents[0] / "maintainers" / "design" / "v2-contract.md")
         if contract.exists():
@@ -1686,7 +1676,7 @@ class ModuleShapeTest(Isolated, unittest.TestCase):
         for m in re.finditer(r"raise _error\((.*?)\)\s*$", src, re.S | re.M):
             pass
         self.assertNotIn("print(f\"error", src)
-        self.assertNotIn("sys.exit", src)
+        self.assertEqual(src.count("sys.exit"), 1, "only the list-mode JSON envelope of verify_feature exits")
         self.assertNotIn("die(", src)
 
     def test_a_damaged_value_in_a_plan_never_raises_out_of_context(self):
@@ -1740,6 +1730,7 @@ class RealSiblingsTest(TempRoot):
         for rel in ALL_FILES:
             self.touch(rel)
 
+    @unittest.skipUnless(registry.exists("unknowns"), "needs the unknowns module")
     def test_a_feature_blocked_by_an_unknown_cannot_be_accepted(self):
         self.plan["unknowns"] = [{"id": "U-x", "question": "Is it allowed?", "severity": "high", "status": "open", "blocks": [FID]}]
         self.write_plan(self.plan)
@@ -1750,13 +1741,16 @@ class RealSiblingsTest(TempRoot):
         self.assertEqual((r.returncode, out["error"]["code"]), (3, "not-verified"))
         self.assertIn("blocked", out["error"]["message"])
 
+    @unittest.skipUnless(registry.exists("roadmap") and registry.exists("views.roadmap_md") and registry.exists("views.features_md"),
+                         "needs the roadmap and features views")
     def test_a_full_flow_with_every_module_and_the_views(self):
         self.assertEqual(self.cli("verify", "--run").returncode, 0)
         r = self.cli("verify", "--feature", FID, "--run", "--by", "evaluator")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(self.cli("accept", FID, "--by", "backend-lead", "--mode", "cli").returncode, 3)
         r = self.cli("accept", FID, "--by", "evaluator", "--mode", "cli", "--result", "C3=pass")
-        self.assertEqual((r.returncode, r.stdout), (0, "F-log-snag: accepted by evaluator (cli, e2e)\n"), r.stderr)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(r.stdout.startswith("F-log-snag: accepted by evaluator (cli, e2e)"), r.stdout)
         feats = (self.root / ".blueprint" / "FEATURES.md").read_text(encoding="utf-8")
         self.assertIn("accepted", feats)
         road = (self.root / ".blueprint" / "ROADMAP.md").read_text(encoding="utf-8")
@@ -1774,6 +1768,7 @@ class RealSiblingsTest(TempRoot):
         for path in ALLOWED[:6]:
             self.assertEqual(self.cli("guard", path).returncode, 0, path)
 
+    @unittest.skipUnless(registry.exists("unknowns"), "needs the unknowns module")
     def test_the_claim_hook_of_unknowns_is_not_shadowed_by_this_module(self):
         self.plan["unknowns"] = [{"id": "U-x", "question": "q", "severity": "high", "status": "open", "blocks": ["P1"]}]
         self.write_plan(self.plan)
@@ -1839,7 +1834,8 @@ class HardeningTest(Project):
         t = time.monotonic()
         chk = self.ctx()["checks"][FID]
         self.assertLess(time.monotonic() - t, 10)
-        self.assertIsNone(chk["evaluation"])
+        self.assertEqual(chk["evaluation"]["by"], "backend-lead")  # the latest, but its passes count for nothing
+        self.assertEqual(chk["evaluation"]["verdict"], "partial")
         self.assertEqual(self.status_of()["status"], "verified")
 
     def test_a_second_feature_with_the_same_id_changes_nothing_for_the_first(self):
@@ -1895,3 +1891,299 @@ class HardeningTest(Project):
         for e in self.log()[-2:]:
             self.assertLessEqual(set(e) - {"event", "at", "feature", "by", "checked", "passed", "records", "mode", "verdict", "record",
                                            "notSaved"}, set())
+
+
+# ======================================================================================= review round 1
+
+class ReviewOneTest(Project):
+    """The findings of the first review of PR #18, each as a test (F1 to F13)."""
+
+    def setUp(self):
+        super().setUp()
+        self.ready()
+
+    # ---- F1: a record file is a log of events; none may vanish
+    def test_f1_two_identical_looking_events_keep_their_own_ids(self):
+        from bp import records
+        plan, state = self.load()
+        body = {k: v for k, v in valid_evaluation(self.root, plan, results={"C3": "fail"}).items() if k not in ("id", "nonce")}
+        ids = {records._finish(dict(body)).get("id") for _ in range(20)}
+        self.assertEqual(len(ids), 20, "the nonce is part of what the id is computed from")
+        rec = records._finish(dict(body))
+        self.assertRegex(rec["nonce"], r"^[0-9a-f]{8}$")
+        self.assertEqual(rec["id"], core.content_id("vr-", {k: v for k, v in rec.items() if k != "id"}, 12))
+
+    def test_f1_fail_pass_fail_in_one_second_reads_as_failed_for_evaluations(self):
+        from bp import records
+        plan, state = self.load()
+        with mock.patch.object(records, "now_iso", lambda: "2026-01-01T00:00:00Z"):
+            for result in ("fail", "pass", "fail"):
+                ctx = build_context(self.root, *self.load())
+                records.record_evaluation(self.root, plan, FID, "evaluator", "cli", {"C3": result}, [], None, ctx=ctx)
+        got = records.read_records(self.root, FID)[0]
+        self.assertEqual([r["criteria"]["C3"]["result"] for r in got if r["kind"] == "evaluation"], ["fail", "pass", "fail"])
+        self.assertEqual(self.status_of()["status"], "failed")
+
+    def test_f1_fail_pass_fail_in_one_second_reads_as_fail_for_check_records(self):
+        from bp import records
+        self.edit_plan(lambda p: feature_of(p)["criteria"][0].update(verify=PASS))
+        plan, state = self.load()
+        good = valid_check(self.root, plan, cid="C1", result="pass")
+        body = {k: v for k, v in good.items() if k not in ("id", "nonce")}
+        with mock.patch.object(records, "now_iso", lambda: "2026-01-01T00:00:00Z"):
+            for result, ex in (("fail", 1), ("pass", 0), ("fail", 1)):
+                records.append_record(self.root, dict(body, result=result, exit=ex, repeat={"n": 1, "passed": 0 if ex else 1}))
+        got = [r["result"] for r in records.read_records(self.root, FID)[0] if r["criterion"] == "C1"][-3:]
+        self.assertEqual(got, ["fail", "pass", "fail"])
+        self.assertEqual(self.ctx()["checks"][FID]["criteria"]["C1"]["result"], "fail")
+
+    def test_f1_a_hand_copied_line_keeps_its_last_place(self):
+        from bp import records
+        plan, state = self.load()
+        a = valid_check(self.root, plan, cid="C1")
+        b = valid_check(self.root, plan, cid="C2", result="fail")
+        write_lines(self.root, "F-copy", a)
+        path = self.root / ".blueprint" / "verification"
+        for name in (FID,):
+            (path / f"{name}.jsonl").unlink(missing_ok=True)
+        write_lines(self.root, FID, a, b, a)
+        self.assertEqual([r["id"] for r in records.read_records(self.root, FID)[0]], [b["id"], a["id"]])
+
+    # ---- F2: the latest current evaluation decides, whoever wrote it
+    def _fail_then_lose_independence(self, how):
+        self.edit_plan(lambda p: roster_add(p, "eval2"))
+        self.assertEqual(self.accept("--result", "C3=pass").returncode, 0)
+        self.assertEqual(self.accept("--result", "C3=fail", by="eval2").returncode, 1)
+        self.assertEqual(self.status_of()["status"], "failed")
+        how()
+        return self.status_of()
+
+    def test_f2_an_owner_rule_edit_does_not_erase_a_later_fail(self):
+        f = self._fail_then_lose_independence(
+            lambda: self.edit_plan(lambda p: p["owners"].append({"pattern": ITEMS[1], "owner": "eval2"})))
+        self.assertEqual(f["status"], "failed")
+        self.assertEqual(f["evaluation"]["by"], "eval2")
+
+    def test_f2_a_claim_by_the_author_of_the_fail_does_not_revive_the_older_pass(self):
+        f = self._fail_then_lose_independence(lambda: self.ok("claim", ITEMS[1], "--by", "eval2", "--force"))
+        self.assertEqual(f["status"], "failed")
+
+    def test_f2_a_pass_by_someone_who_lost_independence_counts_for_nothing_and_nothing_older_is_consulted(self):
+        self.edit_plan(lambda p: roster_add(p, "eval2"))
+        self.assertEqual(self.accept("--result", "C3=pass").returncode, 0)
+        self.assertEqual(self.accept("--result", "C3=pass", by="eval2").returncode, 0)
+        self.ok("claim", ITEMS[1], "--by", "eval2", "--force")
+        f = self.status_of()
+        self.assertEqual(f["status"], "verified")  # not the older pass, which is no longer the deciding one
+        self.assertEqual(f["evaluation"]["by"], "eval2")
+        self.assertEqual(self.accept("--result", "C3=pass").returncode, 0, "a new evaluation by someone independent decides")
+        self.assertEqual(self.status_of()["status"], "accepted")
+
+    def test_f2_a_real_fix_and_a_new_evaluation_supersede_a_fail(self):
+        self.assertEqual(self.accept("--result", "C3=fail").returncode, 1)
+        self.touch(ITEMS[0], "fixed\n")
+        self.ready_after_edit()
+        self.assertEqual(self.status_of()["status"], "verified")  # the old fail judged other files
+        self.assertEqual(self.accept("--result", "C3=pass").returncode, 0)
+
+    def ready_after_edit(self):
+        self.prove()
+        self.ok("verify", "--feature", FID, "--run", "--by", "evaluator")
+
+    # ---- F3: everyone who ever worked on an item
+    def test_f3_workedby_covers_past_builders(self):
+        plan, state = self.load()
+        feature = feature_of(plan)
+        items = [{"path": p} for p in ITEMS]
+        state["files"][ITEMS[0]] = {"state": "built", "by": "backend-lead", "workedBy": ["evaluator", "backend-lead"]}
+        self.assertIn("claimed or built", features.independence_problem(plan, feature, items, "evaluator", state))
+        self.assertIsNotNone(features.independence_problem(plan, feature, items, "evaluator", {"files": {ITEMS[1]: {"workedBy": ["evaluator"]}}}))
+        self.assertIsNone(features.independence_problem(plan, feature, items, "evaluator", {"files": {"other": {"workedBy": ["evaluator"]}}}))
+        for junk in (None, 5, "evaluator", [5], {"a": 1}):
+            got = features.independence_problem(plan, feature, items, "evaluator", {"files": {ITEMS[0]: {"workedBy": junk}}})
+            self.assertIsNone(got, junk)  # a damaged list names nobody; the latest by still does
+        self.assertIsNotNone(features.independence_problem(plan, feature, items, "evaluator",
+                                                             {"files": {ITEMS[0]: {"by": "evaluator", "workedBy": 5}}}))
+
+    def test_f3_the_reviewers_sequence_through_accept(self):
+        """The evaluator claims and marks, the owner re-marks: with the core's workedBy the evaluator is still refused."""
+        self.ok("claim", ITEMS[0], "--by", "evaluator", "--force")
+        self.ok("mark", ITEMS[0], "built", "--by", "evaluator", "--force")
+        self.ok("mark", ITEMS[0], "built", "--by", "backend-lead")
+        state = json.loads((self.root / ".blueprint" / "state.json").read_text(encoding="utf-8"))
+        if "workedBy" not in state["files"][ITEMS[0]]:
+            self.skipTest("the core does not write workedBy yet")
+        self.prove()
+        self.ok("verify", "--feature", FID, "--run")
+        self.refused_accept()
+
+    def refused_accept(self):
+        r = self.cli("accept", FID, "--by", "evaluator", "--mode", "cli", "--result", "C3=pass", "--json")
+        self.assertEqual((r.returncode, json.loads(r.stdout)["error"]["code"]), (3, "not-independent"), r.stdout)
+
+    # ---- F4: pin what was evaluated
+    def proof(self):
+        r = self.ok("verify", "--feature", FID, "--json")
+        return json.loads(r.stdout)["data"]["proof"]
+
+    def test_f4_list_mode_shows_the_proof_in_text_and_json(self):
+        digest = self.proof()
+        self.assertRegex(digest, r"^sha256:[0-9a-f]{64}$")
+        r = self.ok("verify", "--feature", FID)
+        self.assertIn(f"proof: {digest}", r.stdout)
+        r = self.ok("verify", "--feature", FID, "--json")
+        out = json.loads(r.stdout)
+        self.assertEqual((out["ok"], out["command"], out["data"]["records"]), (True, "verify", []))
+        self.touch(ITEMS[0], "changed\n")
+        self.assertNotEqual(self.proof(), digest)
+
+    def test_f4_accept_with_the_proof_it_looked_at_succeeds_and_reports_it(self):
+        digest = self.proof()
+        r = self.accept("--result", "C3=pass", "--proof", digest, "--json")
+        out = json.loads(r.stdout)
+        self.assertEqual((r.returncode, out["data"]["proof"], out["data"]["status"]), (0, digest, "accepted"), r.stdout)
+        r = self.accept("--result", "C3=pass", "--proof", digest)
+        self.assertEqual(r.stdout, "F-log-snag: accepted by evaluator (cli, e2e)\n")
+
+    def test_f4_a_change_between_looking_and_accepting_is_refused(self):
+        digest = self.proof()
+        self.touch(ITEMS[0], "changed after the evaluator looked\n")
+        self.ready_after_edit()
+        before = self.raw_lines()
+        r = self.accept("--result", "C3=pass", "--proof", digest, "--json")
+        out = json.loads(r.stdout)
+        self.assertEqual((r.returncode, out["error"]["code"]), (1, "proof-changed"), r.stdout)
+        self.assertIn("verify --feature F-log-snag", out["error"]["next"])
+        self.assertEqual(self.raw_lines(), before)
+
+    def test_f4_without_a_pin_the_line_says_what_was_accepted(self):
+        r = self.accept("--result", "C3=pass")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("files as they are now", r.stdout)
+        self.assertEqual(json.loads(self.accept("--result", "C3=pass", "--json").stdout)["data"]["proof"], self.proof())
+
+    def test_f4_the_pin_has_the_form_it_is_shown_in(self):
+        for bad in ("sha256:abc", "SHA256:" + "0" * 64, "0" * 64, "sha256:" + "0" * 64 + "\n", "sha256:" + "G" * 64):
+            r = self.cli("accept", FID, "--by", "evaluator", "--mode", "cli", "--proof", bad, "--json")
+            self.assertEqual((r.returncode, json.loads(r.stdout)["error"]["code"]), (64, "usage"), bad)
+
+    def test_f4_a_change_after_the_check_but_before_the_write_is_seen_inside_the_lock(self):
+        from bp import records
+        digest = self.proof()
+        real = core.state_lock
+
+        @contextlib.contextmanager
+        def racing(root):
+            with real(root):
+                (root / ITEMS[0]).write_text("changed inside the race\n", encoding="utf-8")
+                yield
+        plan, state = self.load()
+        ctx = build_context(self.root, plan, state)
+        before = self.raw_lines()
+        with mock.patch.object(core, "state_lock", racing), self.assertRaises(BlueprintError) as cm:
+            records.record_evaluation(self.root, plan, FID, "evaluator", "cli", {"C3": "pass"}, [], None, ctx=ctx, proof=digest)
+        self.assertEqual((cm.exception.error, cm.exception.code), ("proof-changed", 1))
+        self.assertEqual(self.raw_lines(), before)
+
+    # ---- F5, F9, F10, not-verified next
+    def test_f5_every_next_runs_as_printed(self):
+        for args in (("--result", "C1"), ("--result", "C3=pass", "--result", "C3=fail"), ("--result", "C3=pass", "--evidence", "ev-1")):
+            r = self.cli("accept", FID, "--by", "evaluator", "--mode", "cli", *args, "--json")
+            nxt = json.loads(r.stdout)["error"]["next"]
+            self.assertNotIn("python .blueprint/bin/blueprint.py", nxt)
+            run = subprocess.run(runnable(nxt), shell=True, cwd=str(self.root), capture_output=True, text=True, env=S.tool_env())
+            self.assertEqual(run.returncode, 0, (nxt, run.stderr))
+        src = (S.PACKAGE / "records.py").read_text(encoding="utf-8").split("\n")
+        for n, line in enumerate(src, 1):
+            if "next=" in line or "next_ =" in line:
+                self.assertNotIn(".blueprint/bin/blueprint.py", line, n)
+
+    def test_f9_a_feature_with_only_command_criteria_says_what_accept_needs(self):
+        self.edit_plan(lambda p: feature_of(p).update(criteria=feature_of(p)["criteria"][:2]))
+        self.ok("verify", "--feature", FID, "--run")
+        r = self.accept()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("at least one --result <criterion>=pass", r.stdout)
+        self.assertIn("C1 (integration)", r.stdout)
+        self.assertIn("C2 (unit)", r.stdout)
+
+    def test_f10_run_arguments_are_checked_without_run_too(self):
+        for args in (("--repeat", "101"), ("--repeat", "0"), ("--timeout", "0"), ("--timeout", "-1")):
+            r = self.cli("verify", "--feature", FID, *args, "--json")
+            self.assertEqual((r.returncode, json.loads(r.stdout)["error"]["code"]), (64, "usage"), args)
+        self.assertEqual(self.cli("verify", "--feature", FID, "--repeat", "100", "--timeout", "1").returncode, 0)
+
+    def test_the_not_verified_next_names_the_command_that_helps(self):
+        self.touch(ITEMS[0], "edited\n")
+        e = json.loads(self.cli("accept", FID, "--by", "evaluator", "--mode", "cli", "--result", "C3=pass", "--json").stdout)["error"]
+        self.assertTrue(e["next"].rstrip().endswith("verify --run") or " verify --run " in e["next"], e["next"])
+        self.prove()
+        e = json.loads(self.cli("accept", FID, "--by", "evaluator", "--mode", "cli", "--result", "C3=pass", "--json").stdout)["error"]
+        self.assertIn("verify --feature F-log-snag --run", e["next"])
+
+    # ---- F7, F12, F13
+    def test_f7_protected_names_are_refused_in_every_case(self):
+        from bp import records
+        plan = bplan.load_plan(self.root)
+        for path in (".blueprint/State.json", ".blueprint/STATE.JSON", ".blueprint/VERIFICATION/F-x.jsonl", ".blueprint/Verification/F-new.jsonl",
+                     ".blueprint/Log.jsonl", ".blueprint/BIN/blueprint.py", ".blueprint/Studies/S-a/Study.json", ".blueprint/map.HTML",
+                     ".BLUEPRINT/state.json", ".blueprint/State.LOCK", ".blueprint/.GitIgnore"):
+            self.assertIn(MARKER, records.refuse("write", self.root, plan, path, None) or "", path)
+        for path in (".blueprint/Blueprint.json", ".blueprint/Studies/S-a/Behaviours.json"):
+            self.assertIsNone(records.refuse("write", self.root, plan, path, None), path)
+
+    def test_f12_a_record_file_with_two_hard_links_is_not_appended_to(self):
+        from bp import records
+        outside = self.root / "outside.jsonl"
+        outside.write_text("", encoding="utf-8")
+        folder = self.root / ".blueprint" / "verification"
+        folder.mkdir(parents=True, exist_ok=True)
+        try:
+            os.link(outside, folder / "F-linked.jsonl")
+        except (OSError, NotImplementedError):
+            self.skipTest("hard links are not available here")
+        plan, state = self.load()
+        rec = valid_check(self.root, plan)
+        with self.assertRaises(BlueprintError) as cm:
+            records.append_record(self.root, dict({k: v for k, v in rec.items() if k != "id"}, feature="F-linked"))
+        self.assertEqual(cm.exception.error, "write-failed")
+        self.assertEqual(outside.read_text(encoding="utf-8"), "")
+
+    def test_f13_the_project_folder_is_redacted_in_any_case_and_with_either_separator(self):
+        from bp import records
+        root = Path("C:/proj dir/app") if os.name == "nt" else Path("/work/proj dir/app")
+        shown = "c:/PROJ DIR/app/src" if os.name == "nt" else "/work/proj dir/app/src"
+        note = records._clean_note(f"see {shown} and {str(root)} and {root.as_posix()}", root)
+        self.assertNotIn("DIR", note.replace("<project>", ""))
+        self.assertNotIn("proj dir", note.lower())
+
+    # ---- F11
+    def test_f11_evidence_ids_come_from_validate_context(self):
+        from bp import records, validate
+        stub = "def validate_context(root, plan):\n    return {'evidenceIds': {'ev-0123456789abcdef': 1}}\n"
+        with extension(dict(own_sources(), **{"evidence.py": stub})):
+            from bp import records as rec2, validate as val2
+            known = val2.validation_context(bplan.load_plan(self.root), root=self.root)["evidenceIds"]
+            self.assertIn("ev-0123456789abcdef", known)
+            plan, state = self.load()
+            ctx = build_context(self.root, plan, state)
+            before = self.raw_lines()
+            with self.assertRaises(BlueprintError) as cm:
+                rec2.record_evaluation(self.root, plan, FID, "evaluator", "cli", {"C3": "pass"}, ["ev-fedcba9876543210"], None, ctx=ctx,
+                                       evidence_ids=known)
+            self.assertEqual(cm.exception.error, "evidence-not-found")
+            self.assertEqual(self.raw_lines(), before)
+            rec = rec2.record_evaluation(self.root, plan, FID, "evaluator", "cli", {"C3": "pass"}, ["ev-0123456789abcdef"], None, ctx=ctx,
+                                         evidence_ids=known)
+            self.assertEqual(rec["evidence"], ["ev-0123456789abcdef"])
+
+    def test_f11_a_value_that_cannot_answer_membership_refuses(self):
+        from bp import records
+        plan, state = self.load()
+        ctx = build_context(self.root, plan, state)
+        for known in (5, True, object()):
+            with self.assertRaises(BlueprintError) as cm:
+                records.record_evaluation(self.root, plan, FID, "evaluator", "cli", {"C3": "pass"}, ["ev-0123456789abcdef"], None, ctx=ctx,
+                                          evidence_ids=known)
+            self.assertEqual(cm.exception.error, "evidence-not-found", known)
+        records.record_evaluation(self.root, plan, FID, "evaluator", "cli", {"C3": "pass"}, [], None, ctx=ctx, evidence_ids=5)  # nothing cited

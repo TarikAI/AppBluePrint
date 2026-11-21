@@ -1594,6 +1594,14 @@ class IndependenceTest(unittest.TestCase):
         for by in ("evaluator ", "Evaluator", "", " ", None, 5):
             self.assertIsNotNone(features.independence_problem(self.plan, self.feature, self.items, by), repr(by))
 
+    def test_everyone_who_ever_claimed_or_marked_an_item_is_not_independent(self):
+        """The core grows `workedBy` with each claim and mark; the latest `by` alone forgets the first builder."""
+        state = {"files": {"crates/snag-api/src/main.rs": {"state": "built", "by": "backend-lead", "workedBy": ["evaluator", "backend-lead"]}}}
+        self.assertNotIn("evaluator", self.who(state))
+        self.assertIn("evaluator", self.who({"files": {"crates/snag-api/src/main.rs": {"by": "backend-lead", "workedBy": "evaluator"}}}))
+        self.assertEqual(features.worked_by({"by": "a", "workedBy": ["b", 5, "c"]}).count("b"), 1)
+        self.assertEqual(features.worked_by(None), [])
+
     def test_a_blank_roster_id_is_nobody(self):
         self.plan["roster"].append({"id": " ", "kind": "agent"})
         self.assertNotIn(" ", self.who())

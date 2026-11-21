@@ -680,10 +680,29 @@ def _same_person(a, b):
     return isinstance(a, str) and isinstance(b, str) and _fold(a) != "" and (a == b or _fold(a) == _fold(b))
 
 
+def worked_by(rec):
+    """Every id recorded as having claimed or marked a file: the core's `status.worked_by` when it has one, else the
+    same reading here (`workedBy`, a list of strings, plus the latest `by`). A damaged value names nobody."""
+    try:
+        from bp import status
+        reader = getattr(status, "worked_by", None)
+        if callable(reader):
+            got = reader(rec)
+            return [x for x in got if isinstance(x, str)] if isinstance(got, (list, tuple, set)) else []
+    except ImportError:
+        pass
+    if not isinstance(rec, dict):
+        return []
+    ids = [x for x in rec.get("workedBy") if isinstance(x, str)] if isinstance(rec.get("workedBy"), list) else []
+    return ids + ([rec["by"]] if isinstance(rec.get("by"), str) else [])
+
+
 def independence_problem(plan, feature, items, by, state=None, _roster=None):
     """Why `by` may not accept the feature, or None: the one rule behind `accept` and the ROSTER.md table (4.4).
     `by` must be a roster id (whole value, never blank), and must not be the feature's owner, the owner (by the owner
-    rules) of any item, or the id recorded in `state["files"][path]["by"]` for any item (who claimed or built it).
+    rules) of any item, or an id recorded for any item as having claimed or marked it (`state["files"][path]`: every id
+    in `workedBy`, which the core grows with each claim and mark, and the latest `by`). Independence covers the
+    feature's items, not the files they depend on: someone who wrote a `dependsOn` file may still accept.
     Ids are compared whole-value, except that two ids that fold to the same value (NFKC, case, outer whitespace)
     count as one person: that can only refuse."""
     roster = _roster if _roster is not None else roster_ids(plan)
@@ -702,8 +721,7 @@ def independence_problem(plan, feature, items, by, state=None, _roster=None):
             owner = None
         if _same_person(by, owner):
             return f"{by} owns {path}, which serves {_s(feature.get('id')) or 'the feature'}"
-        rec = files.get(path)
-        if isinstance(rec, dict) and _same_person(by, rec.get("by")):
+        if any(_same_person(by, who) for who in worked_by(files.get(path))):
             return f"{by} claimed or built {path}, which serves {_s(feature.get('id')) or 'the feature'}"
     return None
 
