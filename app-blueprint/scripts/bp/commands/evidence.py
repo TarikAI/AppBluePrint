@@ -156,58 +156,38 @@ def _spellings(path):
     return forms
 
 
-def _root_pattern(spelling):
-    """A known folder and the rest of a path below it, in any case on Windows: quoted (to the closing quote), or not
-    (inner folder names may hold spaces; the last part ends at a space)."""
-    head = "".join("[\\\\/]" if c in "\\/" else re.escape(c) for c in spelling)
-    flags = re.IGNORECASE if os.name == "nt" else 0
-    quoted = f"([\"'])(?:{head})(?:[\\\\/][^\"'\\r\\n]*)?\\1"
-    bare = f"(?:{head})(?:[\\\\/][^\\\\/\"'<>|\\r\\n]*(?=[\\\\/]))*(?:[\\\\/][^\\s\\\\/\"'<>|]*)?"
-    return re.compile(f"{quoted}|{bare}", flags)
+_MACHINE = re.compile(
+    r"(?<![A-Za-z0-9])[A-Za-z]:[\\/]"                    # a Windows drive path, C:\ or C:/
+    r"|(?<![A-Za-z0-9])[A-Za-z]:[\w~$.-]{1,255}\\"         # a drive-relative path, C:Users\x
+    r"|\\\\"                                              # UNC and device paths: \\host\..., \\?\, \\.\
+    r"|(?<![:/\w.~-])//[^/\s]"                            # //host/... that is no URL (no scheme's colon before it)
+    r"|(?<![\w.~-])/(?:home|Users|root|tmp|private|media|Volumes)/"   # POSIX folders that name a user or this machine
+    r"|(?<![\w.~-])/var/folders/|(?<![\w.~-])/mnt/[A-Za-z](?:/|\b)"
+    r"|(?<![\w.~-])~[\\/]|%USERPROFILE%|%HOMEPATH%|%HOMEDRIVE%|\$HOME\b"
+    r"|(?<!\.)\.\.[\\/](?:\.\.[\\/]){0,16}(?:Users|home)[\\/]")   # a relative path climbing into the users' folders
 
 
-_ABSOLUTE = re.compile(r"(?<![\w.~:-])(?:[A-Za-z]:[\\/]|/)[^\"'<>|\r\n]{0,1024}")
-
-
-def _typed_spellings(text, folders):
-    """Spellings of the known folders as they appear in text but in no form _spellings knows (a path mixing short
-    and long names, say): every absolute path in the text is cut back folder by folder, and a prefix that is the
-    same folder on disk as a known one (os.path.samefile) is added with its label. Network paths are not probed."""
-    out = []
-    for m in _ABSOLUTE.finditer(text):
-        parts = re.split(r"([\\/])", m.group(0))
-        for i in range(len(parts), 0, -1):
-            prefix = "".join(parts[:i]).rstrip("\\/ ")
-            if len(prefix) <= 3 or not os.path.isdir(prefix):
-                continue
-            for folder, label in folders:
-                try:
-                    if os.path.samefile(prefix, folder):
-                        out.append((prefix, label))
-                except OSError:
-                    continue
-    return out
-
-
-def redact_paths(root, text):
-    """Text an agent typed (a claim, a limitation) with the project root and other absolute paths removed. The project
-    root, the user's home and the temp folder are replaced first, whole and in every spelling they can be typed in
-    (_spellings), longest first; then the path part of learn.redact catches any other absolute path (its URL,
-    e-mail and token rules would damage the claim). Keys are left alone."""
+def machine_path(root, text):
+    """True when text holds a path on this machine (R2-M7): the project root, the home folder or the temp folder in
+    any spelling (either separator, any case on Windows, the 8.3 short and the long form), a Windows drive path, a
+    UNC or device path, or a POSIX path under the folders that name a user or this machine. URL paths, routes such
+    as /api/users and relative paths are not."""
     import tempfile
-    from bp import learn
-    from bp.study import safety
-    s = safety.clean_text(str(text))
-    folders = [(str(root), "<project>")]
-    for folder in {os.path.expanduser("~"), tempfile.gettempdir(), os.environ.get("TEMP"), os.environ.get("TMP")}:
-        if folder and os.path.isabs(folder):
-            folders.append((folder, "<path>"))
-    known = [(f, label) for folder, label in folders for f in _spellings(folder)]
-    known += _typed_spellings(s, folders)
-    for spelling, label in sorted(known, key=lambda x: -len(x[0])):
-        s = _root_pattern(spelling).sub(label, s)
-    s = learn._RX_WINPATH.sub("<path>", s)
-    return learn._RX_UNIXPATH.sub("<path>", s)
+    s = str(text)
+    if _MACHINE.search(s):
+        return True
+    norm = s.replace("\\", "/")
+    if os.name == "nt":
+        norm = norm.lower()
+    for folder in {str(root), os.path.expanduser("~"), tempfile.gettempdir(), os.environ.get("TEMP"),
+                   os.environ.get("TMP")}:
+        if not folder or not os.path.isabs(folder):
+            continue
+        for form in _spellings(folder):
+            form = form.replace("\\", "/")
+            if (form.lower() if os.name == "nt" else form) in norm:
+                return True
+    return False
 
 
 def _add(args, root):
@@ -234,8 +214,12 @@ def _add(args, root):
             raise BlueprintError("evidence-not-found", "a --link names evidence that is not in .blueprint/studies",
                                  next=run_hint(root, "evidence list", MODULE))
     src = _source(root, args.path, args.line)
-    rec = evidence.make_record(study, args.kind, args.key, redact_paths(root, args.claim), args.basis, src, None,
-                               [redact_paths(root, x) for x in args.limitation], "unknown", args.link,
+    for name, value in [("--claim", args.claim)] + [("--limitation", x) for x in args.limitation]:
+        if machine_path(root, value):
+            raise usage(f"{name} holds a path on this machine; nothing was stored. Use --path for a file of the "
+                        "project, or describe the place in words")
+    rec = evidence.make_record(study, args.kind, args.key, args.claim, args.basis, src, None,
+                               list(args.limitation), "unknown", args.link,
                                by=_by(args.by), at=core.now_iso())
     rec, added = evidence.add(root, study, rec)
     emit(args, args.cmd, {"record": rec, "added": added},
@@ -245,8 +229,8 @@ def _add(args, root):
 def freshness_of(root, sid, study, records, target=None):
     """(states, not checked: {id: limit}) for records of one study; a study whose study.json is damaged is unknown."""
     from bp import evidence
-    if study is None:
-        return {r["id"]: "unknown" for r in records}, {}
+    if study is None:  # a damaged study.json: its records cannot be checked, and that is never silent
+        return {r["id"]: "unknown" for r in records}, {r["id"]: "damaged study.json" for r in records}
     return evidence.freshness_check(root, study, records, target=target, resolvers=resolvers())
 
 
@@ -312,8 +296,6 @@ def _list(args, root):
     if args.stale:
         data["notChecked"] = not_checked
     emit(args, args.cmd, data, lines)
-    if args.stale and not_checked:
-        sys.exit(1)  # a check stopped by the tool's own limit is never silent
 
 
 def _show(args, root):

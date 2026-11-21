@@ -8,6 +8,7 @@ LIMITS, SKIP_REASONS, STOP_REASONS, Skip, Stop, Budget, scan_windows, finditer, 
 SECRET_PATTERNS, excerpt, one_line, clean_text, decode_text, read_file, is_link, PARSE_ERRORS, UTF8_NOTE, deeper_note,
 MISSING, ZIP_MAGIC, ZIP_SUFFIXES.
 """
+import bisect
 import io
 import json
 import os
@@ -30,6 +31,7 @@ LIMITS = {
     "textBytes": 5 * MIB,            # a text file a lane reads; larger: skip `too-large`
     "memberBytes": 64 * MIB,         # one archive member (dex files need it)
     "totalBytes": 512 * MIB,         # everything read in one study (Stop "byte-limit")
+    "hashBytes": 4 * 1024 * MIB,     # the largest file target (hashed whole, counted apart: coverage.bytesHashed)
     "archiveEntries": 50_000,        # entries of one archive; the rest is a `limit` skip
     "ratioBytes": 1 * MIB,           # a member over this size ...
     "ratio": 100,                    # ... and over 100 times its compressed size is skipped (`ratio`)
@@ -102,7 +104,8 @@ class Budget:
         self.files_scanned = 0
         self.bytes_read = 0
         self.by_kind = {}
-        self.hardlinks = 0  # files read that have more than one hard link (a study note)
+        self.hardlinks = 0
+        self.bytes_hashed = 0  # the whole-target hash, counted apart from the read budget  # files read that have more than one hard link (a study note)
 
     def check_time(self):
         if self.clock() - self.started > self.limits["timeLimit"]:
@@ -197,31 +200,37 @@ def decode_text(data):
 # Contract 6.2, as built. Every pattern starts with a literal, and every scan is linear on every input (a test builds
 # each pattern's worst cases): the patterns below run window by window, except two that are found by hand on the
 # whole text, because their regex form is not linear or needs more than one window:
-#   private-key: a PEM block, from "-----BEGIN <words> PRIVATE KEY-----" to the next "-----END <words> PRIVATE
-#     KEY-----", or to the end of the text when there is none (pem_spans); every line inside it is key material;
+#   private-key: a private-key block, PEM ("-----BEGIN <words> PRIVATE KEY-----") or PGP ("-----BEGIN PGP PRIVATE
+#     KEY BLOCK-----"), through the next matching END line, or to the end of the text when there is none
+#     (pem_spans): every line inside it is key material, the END line and a short last line included;
 #   jwt: three runs of word characters or '-' (10+ after "eyJ", 10+ after ".eyJ", 10+ after the next "."), found
 #     from each literal ".eyJ" and expanded by hand, so each character is looked at a bounded number of times.
+# bearer allows any run of whitespace or control characters before the token (the run belongs to one "bearer").
 SECRET_PATTERNS = {
     "aws-key": r"AKIA[0-9A-Z]{16}",
     "google-api-key": r"AIza[0-9A-Za-z_\-]{35}",
-    "private-key": r"-----BEGIN [A-Z ]{0,64}PRIVATE KEY-----",
+    "private-key": r"-----BEGIN (?:[A-Z ]{0,64}PRIVATE KEY|PGP PRIVATE KEY BLOCK)-----",
     "jwt": r"eyJ[\w-]{10,}\.eyJ[\w-]{10,}\.[\w-]{10,}",
     "stripe-live": r"[sr]k_live_[0-9A-Za-z]{16,}",
     "slack": r"xox[abprs]-[0-9A-Za-z-]{10,}",
     "github-token": r"gh[pousr]_[0-9A-Za-z]{30,}",
-    "bearer": r"(?i)bearer\s{1,64}[\w.\-]{16,}",
+    "bearer": r"(?i)bearer[\s\x00-\x1f\x7f]+[\w.\-]{16,}",
 }
 _SECRET_RX = {name: re.compile(rx) for name, rx in SECRET_PATTERNS.items()}
 # a cheap test before a pattern runs: the literal it starts with (bearer: lower-cased)
 _SECRET_HINT = {"aws-key": "AKIA", "google-api-key": "AIza", "private-key": "-----BEGIN ", "jwt": ".eyJ",
                 "stripe-live": "k_live_", "slack": "xox", "github-token": "gh", "bearer": "bearer"}
-_PEM_HEAD = re.compile(r"-----BEGIN [A-Z ]{0,64}PRIVATE KEY-----")
-_PEM_END = re.compile(r"-----END [A-Z ]{0,64}PRIVATE KEY-----")
+_PEM_HEAD = re.compile(r"-----BEGIN (?:[A-Z ]{0,64}PRIVATE KEY|PGP PRIVATE KEY BLOCK)-----")
+_PEM_END = re.compile(r"-----END (?:[A-Z ]{0,64}PRIVATE KEY|PGP PRIVATE KEY BLOCK)-----")
+_KEY_MARK = re.compile(r"-----(?:BEGIN|END) (?:[A-Z ]{0,64}PRIVATE KEY|PGP PRIVATE KEY BLOCK)-----")
+PLACEHOLDER = "<secret:private-key>"
 
 
 def pem_spans(text):
-    """(start, end) of every PEM private-key block of text: from its BEGIN line to the end of the next matching END
-    line, or to the end of the text when there is none. str.find and two bounded matches: linear."""
+    """(start, end) of every private-key block of text (PEM or PGP): from its BEGIN line to the end of the next
+    matching END line, or to the end of the text when there is none (so a file that only mentions a BEGIN line, a
+    parser or a test, has everything after it treated as key material: the safe direction). str.find and two
+    bounded matches: linear."""
     out, pos = [], 0
     while True:
         i = text.find("-----BEGIN ", pos)
@@ -310,28 +319,100 @@ def scrub(text):
     return text, found
 
 
-_PEM_CACHE = {}
+def final(text):
+    """text scrubbed until scrubbing changes nothing: the last step of every stored string (after it is put on one
+    line or cut), so a stored value always equals its own scrub."""
+    for _ in range(8):
+        again = scrub(text)[0]
+        if again == text:
+            return text
+        text = again
+    return text
+
+
 _KEY_LINE = re.compile(r"[A-Za-z0-9+/=]{40,}")
 
 
-def _key_line(line):
-    """A line that is only base64 characters, 40 or more, with a digit, an upper-case and a lower-case letter: what
-    a line of key material looks like when no BEGIN header is in sight (a lane passed one line)."""
-    return (_KEY_LINE.fullmatch(line) is not None and any(c.isdigit() for c in line)
-            and any(c.isupper() for c in line) and any(c.islower() for c in line))
+def loose_excerpt(line):
+    """An excerpt from a line given alone (its context unknown): scrubbed, on one line, at most 160 characters;
+    "" (dropped) when it is a BEGIN or END line of a private key or consists only of 40 or more base64 characters
+    (it may be key material)."""
+    if not isinstance(line, str) or not line:
+        return ""
+    line = clean_text(line)
+    if _KEY_MARK.search(line) or _KEY_LINE.fullmatch(one_line(line)):
+        return ""
+    return final(one_line(scrub(line)[0])[:LIMITS["excerpt"]].rstrip())
 
 
-def _in_pem(text, col):
-    """True when offset col of text lies inside a PEM private-key block of the whole text (cached per text)."""
-    if "-----BEGIN " not in text:
-        return False
+class Prepared:
+    """A text made ready for excerpts once, in linear time: cleaned of lone surrogates, its line starts, and the
+    private-key blocks of the whole text (pem_spans). An excerpt is then taken by line or by offset in time
+    proportional to the line, never the file: a line inside a block (the END line and a short last line included)
+    gives the placeholder <secret:private-key>."""
+
+    def __init__(self, text):
+        self.text = t = clean_text(text if isinstance(text, str) else "")
+        starts, i = [0], t.find("\n")
+        while i >= 0:
+            starts.append(i + 1)
+            i = t.find("\n", i + 1)
+        self.starts = starts
+        self.blocks = pem_spans(t)
+        self._block_starts = [s for s, _ in self.blocks]
+
+    def lines(self):
+        return len(self.starts)
+
+    def _line_of(self, offset):
+        return bisect.bisect_right(self.starts, offset) - 1
+
+    def _bounds(self, index):
+        start = self.starts[index]
+        end = self.starts[index + 1] - 1 if index + 1 < len(self.starts) else len(self.text)
+        if end > start and self.text[end - 1] == "\r":
+            end -= 1
+        return start, end
+
+    def in_block(self, start, end):
+        """True when [start, end) touches a private-key block."""
+        k = bisect.bisect_right(self._block_starts, max(start, end - 1)) - 1
+        return k >= 0 and self.blocks[k][1] > start
+
+    def at(self, offset):
+        """The excerpt of the line holding offset, from that offset."""
+        offset = min(max(0, int(offset)), len(self.text))
+        index = self._line_of(offset)
+        start, end = self._bounds(index)
+        offset = min(offset, end)
+        if self.in_block(start, max(end, start + 1)):
+            return PLACEHOLDER
+        lo, hi = max(start, offset - 1024), min(end, offset + 1024 + LIMITS["excerpt"])
+        region, rel = self.text[lo:hi], offset - lo
+        clean, _ = scrub(region)
+        at = len(scrub(region[:rel])[0]) if rel else 0
+        return final(one_line(clean[at:])[:LIMITS["excerpt"]].rstrip())
+
+    def line(self, number):
+        """The excerpt of line `number` (counted from 1 by line feeds), or "" past the end."""
+        if not isinstance(number, int) or isinstance(number, bool) or not 1 <= number <= len(self.starts):
+            return ""
+        return self.at(self.starts[number - 1])
+
+
+_PREPARED = {}
+
+
+def prepared(text):
+    """Prepared(text), cached for the last few texts (keyed by length and hash: CPython keeps a string's hash, so a
+    second call on the same text costs nothing)."""
     key = (len(text), hash(text))
-    spans = _PEM_CACHE.get(key)
-    if spans is None:
-        if len(_PEM_CACHE) > 8:
-            _PEM_CACHE.clear()
-        spans = _PEM_CACHE[key] = pem_spans(text)
-    return any(s_ <= col < e for s_, e in spans)
+    p = _PREPARED.get(key)
+    if p is None:
+        if len(_PREPARED) > 8:
+            _PREPARED.clear()
+        p = _PREPARED[key] = Prepared(text)
+    return p
 
 
 _BREAKS = "\r\n"  # lines end at a line feed (a CR before one is dropped), as editors and lanes count
@@ -345,28 +426,13 @@ def one_line(text):
 
 
 def excerpt(text, col=0):
-    """At most 160 characters of the line of text that holds offset col, starting there, on one line, scrubbed of
-    secrets (scrubbed before it is cut, with 4 KiB of the line around it, so a cut never leaves part of a secret).
-    A line inside a PEM private-key block of the whole text, or a line that looks like key material (_key_line), is
-    <secret:private-key>. "" for no text. Pass the whole text and the offset, not a line, so the block is seen."""
+    """At most 160 characters of the line of text that holds offset col, from there, on one line, scrubbed (with 1 KiB
+    of the line on each side, before it is cut, so a cut never leaves part of a secret), "" for no text. A line inside
+    a private-key block of the whole text is <secret:private-key>. Pass the whole text and the offset, not a line,
+    so the block is seen; the text is prepared once (Prepared) and each call costs the line, not the file."""
     if not isinstance(text, str) or not text:
         return ""
-    text = clean_text(text)
-    col = min(max(0, int(col)), len(text))
-    if _in_pem(text, col):  # decided on the whole text, before it is cut into lines
-        return "<secret:private-key>"
-    lo, hi = max(0, col - 4096), min(len(text), col + 4096)
-    region = text[lo:hi]
-    rel = col - lo
-    start = max(region.rfind(c, 0, rel) for c in _BREAKS) + 1
-    ends = [i for i in (region.find(c, rel) for c in _BREAKS) if i >= 0]
-    line = region[start:min(ends) if ends else len(region)]
-    rel -= start
-    if _key_line(line.strip()):
-        return "<secret:private-key>"  # a line of 40+ base64 characters alone: treated as key material
-    clean, _ = scrub(line)
-    at = len(scrub(line[:rel])[0]) if rel else 0
-    return one_line(clean[at:])[:LIMITS["excerpt"]].rstrip()
+    return prepared(text).at(col)
 
 
 # ------------------------------------------------------------------------------------------------ zip archives
@@ -549,10 +615,15 @@ def _open_no_follow(path):
     first everywhere). A link or anything that is not a regular file is Skip('symlink') or Skip('unsupported')."""
     if is_link(path):
         raise Skip("symlink")
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0))
+    if not stat.S_ISREG(os.lstat(path).st_mode):  # a named pipe or a device would block an open: never opened
+        raise Skip("unsupported", "not a regular file")
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+                 | getattr(os, "O_NONBLOCK", 0))
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise Skip("unsupported", "not a regular file")
+        if getattr(os, "O_NONBLOCK", 0) and hasattr(os, "set_blocking"):
+            os.set_blocking(fd, True)
         return os.fdopen(fd, "rb")
     except BaseException:
         os.close(fd)

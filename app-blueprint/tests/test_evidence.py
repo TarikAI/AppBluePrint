@@ -72,7 +72,7 @@ class RecordTest(unittest.TestCase):
         r = rec(key="k " + secret, claim=f"Uses {secret}\nacross lines.", data={"v": secret, secret: [secret, 1.5],
                                                                                "nan": float("nan")},
                 source={"artifact": ".", "path": "a.txt", "line": 3, "offset": None, "digest": DIG,
-                        "excerpt": "x" * 150 + secret + "y" * 300},
+                        "excerpt": "x " * 75 + secret + " y" * 150},
                 limitations=["see " + secret, "see " + secret])
         blob = json.dumps(r)
         self.assertNotIn(secret, blob)
@@ -255,7 +255,7 @@ class DamagedStudyTest(TempProject):
             self.assertNotIn("Traceback", r.stderr)
             r = self.cli("study", "list", extra={})
             self.assertEqual(r.returncode, 0)
-            self.assertIn("left out", r.stderr)
+            self.assertIn("warning: .blueprint/studies/S-d/study.json", r.stderr)
             self.assertEqual(path.read_bytes(), bad)
 
     def test_a_damaged_behaviours_json_stops_export(self):
@@ -726,7 +726,7 @@ class ArchiveFreshnessTest(TempProject):
         self.assertIn("1 record not checked: too-large reached", self.cli("evidence", "stale").stdout)
         self.assertEqual(self.cli("evidence", "stale", "--strict").returncode, 1)
         r2 = self.cli("evidence", "list", "--stale", "--json")
-        self.assertEqual(r2.returncode, 1)
+        self.assertEqual(r2.returncode, 0)  # exit 1 belongs to evidence stale --strict only
         self.assertEqual(json.loads(r2.stdout)["data"]["notChecked"], {"S-big": {"count": 1, "limits": ["too-large"]}})
         states, unchecked = evidence.freshness_check(self.root, evidence.load_study(self.root, "S-big"),
                                                      evidence.load(self.root, "S-big"))
@@ -791,50 +791,51 @@ class NextTextsTest(TempProject):
 
 
 class AgentTextTest(TempProject):
-    def test_paths_typed_into_evidence_add_are_redacted(self):
-        """m4, with a positive control: the scanner finds the raw text."""
+    def rows(self):
+        """Paths on this machine in every spelling the reviewer tried (R2-M7)."""
+        from bp.commands import evidence as cmd
+        root, home, temp = self.root, os.path.expanduser("~"), tempfile.gettempdir()
+        (root / "src").mkdir(exist_ok=True)
+        r = str(root)
+        short = cmd._short_name(root) or r
+        rows = {"root plain": r, "root posix": root.as_posix(), "8.3 short": short, "8.3 short + file": short + BS + "src",
+                "quoted with spaces": f'"{r}{BS}src{BS}a b.js"', "single quoted": f"'{r}{BS}src{BS}a.js'",
+                "device prefix": BS * 2 + "?" + BS + r + BS + "src", "UNC admin share": BS * 2 + "localhost" + BS + "C$" + BS + "x",
+                "UNC server": BS * 2 + "fileserver" + BS + "share" + BS + "team docs" + BS + "plan.txt",
+                "file URL": "file:///" + root.as_posix(), "home": home + BS + "Documents", "home posix": Path(home).as_posix() + "/x",
+                "temp": temp + BS + "other dir" + BS + "x.txt", "tilde": "~/projects/app/x.txt",
+                "relative escape": ".." + BS + ".." + BS + "Users" + BS + "someone" + BS + "x.txt",
+                "wsl mount": "/mnt/c/Users/someone/x.txt", "posix home": "/home/someone/my files/x.txt",
+                "posix tmp": "/tmp/build/x", "macos": "/Users/someone/x", "var folders": "/var/folders/ab/x",
+                "media": "/media/usb/x.txt", "env var": "%USERPROFILE%" + BS + "x.txt", "drive no slash": "C:Users" + BS + "someone",
+                "forward drive": "d:/work/app", "double slash host": "see //fileserver/share/x"}
+        if os.name == "nt":
+            rows.update({"root lower": r.lower(), "drive lower": r[0].lower() + r[1:], "mixed separators": r.replace(BS, "/", 2)})
+        return rows
+
+    def test_paths_on_this_machine_are_refused_and_nothing_is_stored(self):
+        """R2-M7, with a positive control: every row is a leak the scanner finds; evidence add refuses each (64)."""
+        from bp.commands import evidence as cmd
         machine = machine_strings(self.tmp, self.root)
-        typed = f"Seen in {self.root / 'a.js'} and /home/someone/x"
-        self.assertTrue(leaks(typed, machine))
-        r = self.cli("evidence", "add", "--kind", "note.a", "--key", "k", "--claim", typed, "--basis", "inferred",
-                     "--limitation", "only " + str(self.tmp), "--json", extra={})
+        for name, path in self.rows().items():
+            text = f"Seen in {path} and then more words."
+            self.assertTrue(cmd.machine_path(self.root, text), name)
+        for ok in ("https://example.test/a/b", "GET /api/users", "/api/home/x", "src/a.js", "../lib/x.js", "a // b",
+                   "http://host/tmp/x", "ratio 3:2", "/etc/passwd", "S-acme", "ev-0123456789abcdef"):
+            self.assertFalse(cmd.machine_path(self.root, ok), ok)
+        for name, path in list(self.rows().items())[:8] + [("posix home", "/home/someone/x")]:
+            base = ["evidence", "add", "--kind", "note.a", "--key", "k", "--basis", "inferred", "--json"]
+            for flag, args in (("--claim", base + ["--claim", f"Seen in {path} now."]),
+                               ("--limitation", base + ["--claim", "A claim.", "--limitation", f"only {path}"])):
+                r = self.cli(*args, extra={})
+                self.assertEqual(r.returncode, 64, f"{name} {flag}: {r.stdout}")
+                self.assertEqual(json.loads(r.stdout)["error"]["code"], "usage")
+        self.assertFalse((self.root / ".blueprint/studies").exists())
+        r = self.cli("evidence", "add", "--kind", "note.a", "--key", "k", "--claim", "GET /api/users moved to src/a.js.",
+                     "--basis", "inferred", "--limitation", "see https://example.test/docs", extra={})
         self.assertEqual(r.returncode, 0, r.stderr)
-        stored = json.loads(r.stdout)["data"]["record"]
-        self.assertEqual(leaks(stored["claim"] + " ".join(stored["limitations"]), machine), [])
-        self.assertIn("<project>", stored["claim"])
         for name, text in project_text(self.root).items():
             self.assertEqual(leaks(text, machine), [], name)
-
-    def test_every_spelling_of_the_root_is_redacted_whole(self):
-        """m4: the project root as typed, resolved, in its 8.3 short form, with either separator, in another case on
-        Windows, quoted or not, followed by folder names with spaces; then the home and temp folders the same way."""
-        from bp.commands import evidence as cmd
-        (self.root / "my folder").mkdir()
-        root = self.root
-        forms = {str(root), root.as_posix(), str(root.resolve()), root.resolve().as_posix()}
-        short = cmd._short_name(root)
-        if short:
-            forms |= {short, short.replace(BS, "/")}
-            mixed = cmd._short_name(root.parent)  # short folders above, the long name below: what CI runners type
-            if mixed:
-                forms |= {mixed + BS + root.name, mixed.replace(BS, "/") + "/" + root.name}
-        if os.name == "nt":
-            forms |= {f.upper() for f in list(forms)} | {f.lower() for f in list(forms)}
-        machine = machine_strings(self.tmp, root) | ({short, short.replace(BS, "/")} if short else set())
-        home, temp = os.path.expanduser("~"), tempfile.gettempdir()
-        for form in sorted(forms):
-            for typed in (f"Seen in {form}{BS}my folder{BS}a b.js and more", f'see "{form}/my folder/x y.txt" here',
-                          f"at {form}/a.js", f"see {form}"):
-                self.assertTrue(leaks(typed, machine), typed)  # the positive control, for each spelling
-                got = cmd.redact_paths(root, typed)
-                self.assertEqual(leaks(got, machine), [], f"{typed!r} -> {got!r}")
-                self.assertIn("<project>", got, typed)
-                self.assertNotIn("my folder", got, typed)  # the rest of the path goes with the root
-        for folder in (home, temp):
-            for typed in (f"in {folder}{BS}some dir{BS}x.txt now", f'"{Path(folder).as_posix()}/a b/c.txt"'):
-                got = cmd.redact_paths(root, typed)
-                self.assertEqual(leaks(got, machine), [], f"{typed!r} -> {got!r}")
-        self.assertEqual(cmd.redact_paths(root, "src/a.js and https://example.test/a"), "src/a.js and https://example.test/a")
 
     def test_by_is_scrubbed(self):
         """m3."""
@@ -924,6 +925,171 @@ class ImportRound1Test(TempProject):
         self.assertLessEqual(len(got["authorization"]["statement"]), 500)
         self.assertIsNone(got["authorization"]["by"])
         self.assertEqual(self.cli("study", "show", s["id"], extra={}).returncode, 0)
+
+
+# ------------------------------------------------------------------------------------------------ review round 2
+
+class StrictRound2Test(TempProject):
+    """R2-M3: --strict fails on stale, missing, not checked (a limit, unreadable) and a damaged study.json; unknown is
+    neutral only when the tool cannot look."""
+
+    def study_zip(self):
+        files = {f"m/{i:03d}.txt": f"member {i}\n" for i in range(20)}
+        FA.make_xapk(self.root / "big.zip", {}, files=files)
+        self.assertEqual(self.cli("study", "mobile", self.root / "big.zip", "--own").returncode, 0)
+
+    def counts(self):
+        r = self.cli("evidence", "stale", "--strict", "--json")
+        return r.returncode, json.loads(r.stdout)["data"]
+
+    def test_an_archive_replaced_by_garbage_is_stale(self):
+        self.study_zip()
+        (self.root / "big.zip").write_bytes(b"garbage\n")
+        code, data = self.counts()
+        self.assertEqual(code, 1)
+        self.assertEqual(data["studies"]["S-big"]["stale"], 20)
+
+    def test_a_member_that_no_longer_parses_is_stale(self):
+        self.study_zip()
+        z = FA.zip_bytes([FA.ZipEntry("m/000.txt", b"", method=8, compressed=b"\xff" * 24, usize=100, crc=1)] +
+                         [FA.ZipEntry(f"m/{i:03d}.txt", f"member {i}\n") for i in range(1, 20)])
+        (self.root / "big.zip").write_bytes(z)
+        code, data = self.counts()
+        self.assertEqual((code, data["studies"]["S-big"]["stale"], data["studies"]["S-big"]["fresh"]), (1, 1, 19))
+
+    def test_a_file_replaced_by_a_folder_or_a_link_is_stale(self):
+        self.put("src/a.js", "a\n")
+        self.put("src/b.js", "b\n")
+        engine.run_study(self.root, "source", self.root / "src", tracked=True, lanes=[SOURCE])
+        (self.root / "src/a.js").unlink()
+        (self.root / "src/a.js").mkdir()
+        code, data = self.counts()
+        self.assertEqual((code, data["studies"]["S-src"]["stale"]), (1, 1))
+        shutil.rmtree(self.root / "src")
+        self.put("src", "now a file\n")
+        code, data = self.counts()
+        self.assertEqual((code, data["studies"]["S-src"]["stale"]), (1, 2))
+
+    def test_a_damaged_study_json_fails_strict_and_is_bad_study_when_named(self):
+        self.put("src/a.js", "a\n")
+        engine.run_study(self.root, "source", self.root / "src", tracked=True, lanes=[SOURCE])
+        (self.root / ".blueprint/studies/S-src/study.json").write_text("{broken", encoding="utf-8")
+        code, data = self.counts()
+        self.assertEqual(code, 1)
+        self.assertEqual(data["notChecked"]["S-src"]["limits"], ["damaged study.json"])
+        r = self.cli("evidence", "stale", "--study", "S-src", "--json")
+        self.assertEqual((r.returncode, json.loads(r.stdout)["error"]["code"]), (1, "bad-study"))
+
+    def test_neutral_unknown_does_not_fail(self):
+        p = FA.make_apk(self.tmp / "vendor.apk", FA.SNAGDESK_MANIFEST, None, None, files={"a.txt": "a"})
+        engine.run_study(self.root, "mobile", p, own=True, lanes=[MOBILE])
+        code, data = self.counts()
+        self.assertEqual((code, data["notChecked"]), (0, {}))
+
+    def test_many_members_with_a_small_file_limit(self):
+        """The two surviving mutations of round 2: the archive is opened once per pass and listing it is not charged
+        against the file limit, so 200 members check with a limit of 100 files."""
+        files = {f"m/{i:03d}.txt": f"member {i}\n" for i in range(200)}
+        p = FA.make_xapk(self.root / "many.zip", {}, files=files)
+        engine.run_study(self.root, "mobile", p, own=True, lanes=[MOBILE])
+        files["m/000.txt"] = "changed\n"
+        FA.make_xapk(self.root / "many.zip", {}, files=files)
+        study, recs = evidence.load_study(self.root, "S-many"), evidence.load(self.root, "S-many")
+        opened = []
+        real = safety.SafeZip.__init__
+
+        def counting(self_, *a, **kw):
+            opened.append(1)
+            return real(self_, *a, **kw)
+        with mock.patch.object(safety.SafeZip, "__init__", counting):
+            states, unchecked = evidence.freshness_check(self.root, study, recs, budget=safety.Budget({"files": 100}))
+        self.assertEqual(sorted(states.values()).count("fresh"), 199)
+        self.assertEqual(list(states.values()).count("stale"), 1)
+        self.assertEqual((unchecked, len(opened)), ({}, 1))
+
+
+@unittest.skipIf(os.name == "nt" or not hasattr(os, "mkfifo"), "named pipes are a POSIX thing")
+class FifoTest(TempProject):
+    """Minor 1: a named pipe in place of a study file never blocks a command."""
+
+    def test_a_fifo_is_ignored_and_counted_never_opened(self):
+        engine.run_study(self.root, "source", self.root, study_id="S-a", lanes=[])
+        fifo_study = self.root / ".blueprint/studies/S-fifo"
+        fifo_study.mkdir()
+        os.mkfifo(fifo_study / "study.json")
+        os.unlink(self.root / ".blueprint/studies/S-a/evidence.jsonl")
+        os.mkfifo(self.root / ".blueprint/studies/S-a/evidence.jsonl")
+        for args in (["status"], ["render", "--force"], ["study", "list"], ["evidence", "list"], ["evidence", "stale"],
+                     ["study", "show", "S-fifo"]):
+            try:
+                r = subprocess.run([S.PY, str(isolated_launcher(LANES))] + args + ["--root", str(self.root)],
+                                   cwd=self.root, capture_output=True, text=True, env=S.tool_env(), timeout=30)
+            except subprocess.TimeoutExpired:
+                self.fail(f"{args} blocked on a named pipe")
+            self.assertNotIn("Traceback", r.stderr, args)
+        self.assertEqual(evidence.load_info(self.root, "S-a"), ([], 1))
+
+
+class WriteFailureTest(TempProject):
+    def test_import_prepares_every_file_first_and_says_what_was_written(self):
+        """Minor 2."""
+        BundleTest.make_store(self)
+        bundle = evidence.export_bundle(self.root)
+        other = TempProject()
+        other.setUp()
+        self.addCleanup(other.doCleanups)
+        (other.root / ".blueprint/studies").mkdir()
+        (other.root / ".blueprint/studies/S-one").write_text("in the way", encoding="utf-8")
+        with self.assertRaises(BlueprintError) as cm:
+            evidence.import_bundle(other.root, bundle)
+        self.assertEqual(cm.exception.error, "write-failed")
+        self.assertEqual([p.name for p in (other.root / ".blueprint/studies").rglob("*") if p.is_file()], ["S-one"])
+        other2 = TempProject()
+        other2.setUp()
+        self.addCleanup(other2.doCleanups)
+        calls = []
+        real = os.replace
+
+        def flaky(a, b):
+            calls.append(b)
+            if len(calls) == 2:
+                raise OSError(5, "input/output error")  # not PermissionError: that one is retried on Windows
+            return real(a, b)
+        with mock.patch.object(evidence.os, "replace", flaky):
+            with self.assertRaises(BlueprintError) as cm:
+                evidence.import_bundle(other2.root, bundle)
+        msg = cm.exception.message
+        self.assertIn("stopped part-way", msg)
+        self.assertIn("written: ", msg)
+        self.assertIn("not written: ", msg)
+        self.assertNotIn("nothing was written", msg)
+        self.assertEqual(list((other2.root / ".blueprint/studies").rglob("*.tmp")), [])
+
+    def test_add_says_the_record_is_stored_when_the_count_cannot_be_updated(self):
+        """Minor 3."""
+        evidence.add(self.root, "S-notes", rec_for_tests("k1"))
+        real = evidence.write_study_held
+        state = {"fail": True}
+
+        def failing(root, study):
+            if state.pop("fail", False):
+                raise BlueprintError("write-failed", "cannot write")
+            return real(root, study)
+        with mock.patch.object(evidence, "write_study_held", failing):
+            with self.assertRaises(BlueprintError) as cm:
+                evidence.add(self.root, "S-notes", rec_for_tests("k2"))
+        self.assertEqual(cm.exception.error, "write-failed")
+        self.assertIn("is stored", cm.exception.message)
+        self.assertIn("stale until the next write", cm.exception.message)
+        self.assertEqual(len(evidence.load(self.root, "S-notes")), 2)
+        evidence.add(self.root, "S-notes", rec_for_tests("k3"))
+        self.assertEqual(evidence.load_study(self.root, "S-notes")["counts"]["evidence"], 3)
+
+
+def rec_for_tests(key):
+    return evidence.make_record("S-notes", "note.x", key, "A claim.", "inferred",
+                                {"artifact": ".", "path": None, "line": None, "offset": None, "digest": None},
+                                by="agent:t")
 
 
 TAB = S.SKILL / "assets" / "tab-studies.js"

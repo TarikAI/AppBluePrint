@@ -47,14 +47,14 @@ def proof_digest_bytes(data):
 
 def _file_digest(path, budget=None):
     """(raw sha256 digest, size) of a file, streamed; the target as a whole (5.1). With a budget the bytes count in
-    bytesRead and the time limit is checked per MiB."""
+    bytes_hashed (coverage.bytesHashed, not the read budget) and the time limit is checked per MiB."""
     h, size = hashlib.sha256(), 0
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
             size += len(chunk)
             if budget is not None:
-                budget.bytes(len(chunk))
+                budget.bytes_hashed += len(chunk)
                 budget.check_time()
     return "sha256:" + h.hexdigest(), size
 
@@ -75,17 +75,17 @@ class Target:
         self.kind = "folder" if self.path.is_dir() else "file"
         self.name = self.path.name or "."
         self.digest = self.size = None
+        self.hash_stopped = False
         if self.kind == "file":
-            limit = budget.limits["totalBytes"]
-            if self.path.stat().st_size > limit:
-                raise BlueprintError("target-unsupported", f"the target is larger than {limit // 2 ** 20} MiB, the "
-                                     "most one study reads (it must be hashed whole)",
-                                     next=f"{core.AGAIN} with a smaller target")
+            limit = budget.limits["hashBytes"]
+            self.size = self.path.stat().st_size
+            if self.size > limit:
+                raise BlueprintError("target-unsupported", f"the target is larger than {limit // 2 ** 30} GiB, the "
+                                     "largest file a study hashes and reads", next=f"{core.AGAIN} with a smaller target")
             try:
                 self.digest, self.size = _file_digest(self.path, budget)
             except safety.Stop:
-                raise BlueprintError("target-unsupported", "the target could not be hashed within the time limit",
-                                     next=f"{core.AGAIN} with a larger --time-limit") from None
+                self.hash_stopped = True  # no digest: freshness then works member by member
         self.on_skip = None
         self.on_note = None
         self._zip = None
@@ -163,27 +163,62 @@ class Emitter:
         self._kinds = {}
         self._over = set()
         self._limit = {}
+        self._texts = {}
+        self._alias = {}
+        self._taken = {}
         self._notes = set()
         self._dropped = set()
         self._scrubbed_path = False
         self.coverage = evidence.empty_coverage()
 
+    def text(self, path, text):
+        """Register the text of the file at path once (safety.Prepared, linear); later emits for that path take
+        their excerpt from it by line= (or col=, a character offset), in time proportional to the line. A line
+        inside a private-key block gives <secret:private-key>. The last few texts are kept."""
+        if len(self._texts) >= 4:
+            self._texts.pop(next(iter(self._texts)))
+        self._texts[path] = safety.Prepared(text)
+
+    def _shown_path(self, path):
+        """The path as stored: a path holding a credential-like string is stored with the match replaced, and a
+        second path that scrubs to the same text gets ~2 after its first placeholder (~3, ...), in the order the lane
+        emits them (sorted, 6.3): two files never collapse into one, and nothing of the secret is stored."""
+        if not isinstance(path, str):
+            return path
+        shown = self._alias.get(path)
+        if shown is None:
+            scrubbed = safety.final(safety.clean_text(path))
+            if scrubbed == safety.clean_text(path):
+                return path
+            n = self._taken[scrubbed] = self._taken.get(scrubbed, 0) + 1
+            shown = scrubbed if n == 1 else scrubbed.replace(">", f">~{n}", 1)
+            self._alias[path] = shown
+            if not self._scrubbed_path:
+                self._scrubbed_path = True
+                self.note("a path held a credential-like string; it is stored with the match replaced")
+        return shown
+
     def emit(self, kind, key, claim, *, path, digest, basis="observed", line=None, offset=None, excerpt=None,
-             data=None, limitations=(), coverage="complete", links=(), by=None):
-        src = {"artifact": self.artifact, "path": path, "line": line, "offset": offset, "digest": digest,
-               "excerpt": excerpt}
+             data=None, limitations=(), coverage="complete", links=(), by=None, col=None):
+        ready = False
+        prepared = self._texts.get(path) if excerpt is None else None
+        if prepared is not None and (line is not None or col is not None):
+            try:
+                excerpt, ready = (prepared.at(col) if col is not None else prepared.line(line)) or None, True
+            except (TypeError, ValueError):
+                excerpt = None
+        src = {"artifact": self.artifact, "path": self._shown_path(path), "line": line, "offset": offset,
+               "digest": digest, "excerpt": excerpt}
         try:
             rec = evidence.make_record(self.study, kind, key, claim, basis, src, data, limitations, coverage, links,
-                                       by=by or self.by)
-        except (ValueError, TypeError) as e:
-            # a value the record rules refuse (an empty key, a path that is not relative, ...) never ends the study
-            label = kind if isinstance(kind, str) and evidence.KIND.fullmatch(kind) else "a"
-            self.skip(path if isinstance(path, str) else ".", "malformed",
-                      f"a {label} record was not stored: {str(e).split(':', 1)[0][:80]}")
+                                       by=by or self.by, excerpt_ready=ready)
+        except (ValueError, TypeError):
+            # a value the record rules refuse (an empty key, a path that is not relative, ...) never ends the study;
+            # the note never quotes the value
+            valid = isinstance(kind, str) and evidence.KIND.fullmatch(kind)
+            self.skip(".", "malformed", f"a {kind} record was not stored: a value the record rules refuse" if valid
+                      else "a record with an invalid kind was not stored")
             return None
-        if not self._scrubbed_path and isinstance(path, str) and rec["source"]["path"] != safety.clean_text(path):
-            self._scrubbed_path = True
-            self.note("a path held a credential-like string; it is stored with the match replaced")
         rid = rec["id"]
         if rid in self.records:
             return rid
@@ -251,6 +286,7 @@ class Emitter:
         if self._over:
             cov["truncated"] = True
             cov["stoppedBy"] = cov["stoppedBy"] or "evidence-limit"
+        cov["bytesHashed"] = self.budget.bytes_hashed
         cov["filesSeen"] = self.budget.files_seen
         cov["filesScanned"] = self.budget.files_scanned
         cov["bytesRead"] = self.budget.bytes_read
@@ -435,6 +471,9 @@ def run_study(root, kind, target_path, study_id=None, authorization=None, own=Fa
                  f"tool:{lane_names[0] if lane_names else kind}@{TOOL_VERSION}")
     target.on_skip = em.skip
     target.on_note = em.note
+    if target.hash_stopped:
+        em.note("the time limit was reached while the target was hashed; it has no digest, so freshness is checked "
+                "member by member", force=True)
     if safety.scrub(safety.clean_text(target.name))[1]:
         em.note("the target's name held a credential-like string; it is stored with the match replaced")
     run_opts = dict(opts or {}, projectRoot=root, isProjectRoot=is_root, study=sid)
@@ -450,7 +489,7 @@ def run_study(root, kind, target_path, study_id=None, authorization=None, own=Fa
     except safety.Stop as e:
         em.coverage["truncated"] = True
         em.coverage["stoppedBy"] = e.stoppedBy
-        em.note(f"stopped by the {e.stoppedBy}; what was read before is kept")
+        em.note(f"stopped by the {e.stoppedBy}; what was read before is kept", force=True)
     finally:
         target.close()
     records, coverage = em.finish()
@@ -546,9 +585,7 @@ def manifest_facts(elements, em, *, path, digest, by, basis="observed", limitati
     out = []
     lims = list(limitations)
 
-    def emit(kind, key, claim, data):
-        if not isinstance(key, str) or not safety.one_line(key):
-            return
+    def emit(kind, key, claim, data):  # a key the record rules refuse becomes a malformed skip (Emitter.emit)
         out.append(em.emit(kind, key, claim, path=path, digest=digest, basis=basis, data=data, limitations=lims,
                            by=by))
 

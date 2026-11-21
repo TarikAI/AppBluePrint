@@ -1209,7 +1209,8 @@ class PemRuleTest(TempProject):
         self.assertEqual(safety.excerpt(text, text.index("after")), "after")
         no_end = "x\n" + PEM_BEGIN_BARE + "\n" + self.BODY + "\n"
         self.assertEqual(safety.excerpt(no_end, no_end.index(self.BODY)), "<secret:private-key>")
-        self.assertEqual(safety.excerpt(self.BODY), "<secret:private-key>")  # a lane that passed the line alone
+        self.assertEqual(safety.loose_excerpt(self.BODY), "")  # a line given alone that may be key material: dropped
+        self.assertEqual(safety.loose_excerpt(PEM_END), "")
 
     def test_the_block_is_replaced_from_begin_to_end_and_every_line_of_it(self):
         text = "a\n" + self.pem() + "b\n"
@@ -1413,16 +1414,27 @@ class EngineRound1Test(TempProject):
         self.assertEqual((cm.exception.error, cm.exception.code), ("usage", 64))
         self.assertEqual(engine.authorize("web", False, False, "x" * 500)[0]["statement"], "x" * 500)
 
-    def test_the_target_digest_counts_and_respects_the_byte_limit(self):
-        """n6: a target larger than the byte limit is target-unsupported; the hash counts in bytesRead."""
+    def test_the_target_hash_is_counted_apart_and_only_huge_targets_are_refused(self):
+        """R2-M5: the whole-target hash counts in bytesHashed, not in the read budget; only a target over the hash
+        limit (4 GiB) is refused; a time stop while hashing leaves the digest null with a note."""
         p = self.put("t.bin", b"z" * 5000)
         s = engine.run_study(self.root, "mobile", p, own=True, lanes=[])
-        self.assertEqual(s["coverage"]["bytesRead"], 5000)
-        with mock.patch.dict(safety.LIMITS, {"totalBytes": 4000}):
+        self.assertEqual((s["coverage"]["bytesHashed"], s["coverage"]["bytesRead"]), (5000, 0))
+        self.assertEqual(safety.LIMITS["hashBytes"], 4 * 2 ** 30)
+        with mock.patch.dict(safety.LIMITS, {"totalBytes": 100}):
+            s = engine.run_study(self.root, "mobile", p, study_id="S-small-budget", own=True, lanes=[])
+        self.assertIsNotNone(s["target"]["digest"])
+        with mock.patch.dict(safety.LIMITS, {"hashBytes": 4000}):
             with self.assertRaises(BlueprintError) as cm:
                 engine.run_study(self.root, "mobile", p, study_id="S-big", own=True, lanes=[])
         self.assertEqual(cm.exception.error, "target-unsupported")
         self.assertFalse((self.root / ".blueprint/studies/S-big").exists())
+        big = self.put("big.bin", b"z" * (3 * 2 ** 20))
+        ticks = iter(range(0, 10_000))
+        s = engine.run_study(self.root, "mobile", big, study_id="S-slow", own=True, lanes=[], time_limit=2,
+                             clock=lambda: next(ticks))
+        self.assertIsNone(s["target"]["digest"])
+        self.assertTrue(any("while the target was hashed" in n for n in s["coverage"]["notes"]))
 
     def test_the_empty_study_list_names_no_flag_and_no_dot(self):
         """m7."""
@@ -1457,6 +1469,192 @@ class LiteralPathspecTest(TempProject):
         self.assertIn('"--literal-pathspecs"', src)  # also where the names below cannot be made (Windows)
         if not tried:
             self.skipTest("this file system cannot hold pathspec-like names (Windows); the source check ran")
+
+
+# ------------------------------------------------------------------------------------------------ review round 2
+
+def _r2_patterns():
+    from bp.commands import evidence as cmd
+    return {
+        safety._PEM_HEAD.pattern: ("search", "-----BEGIN ", "A", "PRIVATE KEY-----"),
+        safety._PEM_END.pattern: ("search", "-----END ", "A", "PRIVATE KEY-----"),
+        safety._KEY_MARK.pattern: ("search", "-----BEGIN PGP PRIVATE KEY ", "A", "BLOCK-----"),
+        cmd._MACHINE.pattern: ("search", ".." + BS, ".." + BS, "x"),
+    }
+
+
+REGEX_CASES.update(_r2_patterns())
+SECRET_CASES["bearer"] += [("bearer\x01", "\x01", "x" * 16), ("Bearer" + " " * 70, "\n", "y" * 16)]
+SECRET_CASES["private-key"] += [("-----BEGIN PGP PRIVATE KEY BLOCK-----", "A", "-----END PGP")]
+
+
+class MachinePatternTest(unittest.TestCase):
+    def test_the_machine_path_pattern_is_linear(self):
+        from bp.commands import evidence as cmd
+        for prefix, filler, term in (("C:", "a", "!"), ("//", "a", " "), ("/home", "a", "/"), ("~", "a", "/"),
+                                     (".." + BS, ".." + BS, "Users" + BS), ("x:", "a", BS), (BS, BS, "a")):
+            for text in worst_cases(prefix, filler, term):
+                started = time.monotonic()
+                cmd._MACHINE.search(text)
+                self.assertLess(time.monotonic() - started, 10, prefix)
+
+
+class ScrubLastTest(TempProject):
+    """R2-M1: text is normalised first and scrubbed last; a stored value equals its own scrub."""
+
+    TOKEN = "abcdefghijklmnopqrstuvwx"
+
+    def variants(self):
+        return ["Bearer\x01" + self.TOKEN, "Bearer" + " " * 65 + self.TOKEN, "Bearer" + "\n" * 70 + self.TOKEN,
+                "Bearer\t\x0b " + self.TOKEN] + ["Bearer" + " " * n + self.TOKEN for n in (3, 17, 64)]
+
+    def test_no_bearer_survives_any_route(self):
+        for v in self.variants():
+            r = evidence.make_record("S-a", "note.x", "k " + v, "Seen " + v + " here", "observed",
+                                     {"artifact": ".", "path": "a.txt", "line": 1, "offset": None,
+                                      "digest": None, "excerpt": "x " + v}, limitations=["see " + v],
+                                     data={"v": v}, by="agent:t")
+            self.assertFalse(evidence._holds_secret(r), repr(v))
+            for s in (r["key"], r["claim"], r["source"]["excerpt"] or "", *r["limitations"], r["data"]["v"]):
+                self.assertEqual(safety.scrub(s)[0], s, repr(v))
+            self.assertNotIn(self.TOKEN, json.dumps(r))
+
+    def test_export_then_import_keeps_what_the_tool_wrote(self):
+        for i, v in enumerate(self.variants()):
+            r = self.cli("evidence", "add", "--kind", "note.x", "--key", f"k{i} {v}", "--claim", f"Seen {v}.",
+                         "--basis", "observed", "--json")
+            self.assertEqual(r.returncode, 0, r.stderr)
+        out = self.tmp / "b.json"
+        self.assertEqual(self.cli("evidence", "export", "--out", out).returncode, 0)
+        other = TempProject()
+        other.setUp()
+        self.addCleanup(other.doCleanups)
+        r = other.cli("evidence", "import", out, "--json")
+        counts = json.loads(r.stdout)["data"]
+        self.assertEqual(counts["records"]["malformed"], 0)
+        self.assertEqual(counts["records"]["added"], len(self.variants()))
+
+
+class LaneExcerptTest(TempProject):
+    """R2-M2 and R2-M6: lanes register a file's text once and pass line=; no part of a private key reaches a store,
+    by any route; excerpts cost the line, not the file."""
+
+    BODY = PemRuleTest.BODY
+
+    def key_file(self):
+        lines = [PEM_BEGIN] + [self.BODY] * 6 + ["Qw0r6UjaZtXkGF4=", PEM_END]
+        return "const a = 1;\n" + "\n".join(lines) + "\nconst b = 2;\n"
+
+    def test_every_line_of_a_key_through_the_emitter(self):
+        text = self.key_file()
+        em = engine.Emitter("S-k", ".", safety.Budget(), f"tool:source@{TOOL_VERSION}")
+        em.text("src/k.js", text)
+        for n in range(1, text.count("\n") + 1):
+            em.emit("stub.line", f"line {n}", "A line.", path="src/k.js", digest=None, line=n)
+        records, _ = em.finish()
+        by_line = {r["source"]["line"]: r["source"]["excerpt"] for r in records}
+        self.assertEqual(by_line[1], "const a = 1;")
+        self.assertEqual(by_line[11], "const b = 2;")
+        for n in range(2, 11):
+            self.assertEqual(by_line[n], "<secret:private-key>", n)
+        blob = json.dumps(records)
+        PemRuleTest.assert_no_body(self, blob)
+        for leftover in ("Qw0r6UjaZtXkGF4", "-----END"):
+            self.assertNotIn(leftover, blob)
+
+    def test_a_line_passed_alone_is_dropped_when_it_may_be_key_material(self):
+        em = engine.Emitter("S-k", ".", safety.Budget(), f"tool:source@{TOOL_VERSION}")
+        for i, line in enumerate((PEM_BEGIN, PEM_END, self.BODY, "Qw0r6UjaZtXkGF4=" * 3,
+                                  "-----BEGIN PGP PRIVATE KEY BLOCK-----")):
+            em.emit("stub.line", f"l{i}", "A line.", path="k.pem", digest=None, excerpt=line)
+        em.emit("stub.line", "ok", "A line.", path="k.pem", digest=None, excerpt="plain words here")
+        records, _ = em.finish()
+        self.assertEqual(sorted(str(r["source"]["excerpt"]) for r in records), ["None"] * 5 + ["plain words here"])
+
+    def test_pgp_private_key_blocks(self):
+        pgp = ("x\n-----BEGIN PGP PRIVATE KEY BLOCK-----\n\nlQOYBF" + "A" * 60 + "\n=abcd\n"
+               "-----END PGP PRIVATE KEY BLOCK-----\ny\n")
+        out, found = safety.scrub(pgp)
+        self.assertEqual((out, found), ("x\n<secret:private-key>\ny\n", ["private-key"]))
+        p = safety.Prepared(pgp)
+        self.assertEqual([p.line(n) for n in range(1, 8)],
+                         ["x"] + ["<secret:private-key>"] * 5 + ["y"])
+
+    def test_twenty_thousand_excerpts_from_five_mib(self):
+        many_lines = "\n".join(f"const v{i} = fetch('/api/items/{i}');" for i in range(150_000))[:FIVE_MIB]
+        one_line_text = ("fetch('/api/x');" * (FIVE_MIB // 16))[:FIVE_MIB]
+        for text, how in ((many_lines, "line"), (one_line_text, "col")):
+            em = engine.Emitter("S-p", ".", safety.Budget(), f"tool:web@{TOOL_VERSION}")
+            started = time.monotonic()
+            em.text("big.js", text)
+            for i in range(20_000):
+                kw = {"line": i % 100_000 + 1} if how == "line" else {"col": (i * 251) % len(text)}
+                em.emit("stub.call", f"call {i}", "A call.", path="big.js", digest=None, **kw)
+            took = time.monotonic() - started
+            self.assertLess(took, 10, f"{how}: {took:.1f} s")
+            records, _ = em.finish()
+            self.assertTrue(all(r["source"]["excerpt"] for r in records))
+
+    def test_the_route_through_a_lane_study(self):
+        self.put("src/k.js", self.key_file())
+
+        class KeyLane:
+            LANE = "source"
+
+            @staticmethod
+            def run(target, em, opts):
+                for rel in target.files():
+                    data = target.read(rel, safety.LIMITS["textBytes"])
+                    text, _ = safety.decode_text(data)
+                    em.text(rel, text)
+                    for n in range(1, text.count("\n") + 2):
+                        em.emit("stub.line", f"{rel}:{n}", "A line.", path=rel, digest=target.digest_of(rel, data),
+                                line=n)
+        engine.run_study(self.root, "source", self.root / "src", tracked=True, lanes=[KeyLane])
+        for name, text in project_text(self.root).items():
+            PemRuleTest.assert_no_body(self, text)
+            for leftover in ("Qw0r6UjaZtXkGF4", "-----END"):
+                self.assertNotIn(leftover, text, name)
+
+
+class ScrubbedPathTest(TempProject):
+    """R2-M4: two files whose names scrub to the same path stay two records; their freshness is unknown, never
+    missing, and nothing of the secret is stored."""
+
+    def test_two_names_one_placeholder(self):
+        a, b = FT.SECRETS["aws-key"], FT.SECRETS["aws-key"][:-1] + "Z"
+        self.put(f"d/{a}.txt", "one\n")
+        self.put(f"d/{b}.txt", "two\n")
+        self.put("d/plain.txt", "ok\n")
+        engine.run_study(self.root, "source", self.root / "d", tracked=True, lanes=[SOURCE])
+        recs = [r for r in evidence.load(self.root, "S-d") if r["kind"] == "stub.file"]
+        paths = sorted(r["source"]["path"] for r in recs)
+        self.assertEqual(paths, ["<secret:aws-key>.txt", "<secret:aws-key>~2.txt", "plain.txt"])
+        study = evidence.load_study(self.root, "S-d")
+        states = evidence.freshness_all(self.root, study, recs)
+        self.assertEqual(sorted(states.values()), ["fresh", "unknown", "unknown"])
+        self.assertEqual(self.cli("evidence", "stale", "--strict").returncode, 0)
+        for name, text in project_text(self.root).items():
+            self.assertNotIn(a, text, name)
+            self.assertNotIn(b, text, name)
+
+
+class EmitterNotesTest(unittest.TestCase):
+    def test_a_skip_note_never_quotes_the_refused_value_and_the_stop_note_is_kept(self):
+        em = engine.Emitter("S-n", ".", safety.Budget(), f"tool:source@{TOOL_VERSION}")
+        em.emit("stub.x", "k", "C.", path="../SECRETPART/x", digest=None)
+        em.emit("Bad", "k", "C.", path="a", digest=None)
+        self.assertTrue(all("SECRETPART" not in n and "a a " not in n for n in em.coverage["notes"]))
+        self.assertIn("a record with an invalid kind was not stored", em.coverage["notes"])
+        src = (S.PACKAGE / "study" / "engine.py").read_text(encoding="utf-8")
+        self.assertIn('what was read before is kept", force=True)', src)
+
+    def test_a_manifest_key_of_control_characters_is_a_malformed_skip(self):
+        em = engine.Emitter("S-x", "a.apk", safety.Budget(), f"tool:mobile@{TOOL_VERSION}")
+        engine.manifest_facts([(0, "manifest", {"package": "a.b"}), (1, "uses-permission", {"name": "\x7f"}),
+                               (1, "uses-permission", {"name": "\x01\x02"})], em, path="AndroidManifest.xml",
+                              digest=None, by=f"tool:mobile@{TOOL_VERSION}")
+        self.assertEqual(em.coverage["skipped"], {"malformed": 2})
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ import math
 import os
 import re
 import secrets
+import stat
 import sys
 from pathlib import Path
 
@@ -131,11 +132,16 @@ _SURROGATE_ESCAPE = re.compile(r"\\[uU][dD][89a-fA-F]")
 
 
 def _read_bytes(path):
-    """The bytes of a project file that is a plain file; None when it does not exist. A link or a folder in its place
-    is ValueError (never read through a link)."""
+    """The bytes of a project file that is a plain file; None when it does not exist. A link, a folder, a named pipe
+    or a device in its place is ValueError (never read through a link, never opened when it is not a regular file)."""
     try:
         if safety.is_link(path):
             raise ValueError("is a link")
+        mode = os.lstat(path).st_mode
+        if stat.S_ISDIR(mode):
+            raise ValueError("is a folder")
+        if not stat.S_ISREG(mode):  # a named pipe or a device would block: never opened
+            raise ValueError("is not a regular file")
         with open(path, "rb") as f:
             return f.read()
     except FileNotFoundError:
@@ -170,7 +176,9 @@ def _text(v):
 
 
 def _scrubbed(text):
-    return safety.scrub(safety.clean_text(text))[0]
+    """Stored text: cleaned, then scrubbed until scrubbing changes nothing (safety.final). Normalising (one line,
+    control characters) always happens before this, never after."""
+    return safety.final(safety.clean_text(text))
 
 
 def _clean_data(v, depth=0):
@@ -265,7 +273,7 @@ def _int_or_none(v, lowest):
 
 
 def make_record(study, kind, key, claim, basis, source, data=None, limitations=(), coverage="complete", links=(), *,
-                by, at=None):
+                by, at=None, excerpt_ready=False):
     """One evidence record (5.1), its id derived from its content (5.2). Raises ValueError for a field of the wrong
     form (a lane bug, or an `evidence add` argument the command checks first). Key, claim, excerpt, data strings and
     limitations pass through safety.scrub; the excerpt is cut to one line of 160 characters; a key over 200 or a claim
@@ -306,7 +314,7 @@ def make_record(study, kind, key, claim, basis, source, data=None, limitations=(
     for x in [limitations] if isinstance(limitations, str) else list(limitations or ()):
         if not isinstance(x, str):
             raise ValueError("limitations must be text")
-        x = safety.one_line(_scrubbed(x))
+        x = _scrubbed(safety.one_line(safety.clean_text(x)))
         if x and x not in lims:
             lims.append(x)
     link_ids = []
@@ -315,18 +323,21 @@ def make_record(study, kind, key, claim, basis, source, data=None, limitations=(
             raise ValueError(f"link {x!r} is not an evidence id")
         if x not in link_ids:
             link_ids.append(x)
-    key = _CONTROL.sub(" ", _scrubbed(key))
+    key = _scrubbed(_CONTROL.sub(" ", safety.clean_text(key)))  # normalise first, scrub last (R2-M1)
     if len(key) > KEY_MAX:
-        key, lims = key[:KEY_MAX], lims + [f"key cut to {KEY_MAX} characters"]
-    claim = safety.one_line(_scrubbed(claim))
+        key, lims = _scrubbed(key[:KEY_MAX]), lims + [f"key cut to {KEY_MAX} characters"]
+    claim = _scrubbed(safety.one_line(safety.clean_text(claim)))
     if len(claim) > CLAIM_MAX:
-        claim, lims = claim[:CLAIM_MAX], lims + [f"claim cut to {CLAIM_MAX} characters"]
+        claim, lims = _scrubbed(claim[:CLAIM_MAX]), lims + [f"claim cut to {CLAIM_MAX} characters"]
     if not key.strip() or not claim:
         raise ValueError("key and claim must not be empty")
     ex = source.get("excerpt")
     if ex is not None and not isinstance(ex, str):
         raise ValueError("source.excerpt must be text or null")
-    ex = safety.excerpt(ex) or None if ex else None
+    if ex and excerpt_ready:  # taken from a prepared text (Emitter.text): the block rule was applied on the whole text
+        ex = _scrubbed(safety.one_line(ex)[:safety.LIMITS["excerpt"]]) or None
+    else:  # a line given alone: dropped when it may be key material
+        ex = safety.loose_excerpt(ex) or None if ex else None
     clean, cut = _clean_data(data or {})
     clean, trimmed = _trim_data(clean)
     if (cut or trimmed) and DATA_TRIMMED not in lims:
@@ -336,6 +347,9 @@ def make_record(study, kind, key, claim, basis, source, data=None, limitations=(
     rec = {"id": content_id("ev-", _id_object(kind, key, basis, src, claim), 16), "study": study, "kind": kind,
            "key": key, "claim": claim, "basis": basis, "source": src, "data": clean, "limitations": lims,
            "coverage": coverage, "links": link_ids, "by": _scrubbed(by)}
+    for value in (rec["key"], rec["claim"], rec["by"], src["artifact"], src["path"], src["excerpt"], *lims):
+        if isinstance(value, str) and safety.scrub(value)[1]:  # the stored value equals its own scrub
+            raise ValueError("a stored value still holds a secret after scrubbing")
     if at is not None:
         rec["at"] = at
     return rec
@@ -537,14 +551,13 @@ def load_study(root, sid):
 
 
 def all_studies(root, warn=True):
-    """{id: study record} of every readable study; a damaged study.json is left out with one warning line on stderr
-    (warn=False: silently)."""
+    """{id: study record} of every readable study; a damaged study.json is not in it, and one warning line names it on
+    stderr (warn=False: silently)."""
     out = {}
     for sid in study_ids(root):
         obj, problem = read_study(root, sid)
         if problem and warn:
-            print(f"warning: .blueprint/studies/{sid}/{STUDY_FILE} {problem}; study {sid} is left out",
-                  file=sys.stderr)
+            print(f"warning: .blueprint/studies/{sid}/{STUDY_FILE} {problem}", file=sys.stderr)
         if obj is not None:
             out[sid] = obj
     return out
@@ -609,6 +622,60 @@ def write_text(path, text):
         raise
 
 
+def _label(path):
+    return "/".join(Path(path).parts[-4:])
+
+
+class Writes:
+    """Several project files written as one step: every temp file is prepared first (unique names beside the
+    targets, created exclusively); only when all are ready are they moved into place, one by one. A failure while
+    preparing writes nothing; a failure while moving says exactly which files were written and which were not.
+    Call holding core.state_lock."""
+
+    def __init__(self):
+        self.items = []
+
+    def add(self, path, data):
+        self.items.append((Path(path), data.encode("utf-8") if isinstance(data, str) else data))
+
+    def commit(self):
+        ready = []
+        try:
+            for path, data in self.items:
+                if safety.is_link(path.parent) or (path.exists() and not path.is_file() and not safety.is_link(path)):
+                    raise OSError(f"{_label(path)} is in the way (a folder or something else)")
+                tmp = path.with_name(f"{path.name}.{os.getpid()}-{secrets.token_hex(4)}.tmp")
+                with open(tmp, "xb") as f:
+                    f.write(data)
+                ready.append((tmp, path))
+        except OSError as e:
+            for tmp, _ in ready:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+            raise BlueprintError("write-failed", f"cannot prepare the files to write ({e.strerror or e}); nothing "
+                                 "was written", next=f"make the folder .blueprint/studies writable, then {core.AGAIN}") \
+                from None
+        done = []
+        for i, (tmp, path) in enumerate(ready):
+            try:
+                core._retry_windows(os.replace, tmp, path)
+            except OSError as e:
+                for t, _ in ready[i:]:
+                    try:
+                        os.unlink(t)
+                    except OSError:
+                        pass
+                written = ", ".join(_label(x) for x in done) or "nothing"
+                missing = ", ".join(_label(x) for _, x in ready[i:])
+                raise BlueprintError("write-failed", f"stopped part-way ({e.strerror or e}): written: {written}; not "
+                                     f"written: {missing}", next=f"make those files writable, then {core.AGAIN}") \
+                    from None
+            done.append(path)
+        return done
+
+
 def dump_json(obj):
     return json.dumps(obj, indent=2, ensure_ascii=False) + "\n"
 
@@ -657,7 +724,8 @@ def sharing_held(root, sid, own):
 
 
 def empty_coverage():
-    return {"filesSeen": 0, "filesScanned": 0, "filesSkipped": 0, "bytesRead": 0, "skipped": {}, "missing": [],
+    return {"filesSeen": 0, "filesScanned": 0, "filesSkipped": 0, "bytesRead": 0, "bytesHashed": 0, "skipped": {},
+            "missing": [],
             "truncated": False, "stoppedBy": None, "notes": []}
 
 
@@ -732,7 +800,15 @@ def add(root, study_id, rec):
         event = {"event": "evidence-add", "study": study_id, "id": rec["id"], "kind": rec["kind"]}
         dump_json(study), _line(rec)  # both serialise before the first write
         append_held(root, study_id, [rec])
-        write_study_held(root, study)
+        try:
+            write_study_held(root, study)
+        except BlueprintError:
+            raise BlueprintError("write-failed", f"{rec['id']} is stored in .blueprint/studies/{study_id}/"
+                                 f"{EVIDENCE_FILE}, but the count in its {STUDY_FILE} could not be updated; it is "
+                                 "stale until the next write to this study, which counts the file again",
+                                 entry=f".blueprint/studies/{study_id}/{STUDY_FILE}",
+                                 next=f"make the file writable; the next evidence add to this study fixes the count") \
+                from None
         core.append_log(root, event)
     return rec, True
 
@@ -836,28 +912,33 @@ def _digest_of(rec):
     return digest if isinstance(digest, str) and DIGEST.fullmatch(digest) else None
 
 
-def _one(hashes, located, base, is_dir, fast, rec, resolvers):
-    """(state, limit or None) for one record; limit names the tool limit that stopped the check."""
+UNREADABLE = "unreadable"  # a not-checked reason: the file is there but the system refused to read it
+
+
+def _one(hashes, located, base, is_dir, rec, resolvers):
+    """(state, limit or None) for one record; limit names the tool limit (or UNREADABLE) that stopped the check.
+    Neutral unknown only when the tool cannot look: no digest, no target here, a path holding a secret placeholder
+    (it cannot be located), or no reader for a container's suffix. A target that is there but can no longer be read
+    as what the study recorded (a file replaced by a link or a folder, an archive or member that does not parse) is
+    stale."""
     digest = _digest_of(rec)
     if digest is None or located is None:
         return "unknown", None
     path = rec["source"].get("path")
-    if not (isinstance(path, str) and (path == "." or _safe_rel(path))):
+    if not (isinstance(path, str) and (path == "." or _safe_rel(path))) or "<secret:" in path:
         return "unknown", None
-    if fast:
-        return "fresh", None
     parts = path.split("!/")
     try:
         if is_dir:
             first = located / parts[0]
             if parts[0] == ".":
                 return "unknown", None
-            if not first.exists():
+            if not os.path.lexists(first):
                 return "missing", None
             if safety.is_link(first) or not first.is_file():
-                return "unknown", None
+                return "stale", None
             if not os.path.normcase(os.path.realpath(first)).startswith(base):
-                return "unknown", None
+                return "stale", None
             if len(parts) == 1:
                 return ("fresh" if hashes.proof_digest(first) == digest else "stale"), None
             container, suffix = first, _suffix(parts[0])
@@ -877,55 +958,67 @@ def _one(hashes, located, base, is_dir, fast, rec, resolvers):
     except safety.Skip as e:
         if e.reason == safety.MISSING:
             return "missing", None
-        return "unknown", (e.reason if e.reason in LIMIT_REASONS else None)
+        if e.reason in LIMIT_REASONS:
+            return "unknown", e.reason
+        if e.reason == "error":
+            return "unknown", UNREADABLE
+        return "stale", None  # malformed, encrypted, a link, an unsafe name: not what was recorded
     except safety.Stop as e:
         return "unknown", e.stoppedBy
     except safety.PARSE_ERRORS:
-        return "unknown", None
+        return "stale", None
     except OSError:
-        return "unknown", None
+        return "unknown", UNREADABLE
 
 
 def freshness_check(root, study, records, target=None, resolvers=None, budget=None):
     """({record id: fresh | stale | missing | unknown}, {record id: limit}) for records of one study (5.6). The
-    second map holds the records that are unknown because one of the tool's own limits was reached (a stop of the
-    budget, or a member too large, past the ratio rule, nested too deep or past the entry limit): not checked.
-    A record whose digest is null, whose study cannot be located (no target path and no --target), whose path cannot
-    be read safely or whose container has no reader is unknown and not in the second map: nothing that cannot be
-    rehashed reads as fresh. Each file is hashed once and each archive opened once."""
+    second map holds the records that are unknown because the check was stopped: one of the tool's own limits (a
+    budget stop: time-limit, byte-limit, file-limit; a member too-large, past the ratio rule, nested past the depth
+    limit, or past the archive entry limit) or a file the system refused to read (unreadable). Neutral unknown,
+    outside that map, only when the tool cannot look: a null digest, no target here (outside the project and no
+    --target), a path holding a secret placeholder, or no reader for a container's suffix. A target that is there
+    but is not what was studied (a file target replaced by a folder or a link, a folder replaced by a file) makes
+    every record with a digest stale. Each file is hashed once and each archive opened once."""
     budget = budget or safety.Budget()
     hashes = _Hashes(budget)
     out, unchecked = {}, {}
     located = locate(root, study, target)
-    is_dir, fast, base = False, False, ""
+    is_dir = False
+    base = ""
+    t = study.get("target") if isinstance(study.get("target"), dict) else {}
+    was_file = isinstance(t.get("digest"), str) or type(t.get("size")) is int
+
+    def every(state, limit=None):
+        for r in records:
+            rid = r.get("id") if isinstance(r, dict) else None
+            has = _digest_of(r) is not None
+            out[rid] = state if has else "unknown"
+            if has and limit:
+                unchecked[rid] = limit
+        return out, unchecked
+
     try:
         if located is not None:
             try:
+                if not os.path.lexists(located):
+                    return every("missing")
                 if safety.is_link(located) and Path(located) != Path(root):
-                    located = None
-                elif not located.exists():
-                    for r in records:
-                        out[r.get("id") if isinstance(r, dict) else None] = "missing" if _digest_of(r) else "unknown"
-                    return out, unchecked
-                else:
-                    is_dir = located.is_dir()
-                    base = os.path.normcase(os.path.realpath(located)).rstrip(os.sep) + os.sep
-                    t = study.get("target") or {}
-                    td = t.get("digest") if isinstance(t, dict) else None
-                    fast = (not is_dir and isinstance(td, str) and DIGEST.fullmatch(td) is not None
-                            and hashes.raw_digest(located) == td)
+                    return every("stale")
+                is_dir = located.is_dir()
+                if is_dir == was_file or not (is_dir or located.is_file()):
+                    return every("stale")
+                base = os.path.normcase(os.path.realpath(located)).rstrip(os.sep) + os.sep
+                td = t.get("digest")
+                if not is_dir and isinstance(td, str) and DIGEST.fullmatch(td) and hashes.raw_digest(located) == td:
+                    return every("fresh")
             except safety.Stop as e:
-                for r in records:
-                    rid = r.get("id") if isinstance(r, dict) else None
-                    out[rid] = "unknown"
-                    if _digest_of(r):
-                        unchecked[rid] = e.stoppedBy
-                return out, unchecked
+                return every("unknown", e.stoppedBy)
             except OSError:
-                located = None
+                return every("unknown", UNREADABLE)
         for r in records:
             rid = r.get("id") if isinstance(r, dict) else None
-            out[rid], limit = _one(hashes, located, base, is_dir, fast, r, resolvers)
+            out[rid], limit = _one(hashes, located, base, is_dir, r, resolvers)
             if limit:
                 unchecked[rid] = limit
         return out, unchecked
@@ -1017,7 +1110,7 @@ def _same(a, b):
 
 
 def _short_text(v, most=300):
-    return safety.one_line(_scrubbed(v))[:most] if isinstance(v, str) else None
+    return _scrubbed(safety.one_line(safety.clean_text(v))[:most]) if isinstance(v, str) else None
 
 
 def _count(v):
@@ -1057,6 +1150,7 @@ def rebuild_study(s):
                        if isinstance(k, str) and re.fullmatch(r"[A-Za-z]{1,40}", k) and type(v) is int},
             "coverage": {"filesSeen": _count(c.get("filesSeen")), "filesScanned": _count(c.get("filesScanned")),
                          "filesSkipped": _count(c.get("filesSkipped")), "bytesRead": _count(c.get("bytesRead")),
+                         "bytesHashed": _count(c.get("bytesHashed")),
                          "skipped": {k: _count(v) for k, v in skipped.items() if k in safety.SKIP_REASONS},
                          "missing": _texts(c.get("missing")), "truncated": c.get("truncated") is True,
                          "stoppedBy": c.get("stoppedBy") if c.get("stoppedBy") in safety.STOP_REASONS else None,
@@ -1175,16 +1269,27 @@ def import_bundle(root, bundle):
             base = new_studies.get(sid) or load_study(root, sid)
             every = appends[sid][1] if sid in appends else []
             study_writes[sid] = dict(base, counts=counts_of(every))
-        # every check is done: write
-        for sid in sorted(new_studies):
-            parts["studies"]["added"] += 1
-            write_study_held(root, study_writes[sid])
-            sharing_held(root, sid, new_studies[sid]["target"]["own"] is True)
-        for sid, (new, _) in sorted(appends.items()):
-            append_held(root, sid, new)
-            write_study_held(root, study_writes[sid])
-        for sid, text in sorted(beh_writes.items()):
-            write_text(_ensure_dir(root, sid) / BEHAVIOURS_FILE, text)
+        # every check is done: prepare every file, then move them into place (Writes)
+        writes = Writes()
+        for sid in sorted(set(new_studies) | set(appends) | set(beh_writes)):
+            folder = _ensure_dir(root, sid)
+            if sid in study_writes:
+                writes.add(folder / STUDY_FILE, dump_json(study_writes[sid]))
+            if sid in new_studies and new_studies[sid]["target"]["own"] is not True:
+                writes.add(folder / ".gitignore", "*\n")
+            if sid in appends:
+                path = folder / EVIDENCE_FILE
+                try:
+                    old = _read_bytes(path) or b""
+                except ValueError as e:
+                    raise _bad_study(root, sid, EVIDENCE_FILE, str(e)) from None
+                if old and not old.endswith(b"\n"):
+                    old += b"\n"
+                writes.add(path, old + "".join(_line(r) for r in appends[sid][0]).encode("utf-8"))
+            if sid in beh_writes:
+                writes.add(folder / BEHAVIOURS_FILE, beh_writes[sid])
+        writes.commit()
+        parts["studies"]["added"] += len(new_studies)
         total = {k: sum(p_[k] for p_ in parts.values()) for k in ("added", "duplicate", "conflict", "malformed")}
         core.append_log(root, dict({"event": "evidence-import"}, **total))
     return dict(total, **parts)
