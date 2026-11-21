@@ -1613,6 +1613,30 @@ class WorkedByTest(TempRoot):
                                   r.stderr)
                     self.assertEqual((self.root / ".blueprint" / "state.json").read_text(encoding="utf-8"), text)
 
+    def test_a_by_an_older_copy_wrote_joins_the_list(self):
+        """An older copy of the tool (a project copy not refreshed yet) sets by without growing workedBy: worked_by is
+        the list, then by when it is not in it already; a missing or null by adds nothing."""
+        from bp import status
+        self.assertEqual(status.worked_by({"by": "newer", "workedBy": ["a", "b"]}), ["a", "b", "newer"])
+        self.assertEqual(status.worked_by({"by": "a", "workedBy": ["a", "b"]}), ["a", "b"])
+        self.assertEqual(status.worked_by({"by": None, "workedBy": ["a"]}), ["a"])
+        self.assertEqual(status.worked_by({"workedBy": []}), [])
+        (self.root / ".blueprint" / "state.json").write_text(json.dumps(
+            {"files": {self.PATH: {"state": "built", "by": "old-copy", "workedBy": [self.OWNER]}}}), encoding="utf-8")
+        self.run_ok("mark", self.PATH, "built", "--by", "cto-architect", "--force")
+        self.assertEqual(self.state()["files"][self.PATH]["workedBy"], [self.OWNER, "old-copy", "cto-architect"])
+
+    def test_a_damaged_raw_entry_is_never_nobody(self):
+        """worked_by on a raw entry whose workedBy is damaged raises bad-state, like the state reader: it never answers
+        an empty list, which a caller would read as nobody."""
+        from bp import status
+        from bp.core import BlueprintError
+        for bad in ("x", [1], {"a": 1}, ["ok", None], 5):
+            with self.subTest(workedBy=bad):
+                with self.assertRaises(BlueprintError) as cm:
+                    status.worked_by({"by": "a", "workedBy": bad})
+                self.assertEqual(cm.exception.error, "bad-state")
+
     def test_parallel_claims_keep_every_id(self):
         ids = [f"agent-{i}" for i in range(6)]
         procs = [subprocess.Popen([S.PY, str(S.LAUNCHER), "claim", self.PATH, "--by", i, "--force", "--root", str(self.root)],
