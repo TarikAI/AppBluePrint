@@ -9,7 +9,7 @@ import re
 import subprocess
 
 from bp import core
-from bp.core import die, norm, now_iso
+from bp.core import BlueprintError, die, norm, now_iso
 from bp.globs import glob_match, pattern_instance_rx
 from bp.migrate import upgrade_state
 from bp.plan import DEFAULT_IGNORE, STATES, features_of, item_verify, owner_of, phase_index, planned_file
@@ -264,15 +264,23 @@ def require_owner(plan, path, by, force):
 
 
 def worked_by(entry):
-    """Every id that claimed or marked a file entry, in first-seen order (state.files[p].workedBy). An entry written
-    before the key existed reads as [by] when by is set, else []. Public: the features and records modules read it."""
+    """Every id that claimed or marked a file entry: the ids of state.files[p].workedBy in first-seen order, then the
+    entry's latest by when it is not among them (an older copy of the tool sets by without growing the list; an entry
+    written before the key existed reads as [by]). A missing or null by adds nothing; no entry is []. A workedBy that
+    is not a list of strings raises bad-state, as the state reader does: never an empty list a caller would read as
+    nobody. Public: the features and records modules read it."""
     if not isinstance(entry, dict):
         return []
-    ids = entry.get("workedBy")
-    if isinstance(ids, list):
-        return [x for x in ids if isinstance(x, str)]
+    ids = entry.get("workedBy", [])  # null is damaged too, as at load (core._files_damage)
+    if not isinstance(ids, list) or any(not isinstance(x, str) for x in ids):
+        raise BlueprintError("bad-state", ".blueprint/state.json is damaged: a file entry's workedBy must be a list of ids",
+                             entry=".blueprint/state.json",
+                             next="fix .blueprint/state.json or move it away (progress is then tracked from scratch)")
+    out = list(dict.fromkeys(ids))
     by = entry.get("by")
-    return [by] if isinstance(by, str) and by else []
+    if isinstance(by, str) and by and by not in out:
+        out.append(by)
+    return out
 
 
 def set_file_state(root, path, new_state, by, note=None):
