@@ -185,8 +185,16 @@ def machine_path(root, text):
             continue
         for form in _spellings(folder):
             form = form.replace("\\", "/")
-            if (form.lower() if os.name == "nt" else form) in norm:
-                return True
+            form = form.lower() if os.name == "nt" else form
+            # the folder as a whole path: not inside a URL or a longer name (http://host/tmp/x is no temp folder)
+            i = norm.find(form)
+            while i >= 0:
+                before = norm[i - 1] if i else " "
+                after = norm[i + len(form)] if i + len(form) < len(norm) else " "
+                if not (before.isalnum() or before in "._~:/-") and (after == "/" or not (after.isalnum()
+                                                                                         or after in "._~-")):
+                    return True
+                i = norm.find(form, i + 1)
     return False
 
 
