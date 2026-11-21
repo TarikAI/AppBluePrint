@@ -622,11 +622,13 @@ class HintsTest(MigrateCase):
 
     def test_validate(self):
         r = self.cli("validate")
+        hint = f'python "{S.SCRIPTS / "blueprint.py"}" migrate --root "{self.root.resolve()}"'
         self.assertIn("warning: blueprint.json is schema version 1; it still works. "
-                      "To use milestones, features, tasks and unknowns, run: blueprint.py migrate", r.stdout)
+                      f"To use milestones, features, tasks and unknowns, run: {hint}", r.stdout)
         data = json.loads(self.cli("validate", "--json").stdout)["data"]
         w = [x for x in data["warnings"] if x["code"] == "schema-v1"][0]
-        self.assertEqual((w["entry"], w["next"]), ("blueprint.json", "blueprint.py migrate"))
+        # the finding's next runs as printed and names no path of this machine (core follow-up, item 2)
+        self.assertEqual((w["entry"], w["next"]), ("blueprint.json", hint))
 
     def test_status(self):
         r = self.cli("status")
@@ -761,7 +763,9 @@ class UnwritableContentTest(MigrateCase):
                 self.assertEqual(self.tmp_files(), [])
         human = self.migrate()
         self.assertEqual((human.returncode, human.stdout), (1, ""))
-        self.assertIn("error: blueprint.json contains text that is not valid Unicode", human.stderr)
+        # refused at load, as by every command (core follow-up, item 1), with the 1.x load-error form (no "error:")
+        self.assertIn("blueprint.json cannot be used: app.name holds an unpaired surrogate (\\ud800), which is not valid "
+                      "Unicode", human.stderr)
 
     def test_a_lone_surrogate_in_the_state_leaves_the_state_as_it_is(self):
         state = self.state()
@@ -827,17 +831,17 @@ class UnwritableContentTest(MigrateCase):
 
     def test_the_plan_is_read_once_so_the_backup_and_the_upgrade_agree(self):
         original = self.plan_path.read_bytes()
-        real = cmd.load_plan
+        real = cmd.check_plan  # the load checks run on the bytes read (review of #17, F11)
 
         calls = []
 
-        def edit_then_load(root):  # someone edits blueprint.json after migrate read it
+        def edit_then_check(raw, root):  # someone edits blueprint.json after migrate read it
             if not calls:
                 calls.append(1)
                 self.plan_path.write_bytes(original.replace(b"Snag Desk", b"Edited"))
-            return real(root)
+            return real(raw, root)
 
-        with mock.patch.object(cmd, "load_plan", edit_then_load):
+        with mock.patch.object(cmd, "check_plan", edit_then_check):
             out, err = io.StringIO(), io.StringIO()
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 cmd.cmd_migrate(Namespace(root=str(self.root), dry_run=False, force=True, json=False))
@@ -1147,6 +1151,80 @@ class StateLockTest(MigrateCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(self.state()["files"]["apps/web/src/api.ts"]["state"], "claimed")
         self.assertEqual(self.state()["stateVersion"], 2)
+
+    def test_a_plan_another_migrate_finished_meanwhile_is_left_alone(self):
+        """Two migrates at once: the second re-reads the plan's version under the lock and, finding version 2 there,
+        stops with the normal 'already version 2' result: nothing written, no backup (review of #14)."""
+        real = cmd._check_writable
+        migrated = (json.dumps(v2_plan(), indent=2) + "\n").encode("utf-8")
+
+        def check_then_migrate(root, targets):
+            self.plan_path.write_bytes(migrated)  # the other migrate finished between our read and our lock
+            return real(root, targets)
+
+        with mock.patch.object(cmd, "_check_writable", check_then_migrate):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                cmd.cmd_migrate(Namespace(root=str(self.root), dry_run=False, force=True, json=True))
+        self.assertEqual(json.loads(out.getvalue()), {"ok": True, "command": "migrate", "data": {
+            "from": 2, "to": 2, "written": [], "dryRun": False}})
+        self.assertEqual(self.plan_path.read_bytes(), migrated)
+        self.assertFalse((self.bp / "blueprint.v1.json").exists())
+        self.assertNotIn("stateVersion", self.state())
+
+    @unittest.skipUnless(os.name == "nt", "the read is retried on Windows only, where a replace makes it fail for a moment")
+    def test_a_plan_busy_on_the_first_read_is_read_again(self):
+        """Review of #17, F4: another migrate replacing blueprint.json makes a read fail for a moment on Windows
+        (PermissionError). The read goes through the core's Windows retry."""
+        real = Path.read_bytes
+        calls = {"n": 0}
+
+        def flaky(path, *a, **k):
+            if path.name == "blueprint.json":
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise PermissionError(13, "Permission denied")
+            return real(path, *a, **k)
+
+        with mock.patch.object(Path, "read_bytes", flaky):
+            code, err = self.run_in_process()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.plan()["version"], 2)
+
+    def test_a_plan_that_cannot_be_read_is_a_clean_error(self):
+        """F4: a read that still fails after the retry is bad-json (exit 1), never an incident; nothing is written."""
+        real = Path.read_bytes
+
+        def always(path, *a, **k):
+            if path.name == "blueprint.json":
+                raise PermissionError(13, "Permission denied")
+            return real(path, *a, **k)
+
+        shot = snapshot(self.root)
+        out = io.StringIO()
+        with mock.patch.object(Path, "read_bytes", always), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as cm:
+                cmd.cmd_migrate(Namespace(root=str(self.root), dry_run=False, force=True, json=True))
+        self.assertEqual((cm.exception.code, cm.exception.error), (1, "bad-json"))
+        self.assertIn("cannot be read", cm.exception.message)
+        self.assertEqual(snapshot(self.root), shot)
+
+    def test_the_plan_is_read_once(self):
+        """F11: one read before the lock (checked and migrated from the same bytes), one under it (5b)."""
+        real = Path.read_bytes
+        calls = {"n": 0}
+
+        def counting(path, *a, **k):
+            if path.name == "blueprint.json":
+                calls["n"] += 1
+            return real(path, *a, **k)
+
+        with mock.patch.object(Path, "read_bytes", counting), mock.patch.object(cmd, "_render_quietly", lambda root: None), \
+                mock.patch.object(bplan, "read_json", side_effect=AssertionError("the plan is read with read_bytes")):
+            code, err = self.run_in_process()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(calls["n"], 2)
 
 
 if __name__ == "__main__":
