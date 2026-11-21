@@ -5,6 +5,7 @@ the caller typed (core.AGAIN instead, 1.8 rule 3).
 """
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -129,14 +130,82 @@ def _source(root, raw_path, line):
     return {"artifact": ".", "path": rel, "line": line, "offset": None, "digest": digest, "excerpt": excerpt}
 
 
+def _short_name(path):
+    """The 8.3 short form of an existing path on Windows (what some programs and CI runners type), else None."""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        buf = ctypes.create_unicode_buffer(32768)
+        n = ctypes.windll.kernel32.GetShortPathNameW(str(path), buf, 32768)
+        return buf.value if 0 < n < 32768 else None
+    except (OSError, AttributeError, ValueError):
+        return None
+
+
+def _spellings(path):
+    """Every way a folder can be typed: as given, absolute, resolved (long names), its 8.3 short form, each with
+    either separator and without a trailing separator. Very short forms (a drive, '/') are left out."""
+    forms = set()
+    for form in (str(path), os.path.abspath(str(path)), os.path.realpath(str(path)), _short_name(path)):
+        if form:
+            for f in (form, form.replace("\\", "/"), form.replace("/", "\\")):
+                f = f.rstrip("\\/")
+                if len(f) > 3:
+                    forms.add(f)
+    return forms
+
+
+def _root_pattern(spelling):
+    """A known folder and the rest of a path below it, in any case on Windows: quoted (to the closing quote), or not
+    (inner folder names may hold spaces; the last part ends at a space)."""
+    head = "".join("[\\\\/]" if c in "\\/" else re.escape(c) for c in spelling)
+    flags = re.IGNORECASE if os.name == "nt" else 0
+    quoted = f"([\"'])(?:{head})(?:[\\\\/][^\"'\\r\\n]*)?\\1"
+    bare = f"(?:{head})(?:[\\\\/][^\\\\/\"'<>|\\r\\n]*(?=[\\\\/]))*(?:[\\\\/][^\\s\\\\/\"'<>|]*)?"
+    return re.compile(f"{quoted}|{bare}", flags)
+
+
+_ABSOLUTE = re.compile(r"(?<![\w.~:-])(?:[A-Za-z]:[\\/]|/)[^\"'<>|\r\n]{0,1024}")
+
+
+def _typed_spellings(text, folders):
+    """Spellings of the known folders as they appear in text but in no form _spellings knows (a path mixing short
+    and long names, say): every absolute path in the text is cut back folder by folder, and a prefix that is the
+    same folder on disk as a known one (os.path.samefile) is added with its label. Network paths are not probed."""
+    out = []
+    for m in _ABSOLUTE.finditer(text):
+        parts = re.split(r"([\\/])", m.group(0))
+        for i in range(len(parts), 0, -1):
+            prefix = "".join(parts[:i]).rstrip("\\/ ")
+            if len(prefix) <= 3 or not os.path.isdir(prefix):
+                continue
+            for folder, label in folders:
+                try:
+                    if os.path.samefile(prefix, folder):
+                        out.append((prefix, label))
+                except OSError:
+                    continue
+    return out
+
+
 def redact_paths(root, text):
-    """Text an agent typed (a claim, a limitation) with the project root and other absolute paths removed: the path
-    part of learn.redact (its URL, e-mail and token rules would damage the claim). Keys are left alone."""
+    """Text an agent typed (a claim, a limitation) with the project root and other absolute paths removed. The project
+    root, the user's home and the temp folder are replaced first, whole and in every spelling they can be typed in
+    (_spellings), longest first; then the path part of learn.redact catches any other absolute path (its URL,
+    e-mail and token rules would damage the claim). Keys are left alone."""
+    import tempfile
     from bp import learn
     from bp.study import safety
     s = safety.clean_text(str(text))
-    for form in {str(root), root.as_posix(), str(root.resolve()), root.resolve().as_posix()}:
-        s = s.replace(form, "<project>")
+    folders = [(str(root), "<project>")]
+    for folder in {os.path.expanduser("~"), tempfile.gettempdir(), os.environ.get("TEMP"), os.environ.get("TMP")}:
+        if folder and os.path.isabs(folder):
+            folders.append((folder, "<path>"))
+    known = [(f, label) for folder, label in folders for f in _spellings(folder)]
+    known += _typed_spellings(s, folders)
+    for spelling, label in sorted(known, key=lambda x: -len(x[0])):
+        s = _root_pattern(spelling).sub(label, s)
     s = learn._RX_WINPATH.sub("<path>", s)
     return learn._RX_UNIXPATH.sub("<path>", s)
 

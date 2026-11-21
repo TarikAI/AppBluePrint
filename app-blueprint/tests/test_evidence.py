@@ -25,7 +25,7 @@ from bp.core import BlueprintError
 from bp.study import engine, safety
 from bp.version import TOOL_VERSION
 
-from test_study_core import (LANES, MOBILE, SOURCE, STUB_SOURCE, TempProject, isolated_launcher, leaks,
+from test_study_core import (BS, LANES, MOBILE, SOURCE, STUB_SOURCE, TempProject, isolated_launcher, leaks,
                              machine_strings, project_text)
 
 DIG = "sha256:" + "ab" * 32
@@ -804,6 +804,37 @@ class AgentTextTest(TempProject):
         self.assertIn("<project>", stored["claim"])
         for name, text in project_text(self.root).items():
             self.assertEqual(leaks(text, machine), [], name)
+
+    def test_every_spelling_of_the_root_is_redacted_whole(self):
+        """m4: the project root as typed, resolved, in its 8.3 short form, with either separator, in another case on
+        Windows, quoted or not, followed by folder names with spaces; then the home and temp folders the same way."""
+        from bp.commands import evidence as cmd
+        (self.root / "my folder").mkdir()
+        root = self.root
+        forms = {str(root), root.as_posix(), str(root.resolve()), root.resolve().as_posix()}
+        short = cmd._short_name(root)
+        if short:
+            forms |= {short, short.replace(BS, "/")}
+            mixed = cmd._short_name(root.parent)  # short folders above, the long name below: what CI runners type
+            if mixed:
+                forms |= {mixed + BS + root.name, mixed.replace(BS, "/") + "/" + root.name}
+        if os.name == "nt":
+            forms |= {f.upper() for f in list(forms)} | {f.lower() for f in list(forms)}
+        machine = machine_strings(self.tmp, root) | ({short, short.replace(BS, "/")} if short else set())
+        home, temp = os.path.expanduser("~"), tempfile.gettempdir()
+        for form in sorted(forms):
+            for typed in (f"Seen in {form}{BS}my folder{BS}a b.js and more", f'see "{form}/my folder/x y.txt" here',
+                          f"at {form}/a.js", f"see {form}"):
+                self.assertTrue(leaks(typed, machine), typed)  # the positive control, for each spelling
+                got = cmd.redact_paths(root, typed)
+                self.assertEqual(leaks(got, machine), [], f"{typed!r} -> {got!r}")
+                self.assertIn("<project>", got, typed)
+                self.assertNotIn("my folder", got, typed)  # the rest of the path goes with the root
+        for folder in (home, temp):
+            for typed in (f"in {folder}{BS}some dir{BS}x.txt now", f'"{Path(folder).as_posix()}/a b/c.txt"'):
+                got = cmd.redact_paths(root, typed)
+                self.assertEqual(leaks(got, machine), [], f"{typed!r} -> {got!r}")
+        self.assertEqual(cmd.redact_paths(root, "src/a.js and https://example.test/a"), "src/a.js and https://example.test/a")
 
     def test_by_is_scrubbed(self):
         """m3."""
