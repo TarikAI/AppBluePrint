@@ -702,8 +702,8 @@ def worked_by(rec):
         if callable(reader) and isinstance(rec, dict):
             got = reader(rec)
             ids += [x for x in got if isinstance(x, str)] if isinstance(got, (list, tuple, set)) else []
-    except (ImportError, TypeError, ValueError, AttributeError):
-        pass
+    except (ImportError, TypeError, ValueError, AttributeError, BlueprintError):
+        pass  # a damaged value is judged by worked_damage, never read as "nobody"
     if isinstance(rec, dict):
         if isinstance(rec.get("workedBy"), list):
             ids += [x for x in rec["workedBy"] if isinstance(x, str)]

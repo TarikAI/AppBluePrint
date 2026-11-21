@@ -1611,6 +1611,14 @@ class IndependenceTest(unittest.TestCase):
         self.assertEqual(features.worked_by({"by": "a", "workedBy": ["b", 5, "c"]}).count("b"), 1)
         self.assertEqual(features.worked_by(None), [])
 
+    def test_a_damaged_workedby_never_escapes_as_an_exception_and_shows_nobody_in_the_table(self):
+        state = {"files": {"crates/snag-api/src/main.rs": {"by": "backend-lead", "workedBy": {"a": 1}}}}
+        self.assertEqual(self.who(state), [])
+        self.assertEqual(features.worked_by(state["files"]["crates/snag-api/src/main.rs"]), ["backend-lead"])
+        self.assertTrue(features.worked_damage(state["files"]["crates/snag-api/src/main.rs"]))
+        for who in ("evaluator", "cto-architect", "nobody", ""):
+            self.assertIn("repair .blueprint/state.json", features.independence_problem(self.plan, self.feature, self.items, who, state))
+
     def test_a_blank_roster_id_is_nobody(self):
         self.plan["roster"].append({"id": " ", "kind": "agent"})
         self.assertNotIn(" ", self.who())
