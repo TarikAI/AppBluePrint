@@ -234,7 +234,7 @@ Ownership follows the rules below in order; **the last matching rule wins**, as 
 - ◑ `app-blueprint/tests/test_validate.py`
 - ◑ `app-blueprint/tests/test_registry_hooks.py`
 - ◑ `app-blueprint/tests/test_plan_fuzz_v2.py`
-- ○ `app-blueprint/tests/test_state_integrity.py`
+- ◑ `app-blueprint/tests/test_state_integrity.py`
 - ⟨pattern⟩ `app-blueprint/tests/data/v1/**`: One frozen input, golden or generator script of the version 1 behaviour tests.
 
 ### W0-B
@@ -256,29 +256,29 @@ Ownership follows the rules below in order; **the last matching rule wins**, as 
 
 **W1 Roadmap, features, unknowns**
 
-- ○ `app-blueprint/scripts/bp/roadmap.py`
-- ○ `app-blueprint/scripts/bp/commands/roadmap.py`
-- ○ `app-blueprint/scripts/bp/views/roadmap_md.py`
-- ○ `app-blueprint/assets/tab-roadmap.js`
-- ○ `app-blueprint/tests/test_roadmap.py`
+- ◑ `app-blueprint/scripts/bp/roadmap.py`
+- ◑ `app-blueprint/scripts/bp/commands/roadmap.py`
+- ◑ `app-blueprint/scripts/bp/views/roadmap_md.py`
+- ◑ `app-blueprint/assets/tab-roadmap.js`
+- ◑ `app-blueprint/tests/test_roadmap.py`
 
 ### W1-F
 
 **W1 Roadmap, features, unknowns**
 
-- ○ `app-blueprint/scripts/bp/features.py`
-- ○ `app-blueprint/scripts/bp/views/features_md.py`
-- ○ `app-blueprint/assets/tab-features.js`
+- ◑ `app-blueprint/scripts/bp/features.py`
+- ◑ `app-blueprint/scripts/bp/views/features_md.py`
+- ◑ `app-blueprint/assets/tab-features.js`
 - ◑ `app-blueprint/assets/mindmap.js` (modify)
-- ○ `app-blueprint/tests/test_features.py`
+- ◑ `app-blueprint/tests/test_features.py`
 
 ### W1-U
 
 **W1 Roadmap, features, unknowns**
 
-- ○ `app-blueprint/scripts/bp/unknowns.py`
-- ○ `app-blueprint/assets/tab-unknowns.js`
-- ○ `app-blueprint/tests/test_unknowns.py`
+- ◑ `app-blueprint/scripts/bp/unknowns.py`
+- ◑ `app-blueprint/assets/tab-unknowns.js`
+- ◑ `app-blueprint/tests/test_unknowns.py`
 
 ### W2-FX1
 

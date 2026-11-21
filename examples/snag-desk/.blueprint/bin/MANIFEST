@@ -1,4 +1,4 @@
-# app-blueprint tool 1.9.1
+# app-blueprint tool 1.9.2
 blueprint.py
 bp/__init__.py
 bp/api.py
@@ -6,26 +6,36 @@ bp/cli.py
 bp/commands/__init__.py
 bp/commands/data.py
 bp/commands/learn.py
+bp/commands/migrate.py
 bp/commands/plan.py
 bp/commands/progress.py
+bp/commands/roadmap.py
 bp/core.py
 bp/data.py
 bp/export.py
+bp/features.py
 bp/globs.py
 bp/install.py
 bp/learn.py
 bp/migrate.py
 bp/plan.py
 bp/registry.py
+bp/roadmap.py
 bp/rules.py
 bp/status.py
+bp/unknowns.py
 bp/validate.py
 bp/verify.py
 bp/version.py
 bp/views/__init__.py
 bp/views/context.py
+bp/views/features_md.py
 bp/views/render.py
+bp/views/roadmap_md.py
 bp/views/roster.py
 bp/views/structure.py
 map.template.html
 mindmap.js
+tab-features.js
+tab-roadmap.js
+tab-unknowns.js
