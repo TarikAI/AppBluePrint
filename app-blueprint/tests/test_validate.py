@@ -1417,7 +1417,8 @@ PORTABLE_NOTE = " (run from the project folder)"
 HOSTILE_DIRS = ["a$(touch PWNED)b", "a`touch PWNED`b", "a%PATH%b", "a!b", "a&b", "a;b", "a'b", "a$HOME", "a^b"]
 if os.name != "nt":
     HOSTILE_DIRS += ['a"b', "a\\"]
-SAFE_DIRS = ["plain", "with space", "p(1)[2]", "a+b,c@d=e", "été 日本", "x-y_z.w"]
+SAFE_DIRS = ["plain", "with space", "p(1)[2]", "a+b,c@d=e", "été 日本", "x-y_z.w",
+             "RUNNER~1", "~start", "~user x"]  # ~ is literal inside double quotes in all three shells (CI: 8.3 names)
 
 
 class RunHintTest(unittest.TestCase):
@@ -1432,7 +1433,7 @@ class RunHintTest(unittest.TestCase):
 
     def project(self, name, plan=True):
         root = self.base / name
-        (root / ".blueprint").mkdir(parents=True)
+        (root / ".blueprint").mkdir(parents=True, exist_ok=True)
         if plan:
             (root / ".blueprint" / "blueprint.json").write_text(json.dumps(v2_plan(), indent=2), encoding="utf-8")
         return root
@@ -1508,6 +1509,19 @@ class RunHintTest(unittest.TestCase):
                     r = self.paste(line, self.base, suffix, argv)
                     self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
                     self.assertIn("Snag Desk: 5 planned files", r.stdout)
+        scripts_dir = Path(os.path.abspath(os.sep)) / "scripts"
+        had_scripts = scripts_dir.exists()
+        for name in HOSTILE_DIRS:  # no copy: the placeholder form. It is not meant to run; pasted, it runs nothing
+            root = self.project(name)
+            line = core.run_hint(root, "status")
+            self.assertEqual(line, "python <skill>/scripts/blueprint.py status --root ." + PORTABLE_NOTE)
+            for shell, suffix, argv in shells:
+                with self.subTest(name=name, shell=shell, form="placeholder"):
+                    empty = Path(tempfile.mkdtemp(prefix="paste-", dir=self.base))
+                    r = self.paste(line, empty, suffix, argv)
+                    self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+                    self.assertEqual([x.name for x in empty.iterdir()], [], "nothing is created")
+                    self.assertEqual(scripts_dir.exists(), had_scripts, "the > in <skill> creates nothing")
         for name in HOSTILE_DIRS:  # no path printed; the copy form, pasted in the project, runs the copy only
             root = self.project(name)
             r = S.run_script(S.LAUNCHER, ["init", "--refresh-tool", "--root", root], root)
