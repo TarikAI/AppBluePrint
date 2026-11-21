@@ -263,12 +263,28 @@ def require_owner(plan, path, by, force):
         die(f"{path} is owned by {owner}, not {by}. Ask its owner, or use --force if you are the lead reassigning it.", 3)
 
 
+def worked_by(entry):
+    """Every id that claimed or marked a file entry, in first-seen order (state.files[p].workedBy). An entry written
+    before the key existed reads as [by] when by is set, else []. Public: the features and records modules read it."""
+    if not isinstance(entry, dict):
+        return []
+    ids = entry.get("workedBy")
+    if isinstance(ids, list):
+        return [x for x in ids if isinstance(x, str)]
+    by = entry.get("by")
+    return [by] if isinstance(by, str) and by else []
+
+
 def set_file_state(root, path, new_state, by, note=None):
     """claim and mark: one file's record (state, by, at, note; planned drops its proof), changed under the state lock
-    on the state as it is then, with its log line."""
+    on the state as it is then, with its log line. workedBy only grows: by joins it (once, as given) and nothing here
+    or elsewhere removes an id; only the entry's own removal does (verify and sync never touch it)."""
     def change(state):
         rec = state["files"].setdefault(path, {})
-        rec.update({"state": new_state, "by": by, "at": now_iso()})
+        ids = worked_by(rec)
+        if isinstance(by, str) and by and by not in ids:
+            ids.append(by)
+        rec.update({"state": new_state, "by": by, "at": now_iso(), "workedBy": ids})
         if note is not None:
             rec["note"] = note
         if new_state == "planned":

@@ -771,6 +771,11 @@ def _files_damage(raw):
     for p, rec in raw["files"].items():
         if not isinstance(rec, dict):
             return f"files[{json.dumps(p, ensure_ascii=False)}] must be an object (got {_json_kind(rec)})"
+        ids = rec.get("workedBy", [])
+        if not isinstance(ids, list) or any(not isinstance(x, str) for x in ids):
+            bad = ids if not isinstance(ids, list) else next(x for x in ids if not isinstance(x, str))
+            return (f"files[{json.dumps(p, ensure_ascii=False)}].workedBy must be a list of ids "
+                    f"(got {_json_kind(bad)}{'' if not isinstance(ids, list) else ' in it'})")
     return None
 
 
