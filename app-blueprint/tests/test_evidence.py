@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -149,11 +150,23 @@ class StoreTest(TempProject):
         self.assertEqual(bad, 8)
         self.assertEqual(evidence.all_ids(self.root), {a["id"]})
 
-    def test_a_missing_kind_still_loads_and_validate_record_names_it(self):
-        r = rec()
-        del r["kind"]
-        self.write_lines("S-a", [json.dumps(r) + "\n"])
-        self.assertEqual(evidence.validate_record(evidence.load(self.root, "S-a")[0]), ["kind is not of the form lane.name"])
+    def test_a_line_without_the_minimum_shape_is_malformed(self):
+        good = rec()
+        bad = []
+        for change in ({"kind": None}, {"kind": ["a"]}, {"kind": {"a": 1}}, {"kind": "Bad"}, {"key": 5},
+                       {"claim": None}, {"basis": "seen"}, {"basis": ["observed"]}, {"source": "x"}, {"source": None}):
+            r = dict(good, **change)
+            r["id"] = "ev-%016x" % (len(bad) + 1)
+            bad.append(r)
+        only_id = {"id": "ev-00000000000000ff"}
+        no_kind = dict(good, id="ev-00000000000000fe")
+        del no_kind["kind"]
+        self.write_lines("S-a", [json.dumps(r) + "\n" for r in bad + [only_id, no_kind, good]])
+        recs, malformed = evidence.load_info(self.root, "S-a")
+        self.assertEqual([r["id"] for r in recs], [good["id"]])
+        self.assertEqual(malformed, len(bad) + 2)
+        self.assertFalse(evidence.shape_ok(no_kind))
+        self.assertTrue(evidence.shape_ok(good))
 
     def test_add_dedups_makes_s_notes_and_repairs_a_cut_line(self):
         r = rec(study="S-notes")
@@ -422,12 +435,14 @@ class EvidenceCommandTest(TempProject):
                      "inferred", "--link", got["id"], extra={})
         self.assertRegex(r.stdout, r"^Recorded ev-[0-9a-f]{16} in S-notes\.")
         r = self.cli("evidence", "list", extra={})
-        self.assertIn(f"{got['id']}  observed  fresh  The doc says so.", r.stdout)
+        self.assertIn(f"{got['id']}  observed  The doc says so.", r.stdout)  # no freshness without --stale
+        rows = json.loads(self.cli("evidence", "list", "--json", extra={}).stdout)["data"]["records"]
+        self.assertEqual({x["freshness"] for x in rows}, {None})
         self.put("docs/a.md", "changed\n")
         r = self.cli("evidence", "list", "--stale", "--json", extra={})
         rows = json.loads(r.stdout)["data"]["records"]
         self.assertEqual([(x["id"], x["freshness"]) for x in rows], [(got["id"], "stale")])
-        self.assertIn("⚠ stale", self.cli("evidence", "list", extra={}).stdout)
+        self.assertIn("⚠ stale", self.cli("evidence", "list", "--stale", extra={}).stdout)
         r = self.cli("evidence", "show", got["id"], "--json", extra={})
         self.assertEqual(json.loads(r.stdout)["data"]["freshness"], "stale")
         self.assertIn("excerpt: <secret:github-token> here", self.cli("evidence", "show", got["id"], extra={}).stdout)
@@ -530,13 +545,15 @@ class HooksTest(TempProject):
         self.assertEqual(evidence.validate_context(None, {}), {})
         self.assertEqual(evidence.validate_context(self.root, {}), {"evidenceIds": set()})
         r, _ = evidence.add(self.root, "S-notes", rec(study="S-notes"))
-        self.assertEqual(evidence.validate_context(self.root, {}), {"evidenceIds": {r["id"]}})
+        self.assertEqual(evidence.validate_context(self.root, {}), {"evidenceIds": set()})  # nothing cited: not read
+        cites = {"unknowns": [{"id": "U-a", "evidenceFor": [r["id"]]}]}
+        self.assertEqual(evidence.validate_context(self.root, cites), {"evidenceIds": {r["id"]}})
         ctx = {"studies": []}
         evidence.context(self.root, {}, {}, ctx)
         self.assertEqual([s["id"] for s in ctx["studies"]], ["S-notes"])
         s = ctx["studies"][0]
         self.assertEqual(set(s), {"id", "kind", "target", "authorization", "tool", "at", "coverage", "counts",
-                                  "freshness", "behaviours"})
+                                  "behaviours"})
         self.assertEqual(s["target"], {"name": ".", "own": True})
         self.assertEqual(s["behaviours"], {"candidate": 0, "reviewed": 0, "rejected": 0})
         payload = evidence.map_payload(ctx)
@@ -546,15 +563,26 @@ class HooksTest(TempProject):
         self.assertEqual(evidence.map_payload({}), {"studies": []})
         self.assertEqual(evidence.map_payload({"studies": "x"}), {"studies": []})
 
-    def test_the_map_freshness_work_is_bounded_and_fails_closed(self):
+    def test_the_context_reads_only_study_json(self):
+        """M6: the context hook (status, claim, mark, sync, task, export, render) never opens a target, hashes a file
+        or parses evidence.jsonl, and carries no freshness."""
         self.put("src/a.js", "a" * 1000 + "\n")
         engine.run_study(self.root, "source", self.root, study_id="S-b", lanes=[SOURCE])
-        with mock.patch.dict(evidence.CONTEXT_LIMITS, {"totalBytes": 10}):
+        boom = mock.Mock(side_effect=AssertionError("must not be called from the context"))
+        with mock.patch.object(evidence, "load", boom), mock.patch.object(evidence, "load_info", boom), \
+                mock.patch.object(evidence, "freshness_check", boom), mock.patch.object(core, "proof_digest", boom), \
+                mock.patch.object(safety, "read_file", boom), mock.patch.object(safety, "SafeZip", boom):
             ctx = {}
             evidence.context(self.root, {}, {}, ctx)
-        f = ctx["studies"][0]["freshness"]
-        self.assertEqual((f["fresh"], f["stale"]), (0, 0))
-        self.assertGreater(f["unknown"], 0)
+        s = ctx["studies"][0]
+        self.assertNotIn("freshness", s)
+        self.assertEqual(s["counts"]["evidence"], evidence.load_study(self.root, "S-b")["counts"]["evidence"])
+        big = self.root / ".blueprint/studies/S-b/behaviours.json"
+        big.write_text(json.dumps({"study": "S-b", "behaviours": [{"id": "B-x", "status": "reviewed",
+                                                                    "pad": "x" * 2_000_000}]}), encoding="utf-8")
+        ctx = {}
+        evidence.context(self.root, {}, {}, ctx)
+        self.assertIsNone(ctx["studies"][0]["behaviours"])
 
     def test_validate_warns_only_for_evidence_that_is_not_in_the_store(self):
         unknowns = (S.PACKAGE / "unknowns.py")
@@ -594,6 +622,277 @@ class HooksTest(TempProject):
             self.assertEqual(leaks(text, machine), [], name)
             for value in (FT.SECRETS["jwt"], json.dumps(FT.SECRETS["jwt"])[1:-1]):
                 self.assertNotIn(value, text, name)
+
+
+# ------------------------------------------------------------------------------------------------ review round 1
+
+DAMAGED_LINES = [
+    '{"id": "ev-0000000000000001"}', '{"id": "ev-0000000000000002", "kind": ["a"]}',
+    '{"id": "ev-0000000000000003", "kind": {"a": 1}}', '{"id": "ev-0000000000000004", "kind": null}',
+    '{"id": "ev-0000000000000005", "kind": "a.b", "key": 5, "claim": "c", "basis": "observed", "source": {}}',
+    '{"id": "ev-0000000000000006", "kind": "a.b", "key": "k", "claim": null, "basis": "observed", "source": {}}',
+    '{"id": "ev-0000000000000007", "kind": "a.b", "key": "k", "claim": "c", "basis": "x", "source": {}}',
+    '{"id": "ev-0000000000000008", "kind": "a.b", "key": "k", "claim": "c", "basis": "observed", "source": "x"}',
+    '{"id": "ev-0000000000000009", "kind": "a.b", "key": "k", "claim": "c", "basis": "observed", "source": null}',
+    '{"id": "ev-000000000000000a", "kind": "a.b", "key": "k", "claim": "c", "basis": "observed", "source": {}, '
+    '"data": [1], "superseded": "yes", "links": "ev-1"}',
+    '{"id": "ev-000000000000000b", "x": NaN}', '{"id": "ev-000000000000000c", "s": "\\ud800"}', "[" * 900,
+    '{"id": "ev-000000000000000d", "n": ' + "9" * 4000 + "}", '{"id": "ev-000000000000000e", "kind": "a.b", "ke',
+    "\ufeff{}", "not json at all",
+]
+
+
+class PreExistingCommandsTest(TempProject):
+    """B1: nothing inside .blueprint/studies/ makes a command that existed before this PR fail or record an incident.
+    Run with the real launcher, so whichever modules exist answer as they do without studies."""
+
+    COMMANDS = (["status"], ["status", "--json"], ["export", "json"], ["render"], ["sync"],
+                ["claim", "Cargo.toml", "--by", "backend-lead"], ["mark", "Cargo.toml", "built", "--by", "backend-lead"],
+                ["task", "T-domain", "doing", "--by", "owner"], ["validate", "--json"])
+
+    def project(self, damaged):
+        from test_validate import v2_plan
+        root = self.tmp / ("damaged" if damaged else "clean")
+        (root / ".blueprint").mkdir(parents=True)
+        (root / ".blueprint/blueprint.json").write_text(json.dumps(v2_plan()), encoding="utf-8")
+        self.put("Cargo.toml", "[workspace]\n", root)
+        r = S.run_script(S.LAUNCHER, ["evidence", "add", "--kind", "note.a", "--key", "a", "--claim", "A note.",
+                                      "--basis", "inferred", "--root", root], root, env=S.tool_env())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        if damaged:
+            with open(root / ".blueprint/studies/S-notes/evidence.jsonl", "ab") as f:
+                f.write(("\n".join(DAMAGED_LINES) + "\n").encode("utf-8") + b"\xff\xfe broken bytes\n")
+            other = root / ".blueprint/studies/S-other"
+            other.mkdir()
+            (other / "study.json").write_text(json.dumps({"id": "S-other", "kind": "source", "lanes": 5,
+                                                          "target": {"name": "x", "own": True},
+                                                          "coverage": {"missing": 5, "notes": 5, "skipped": 5}}),
+                                              encoding="utf-8")
+            (other / "evidence.jsonl").write_text("\n".join(DAMAGED_LINES), encoding="utf-8")
+            (other / "behaviours.json").write_text('{"behaviours": 5}', encoding="utf-8")
+        return root
+
+    def test_damaged_studies_change_no_exit_status_and_record_no_incident(self):
+        clean, damaged = self.project(False), self.project(True)
+        for args in self.COMMANDS:
+            want = S.run_script(S.LAUNCHER, args + ["--root", clean], clean, env=S.tool_env())
+            got = S.run_script(S.LAUNCHER, args + ["--root", damaged], damaged, env=S.tool_env())
+            self.assertEqual(got.returncode, want.returncode, f"{args}: {got.stderr}")
+            for text in (got.stderr, got.stdout):
+                self.assertNotIn("unexpected error", text, args)
+                self.assertNotIn("incident", text.lower(), args)
+                self.assertNotIn("Traceback", text, args)
+        r = S.run_script(S.LAUNCHER, ["evidence", "add", "--kind", "note.b", "--key", "b", "--claim", "Another.",
+                                      "--basis", "inferred", "--root", damaged], damaged, env=S.tool_env())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(evidence.load_study(damaged, "S-notes")["counts"]["evidence"],
+                         len(evidence.load(damaged, "S-notes")))  # the lines of the minimum shape, nothing else
+        for args in (["evidence", "list"], ["evidence", "stale"], ["study", "list"], ["study", "show", "S-other"],
+                     ["evidence", "export", "--out", self.tmp / "b.json", "--study", "S-notes"]):
+            r = S.run_script(S.LAUNCHER, args + ["--root", damaged], damaged, env=S.tool_env())
+            self.assertIn(r.returncode, (0, 1), f"{args}: {r.stderr}")
+            self.assertNotIn("Traceback", r.stderr)
+            self.assertNotIn("unexpected error", r.stderr)
+
+
+class ArchiveFreshnessTest(TempProject):
+    def test_a_thousand_members_each_checked_and_one_changed_is_stale(self):
+        """M1: each container is opened once per pass and listing is not charged against the file limit."""
+        files = {f"m/{i:04d}.txt": f"member {i}\n" for i in range(1000)}
+        FA.make_xapk(self.root / "big.zip", {}, files=files)
+        self.assertEqual(self.cli("study", "mobile", self.root / "big.zip", "--own").returncode, 0)
+        files["m/0000.txt"] = "changed\n"
+        FA.make_xapk(self.root / "big.zip", {}, files=files)
+        started = time.monotonic()
+        r = self.cli("evidence", "stale", "--strict", "--json")
+        took = time.monotonic() - started
+        self.assertEqual(r.returncode, 1)
+        counts = json.loads(r.stdout)["data"]["studies"]["S-big"]
+        self.assertEqual(counts, {"fresh": 999, "stale": 1, "missing": 0, "unknown": 0})
+        self.assertLess(took, 30)
+
+    def test_a_check_stopped_by_a_tool_limit_is_reported_and_fails_strict(self):
+        p = FA.make_oversized_member_zip(self.root / "big.zip")
+        engine.run_study(self.root, "mobile", p, own=True, lanes=[MOBILE])
+        r = evidence.make_record("S-big", "stub.member", "big.bin", "A big member.", "observed",
+                                 {"artifact": "big.zip", "path": "big.bin", "line": None, "offset": None,
+                                  "digest": "sha256:" + "1" * 64, "excerpt": None}, by="agent:test")
+        evidence.add(self.root, "S-big", r)
+        FA.make_oversized_member_zip(self.root / "big.zip", size=64 * 1024 * 1024 + 2)  # not the fast path any more
+        r1 = self.cli("evidence", "stale", "--json")
+        data = json.loads(r1.stdout)["data"]
+        self.assertEqual(r1.returncode, 0)
+        self.assertEqual(data["notChecked"], {"S-big": {"count": 1, "limits": ["too-large"]}})
+        self.assertIn("1 record not checked: too-large reached", self.cli("evidence", "stale").stdout)
+        self.assertEqual(self.cli("evidence", "stale", "--strict").returncode, 1)
+        r2 = self.cli("evidence", "list", "--stale", "--json")
+        self.assertEqual(r2.returncode, 1)
+        self.assertEqual(json.loads(r2.stdout)["data"]["notChecked"], {"S-big": {"count": 1, "limits": ["too-large"]}})
+        states, unchecked = evidence.freshness_check(self.root, evidence.load_study(self.root, "S-big"),
+                                                     evidence.load(self.root, "S-big"))
+        self.assertEqual(list(unchecked.values()), ["too-large"])
+
+    def test_a_stopped_budget_is_not_checked_and_not_available_is_only_unknown(self):
+        self.put("src/a.js", "a\n")
+        engine.run_study(self.root, "source", self.root / "src", tracked=True, lanes=[SOURCE])
+        study = evidence.load_study(self.root, "S-src")
+        recs = evidence.load(self.root, "S-src")
+        states, unchecked = evidence.freshness_check(self.root, study, recs, budget=safety.Budget({"totalBytes": 1}))
+        self.assertEqual(set(states.values()), {"unknown"})
+        self.assertEqual(set(unchecked.values()), {"byte-limit"})
+        outside = dict(study, target=dict(study["target"], path=None))
+        states, unchecked = evidence.freshness_check(self.root, outside, recs)
+        self.assertEqual((set(states.values()), unchecked), ({"unknown"}, {}))
+
+
+class StudyShowShapesTest(TempProject):
+    def test_wrong_shapes_in_study_json_show_as_empty(self):
+        """m1."""
+        engine.run_study(self.root, "source", self.root, study_id="S-s", lanes=[])
+        path = self.root / ".blueprint/studies/S-s/study.json"
+        study = json.loads(path.read_text(encoding="utf-8"))
+        for change in ({"lanes": 5}, {"coverage": {"missing": 5, "notes": 5, "skipped": 5, "filesSeen": "x"}},
+                       {"coverage": 5}, {"authorization": 5}, {"counts": 5}, {"tool": 5, "at": ["x"]},
+                       {"coverage": {"skipped": {"binary": "x", "ratio": -1}, "stoppedBy": 5, "truncated": True}}):
+            path.write_text(json.dumps(dict(study, **change)), encoding="utf-8")
+            r = self.cli("study", "show", "S-s")
+            self.assertEqual(r.returncode, 0, f"{change}: {r.stderr}")
+            self.assertNotIn("Traceback", r.stderr)
+
+
+class NextTextsTest(TempProject):
+    def test_next_texts_run_in_a_project_initialised_by_an_older_tool(self):
+        """m2: the copy lacks the evidence and study commands, so every next is the running launcher's form."""
+        import shlex
+        from test_validate import hermetic_launcher
+        shutil.rmtree(self.root / ".blueprint")
+        r = S.run_script(hermetic_launcher(), ["init", "--root", self.root], self.root, env=S.tool_env())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse((self.root / ".blueprint/bin/bp/commands/evidence.py").exists())
+        nexts = []
+        for args in (["evidence", "show", "ev-" + "0" * 16], ["evidence", "list"], ["study", "show", "S-none"],
+                     ["study", "list"]):
+            r = self.cli(*args, extra={})
+            text = r.stdout + r.stderr
+            for line in text.splitlines():
+                for marker in ("next: ", "with: ", "Start with: ", "Freshness: "):
+                    if marker in line:
+                        nexts.append(line.split(marker, 1)[1].split(" (", 1)[0])
+        self.assertTrue(nexts)
+        for cmd in nexts:
+            self.assertNotIn(".blueprint/bin", cmd, cmd)
+            if "<" in cmd:
+                continue  # a placeholder the user fills in
+            argv = shlex.split(cmd)
+            self.assertEqual(argv[0], "python")
+            r = subprocess.run([S.PY] + argv[1:], capture_output=True, text=True, encoding="utf-8", env=S.tool_env())
+            self.assertNotIn("not-built", r.stdout + r.stderr, cmd)
+            self.assertNotIn("is not built", r.stdout + r.stderr, cmd)
+
+
+class AgentTextTest(TempProject):
+    def test_paths_typed_into_evidence_add_are_redacted(self):
+        """m4, with a positive control: the scanner finds the raw text."""
+        machine = machine_strings(self.tmp, self.root)
+        typed = f"Seen in {self.root / 'a.js'} and /home/someone/x"
+        self.assertTrue(leaks(typed, machine))
+        r = self.cli("evidence", "add", "--kind", "note.a", "--key", "k", "--claim", typed, "--basis", "inferred",
+                     "--limitation", "only " + str(self.tmp), "--json", extra={})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        stored = json.loads(r.stdout)["data"]["record"]
+        self.assertEqual(leaks(stored["claim"] + " ".join(stored["limitations"]), machine), [])
+        self.assertIn("<project>", stored["claim"])
+        for name, text in project_text(self.root).items():
+            self.assertEqual(leaks(text, machine), [], name)
+
+    def test_by_is_scrubbed(self):
+        """m3."""
+        key = FT.SECRETS["aws-key"]
+        r = self.cli("evidence", "add", "--kind", "note.a", "--key", "k", "--claim", "C.", "--basis", "inferred",
+                     "--by", key, "--json", extra={})
+        self.assertEqual(json.loads(r.stdout)["data"]["record"]["by"], "agent:<secret:aws-key>")
+
+    def test_line_counts_line_feeds_only(self):
+        """n3."""
+        self.put("a.txt", b"one\r\ntwo\x0bstill two\r\nthree\n")
+        for line, want in ((1, "one"), (2, "two still two"), (3, "three")):
+            r = self.cli("evidence", "add", "--kind", "note.a", "--key", f"k{line}", "--claim", "C.", "--basis",
+                         "observed", "--path", "a.txt", "--line", line, "--json", extra={})
+            self.assertEqual(json.loads(r.stdout)["data"]["record"]["source"]["excerpt"], want)
+
+    def test_the_private_core_and_learn_names_still_have_their_shape(self):
+        from bp import learn
+        self.assertTrue(hasattr(learn, "_RX_WINPATH") and hasattr(learn, "_RX_UNIXPATH"))
+        self.assertTrue(learn._RX_WINPATH.search("C:\\Users\\x\\y"))
+        self.assertTrue(learn._RX_UNIXPATH.search("/home/x/y"))
+
+
+class ImportRound1Test(TempProject):
+    make_store = BundleTest.make_store
+
+    def bundle(self):
+        self.make_store()
+        return evidence.export_bundle(self.root)
+
+    def other(self):
+        o = TempProject()
+        o.setUp()
+        self.addCleanup(o.doCleanups)
+        return o
+
+    def snapshot(self, root):
+        return {p.relative_to(root).as_posix(): p.read_bytes() for p in (root / ".blueprint").rglob("*") if p.is_file()
+                and "state.lock" not in p.name}
+
+    def test_all_or_nothing(self):
+        """m6: a damaged behaviours.json met while planning writes nothing at all."""
+        bundle = self.bundle()
+        o = self.other()
+        evidence.import_bundle(o.root, {"format": evidence.FORMAT, "studies": [bundle["studies"][1]]})
+        (o.root / ".blueprint/studies/S-one/behaviours.json").write_text("{nope", encoding="utf-8")
+        before = self.snapshot(o.root)
+        with self.assertRaises(BlueprintError) as cm:
+            evidence.import_bundle(o.root, bundle)
+        self.assertEqual(cm.exception.error, "bad-study")
+        after = {k: v for k, v in self.snapshot(o.root).items() if k != ".blueprint/log.jsonl"}
+        self.assertEqual(after, {k: v for k, v in before.items() if k != ".blueprint/log.jsonl"})
+
+    def test_nothing_is_merged_into_a_conflict_and_secrets_are_refused(self):
+        bundle = self.bundle()
+        o = self.other()
+        changed = json.loads(json.dumps(bundle))
+        changed["studies"][1]["kind"] = "web"  # S-one differs: conflict
+        evidence.import_bundle(o.root, {"format": evidence.FORMAT, "studies": [changed["studies"][1]]})
+        counts = evidence.import_bundle(o.root, bundle)
+        n_one = sum(1 for r in bundle["records"] if r["study"] == "S-one")
+        self.assertEqual(counts["studies"]["conflict"], 1)
+        self.assertEqual(counts["records"]["conflict"], n_one)
+        self.assertEqual(counts["behaviours"]["conflict"], 1)
+        self.assertEqual(evidence.load(o.root, "S-one"), [])
+        planted = dict(bundle["records"][0], key="k " + FT.SECRETS["aws-key"], study="S-notes")
+        o2 = self.other()
+        c2 = evidence.import_bundle(o2.root, dict(bundle, records=[planted]))
+        self.assertEqual(c2["records"]["malformed"], 1)
+        for name, text in project_text(o2.root).items():
+            self.assertNotIn(FT.SECRETS["aws-key"], text, name)
+
+    def test_imported_studies_are_rebuilt_with_shapes_and_caps(self):
+        bundle = self.bundle()
+        s = dict(bundle["studies"][0], extra="dropped", lanes=5,
+                 coverage={"missing": 5, "notes": [f"n{i}" for i in range(500)] + [5], "skipped": {"binary": 2, "x": 1},
+                           "filesSeen": -3, "stoppedBy": "nope"},
+                 authorization={"statement": "x\n" * 400, "by": 5})
+        o = self.other()
+        evidence.import_bundle(o.root, {"format": evidence.FORMAT, "studies": [s]})
+        got = evidence.load_study(o.root, s["id"])
+        self.assertNotIn("extra", got)
+        self.assertEqual(got["lanes"], [])
+        cov = got["coverage"]
+        self.assertEqual((cov["missing"], len(cov["notes"]), cov["skipped"], cov["filesSeen"], cov["stoppedBy"]),
+                         ([], 200, {"binary": 2}, 0, None))
+        self.assertLessEqual(len(got["authorization"]["statement"]), 500)
+        self.assertIsNone(got["authorization"]["by"])
+        self.assertEqual(self.cli("study", "show", s["id"], extra={}).returncode, 0)
 
 
 TAB = S.SKILL / "assets" / "tab-studies.js"
@@ -644,7 +943,7 @@ class TabTest(unittest.TestCase):
                  "at": "2027-01-02T03:04:05Z",
                  "coverage": {"filesSeen": 10, "filesScanned": 8, "filesSkipped": 2, "skipped": {"binary": 2},
                               "missing": ["sources/"], "truncated": True, "stoppedBy": "time-limit"},
-                 "counts": {"evidence": 42, "secrets": 1}, "freshness": {"fresh": 40, "stale": 2, "missing": 0, "unknown": 0},
+                 "counts": {"evidence": 42, "secrets": 1},
                  "behaviours": {"candidate": 3, "reviewed": 1, "rejected": 0}}
         outs = self.run_tab([{"studies": [study]}, {}, {"studies": []}, {"studies": "x"},
                              {"studies": [None, 5, [], {"id": 3, "target": "x", "coverage": {"skipped": {"__proto__": 1}},
@@ -652,7 +951,7 @@ class TabTest(unittest.TestCase):
         text = outs[0]["text"]
         self.assertEqual(outs[0]["label"], "Studies (1)")
         for want in ("S-acme", "mobile app", "acme.apk", "not own: not committed", "42 records", "1 secrets redacted",
-                     "2 stale", "40 fresh", "1 of 4 reviewed", "8 of 10 files read", "2 skipped (2 binary)",
+                     "evidence stale", "1 of 4 reviewed", "8 of 10 files read", "2 skipped (2 binary)",
                      "stopped by time-limit", "missing: sources/", "The vendor's licence allows analysis.", "2027-01-02"):
             self.assertIn(want, text)
         for o in outs[1:4]:

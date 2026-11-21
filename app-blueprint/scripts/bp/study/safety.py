@@ -102,6 +102,7 @@ class Budget:
         self.files_scanned = 0
         self.bytes_read = 0
         self.by_kind = {}
+        self.hardlinks = 0  # files read that have more than one hard link (a study note)
 
     def check_time(self):
         if self.clock() - self.started > self.limits["timeLimit"]:
@@ -193,64 +194,147 @@ def decode_text(data):
 
 # ------------------------------------------------------------------------------------------------ secrets
 
-# Contract 6.2 (minimum, extended): every pattern starts with a literal or an alternation of literals. private-key
-# also takes the key body that follows the header (a bounded, single character class: linear time), so no part of a
-# PEM key is ever stored.
+# Contract 6.2, as built. Every pattern starts with a literal, and every scan is linear on every input (a test builds
+# each pattern's worst cases): the patterns below run window by window, except two that are found by hand on the
+# whole text, because their regex form is not linear or needs more than one window:
+#   private-key: a PEM block, from "-----BEGIN <words> PRIVATE KEY-----" to the next "-----END <words> PRIVATE
+#     KEY-----", or to the end of the text when there is none (pem_spans); every line inside it is key material;
+#   jwt: three runs of word characters or '-' (10+ after "eyJ", 10+ after ".eyJ", 10+ after the next "."), found
+#     from each literal ".eyJ" and expanded by hand, so each character is looked at a bounded number of times.
 SECRET_PATTERNS = {
     "aws-key": r"AKIA[0-9A-Z]{16}",
     "google-api-key": r"AIza[0-9A-Za-z_\-]{35}",
-    "private-key": r"-----BEGIN [A-Z ]{0,64}PRIVATE KEY-----[A-Za-z0-9+/=\s\\-]{0,8192}",
+    "private-key": r"-----BEGIN [A-Z ]{0,64}PRIVATE KEY-----",
     "jwt": r"eyJ[\w-]{10,}\.eyJ[\w-]{10,}\.[\w-]{10,}",
     "stripe-live": r"[sr]k_live_[0-9A-Za-z]{16,}",
     "slack": r"xox[abprs]-[0-9A-Za-z-]{10,}",
     "github-token": r"gh[pousr]_[0-9A-Za-z]{30,}",
-    "bearer": r"(?i)bearer\s+[\w.\-]{16,}",
+    "bearer": r"(?i)bearer\s{1,64}[\w.\-]{16,}",
 }
-_SECRET_RX = [(name, re.compile(rx)) for name, rx in SECRET_PATTERNS.items()]
+_SECRET_RX = {name: re.compile(rx) for name, rx in SECRET_PATTERNS.items()}
 # a cheap test before a pattern runs: the literal it starts with (bearer: lower-cased)
-_SECRET_HINT = {"aws-key": "AKIA", "google-api-key": "AIza", "private-key": "-----BEGIN", "jwt": "eyJ",
+_SECRET_HINT = {"aws-key": "AKIA", "google-api-key": "AIza", "private-key": "-----BEGIN ", "jwt": ".eyJ",
                 "stripe-live": "k_live_", "slack": "xox", "github-token": "gh", "bearer": "bearer"}
+_PEM_HEAD = re.compile(r"-----BEGIN [A-Z ]{0,64}PRIVATE KEY-----")
+_PEM_END = re.compile(r"-----END [A-Z ]{0,64}PRIVATE KEY-----")
+
+
+def pem_spans(text):
+    """(start, end) of every PEM private-key block of text: from its BEGIN line to the end of the next matching END
+    line, or to the end of the text when there is none. str.find and two bounded matches: linear."""
+    out, pos = [], 0
+    while True:
+        i = text.find("-----BEGIN ", pos)
+        if i < 0:
+            return out
+        head = _PEM_HEAD.match(text, i)
+        if head is None:
+            pos = i + 1
+            continue
+        j, end = head.end(), len(text)
+        while True:
+            k = text.find("-----END ", j)
+            if k < 0:
+                break
+            tail = _PEM_END.match(text, k)
+            if tail is not None:
+                end = tail.end()
+                break
+            j = k + 1
+        out.append((i, end))
+        pos = end
+
+
+def _word(c):
+    return c == "-" or c == "_" or c.isalnum()
+
+
+def _jwt_spans(text):
+    """(start, end) of every JSON Web Token: from each literal ".eyJ", the run of word characters before it must hold
+    "eyJ" with 10+ characters after it (the leftmost is taken), the run after it 10+ characters and then a '.', and
+    the run after that 10+ characters. Every run is walked at most three times: linear."""
+    out, pos, n = [], 0, len(text)
+    while True:
+        p = text.find(".eyJ", pos)
+        if p < 0:
+            return out
+        r0 = p
+        while r0 > 0 and _word(text[r0 - 1]):
+            r0 -= 1
+        s = text.find("eyJ", r0, max(r0, p - 10))
+        m1 = p + 4
+        while m1 < n and _word(text[m1]):
+            m1 += 1
+        if s < 0 or m1 - (p + 4) < 10 or m1 >= n or text[m1] != ".":
+            pos = p + 1
+            continue
+        e3 = m1 + 1
+        while e3 < n and _word(text[e3]):
+            e3 += 1
+        if e3 - (m1 + 1) < 10:
+            pos = p + 1
+            continue
+        out.append((s, e3))
+        pos = e3
+
+
+def _spans(name, text):
+    if name == "private-key":
+        return pem_spans(text)
+    if name == "jwt":
+        return _jwt_spans(text)
+    return [(g, g + len(m.group(0))) for g, m in finditer(_SECRET_RX[name], text)]
 
 
 def scrub(text):
-    """(text with every SECRET_PATTERNS match replaced by <secret:NAME>, the names found, one entry per match, in
-    pattern order). Patterns run one after another; a long text is scanned window by window."""
+    """(text with every secret replaced by <secret:NAME>, the names found, one entry per match, in SECRET_PATTERNS
+    order). Patterns run one after another on the whole text: private-key and jwt by hand, the others window by
+    window; every one is linear."""
     if not isinstance(text, str):
         raise TypeError("scrub() takes text")
     found = []
-    lower = None
-    for name, rx in _SECRET_RX:
+    for name in SECRET_PATTERNS:
         hint = _SECRET_HINT[name]
-        if name == "bearer":
-            lower = text.lower() if lower is None else lower
-            if hint not in lower:
-                continue
-        elif hint not in text:
+        if (hint not in text.lower()) if name == "bearer" else (hint not in text):
             continue
-        if len(text) <= WINDOW:
-            n = [0]
-
-            def sub(_m, n=n, name=name):
-                n[0] += 1
-                return f"<secret:{name}>"
-            text = rx.sub(sub, text)
-            found += [name] * n[0]
-        else:
-            spans = [(g, g + len(m.group(0))) for g, m in finditer(rx, text)]
-            if spans:
-                parts, pos = [], 0
-                for s, e in spans:
-                    parts.append(text[pos:s])
-                    parts.append(f"<secret:{name}>")
-                    pos = e
-                parts.append(text[pos:])
-                text = "".join(parts)
-                found += [name] * len(spans)
-        lower = None
+        spans = _spans(name, text)
+        if spans:
+            parts, pos = [], 0
+            for s_, e in spans:
+                parts.append(text[pos:s_])
+                parts.append(f"<secret:{name}>")
+                pos = e
+            parts.append(text[pos:])
+            text = "".join(parts)
+            found += [name] * len(spans)
     return text, found
 
 
-_BREAKS = "\r\n\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"
+_PEM_CACHE = {}
+_KEY_LINE = re.compile(r"[A-Za-z0-9+/=]{40,}")
+
+
+def _key_line(line):
+    """A line that is only base64 characters, 40 or more, with a digit, an upper-case and a lower-case letter: what
+    a line of key material looks like when no BEGIN header is in sight (a lane passed one line)."""
+    return (_KEY_LINE.fullmatch(line) is not None and any(c.isdigit() for c in line)
+            and any(c.isupper() for c in line) and any(c.islower() for c in line))
+
+
+def _in_pem(text, col):
+    """True when offset col of text lies inside a PEM private-key block of the whole text (cached per text)."""
+    if "-----BEGIN " not in text:
+        return False
+    key = (len(text), hash(text))
+    spans = _PEM_CACHE.get(key)
+    if spans is None:
+        if len(_PEM_CACHE) > 8:
+            _PEM_CACHE.clear()
+        spans = _PEM_CACHE[key] = pem_spans(text)
+    return any(s_ <= col < e for s_, e in spans)
+
+
+_BREAKS = "\r\n"  # lines end at a line feed (a CR before one is dropped), as editors and lanes count
 _CONTROL = re.compile(r"[\x00-\x1f\x7f\x85\u2028\u2029]")
 _SPACES = re.compile(r"\s+")
 
@@ -263,11 +347,14 @@ def one_line(text):
 def excerpt(text, col=0):
     """At most 160 characters of the line of text that holds offset col, starting there, on one line, scrubbed of
     secrets (scrubbed before it is cut, with 4 KiB of the line around it, so a cut never leaves part of a secret).
-    "" for no text."""
+    A line inside a PEM private-key block of the whole text, or a line that looks like key material (_key_line), is
+    <secret:private-key>. "" for no text. Pass the whole text and the offset, not a line, so the block is seen."""
     if not isinstance(text, str) or not text:
         return ""
     text = clean_text(text)
     col = min(max(0, int(col)), len(text))
+    if _in_pem(text, col):  # decided on the whole text, before it is cut into lines
+        return "<secret:private-key>"
     lo, hi = max(0, col - 4096), min(len(text), col + 4096)
     region = text[lo:hi]
     rel = col - lo
@@ -275,6 +362,8 @@ def excerpt(text, col=0):
     ends = [i for i in (region.find(c, rel) for c in _BREAKS) if i >= 0]
     line = region[start:min(ends) if ends else len(region)]
     rel -= start
+    if _key_line(line.strip()):
+        return "<secret:private-key>"  # a line of 40+ base64 characters alone: treated as key material
     clean, _ = scrub(line)
     at = len(scrub(line[:rel])[0]) if rel else 0
     return one_line(clean[at:])[:LIMITS["excerpt"]].rstrip()
@@ -292,6 +381,8 @@ def _unsafe_name(raw):
     name = raw.replace("\\", "/")
     if "\x00" in raw:
         return "the member name holds a NUL"
+    if _CONTROL.search(raw):
+        return "the member name holds a control character"
     if name.startswith("/") or _DRIVE.match(name):
         return "the member name is absolute"
     if ".." in name.split("/"):
@@ -306,14 +397,16 @@ class SafeZip:
     member is streamed with ZipFile.open and its real bytes counted. members() lists the readable file members as
     (name, size); skipped holds (name, reason, note) for the others (unsafe-path, symlink, encrypted, ratio,
     malformed for a second member of the same name; limit for entries past 50,000). A broken archive raises
-    Skip('malformed'); one nested deeper than the limit Skip('depth'). Every member listed counts as a file seen."""
+    Skip('malformed'); one nested deeper than the limit Skip('depth'). Every member listed counts as a file seen
+    (count_files=False: not, for freshness). A name with a control character is unsafe-path too."""
 
-    def __init__(self, path_or_bytes, budget, depth=0):
+    def __init__(self, path_or_bytes, budget, depth=0, count_files=True):
         if depth > budget.limits["nestedDepth"]:
             raise Skip("depth", f"an archive nested {depth} levels deep is not read (the limit is "
                                 f"{budget.limits['nestedDepth']})")
         self.budget = budget
         self.depth = depth
+        self.count_files = count_files  # False for freshness: listing is not reading
         self.skipped = []
         self._fh = None
         try:
@@ -369,7 +462,8 @@ class SafeZip:
             if name in self._members:
                 self.skipped.append((name, "malformed", "a second member with the same name; the first is read"))
                 continue
-            budget.file()
+            if self.count_files:
+                budget.file()
             self._members[name] = info
             order.append((name, info.file_size))
         self._order = order
@@ -479,8 +573,11 @@ def read_file(path, cap, budget):
     out, total = [], 0
     with f:
         try:
-            if os.fstat(f.fileno()).st_size > cap:
+            st = os.fstat(f.fileno())
+            if st.st_size > cap:
                 raise Skip("too-large")
+            if st.st_nlink > 1:
+                budget.hardlinks += 1
             while True:
                 chunk = f.read(min(1 << 20, cap + 1 - total))
                 if not chunk:
@@ -502,16 +599,21 @@ def _inside(real, base):
     return real == base or real.startswith(base.rstrip(os.sep) + os.sep)
 
 
-def walk(root, budget, skip=None, prune=()):
+VCS_FOLDERS = (".git", ".hg", ".svn")
+VCS_NOTE = "version-control folders (.git, .hg, .svn) were not read"
+
+
+def walk(root, budget, skip=None, prune=(), note=None):
     """The files of a folder as sorted relative paths with forward slashes (6.2): os.walk without following links;
     symlinked files and folders are skipped (symlink), and so is any folder whose real path differs from its path
     (Windows junctions, loops); a path whose real path leaves the folder is unsafe-path; anything that is not a regular
     file is unsupported. skip(rel, reason, note) is told about each. Folders named in prune (relative paths) are
-    left out silently. Every file counts in budget.file(); when the file limit stops the walk, the files found so far
+    left out silently; version-control folders (VCS_FOLDERS) at any depth are never read, and note(VCS_NOTE) is
+    called once when one was left out. A name holding a control character is unsafe-path. Every file counts in budget.file(); when the file limit stops the walk, the files found so far
     are yielded (sorted) and then Stop is raised."""
     base = os.path.realpath(root)
     base_key = os.path.normcase(base)
-    found, stop = [], None
+    found, stop, vcs = [], None, []
 
     def report(rel, reason, note=None):
         if skip is not None:
@@ -529,6 +631,12 @@ def walk(root, budget, skip=None, prune=()):
                 rel = os.path.relpath(full, base).replace(os.sep, "/")
                 if rel in prune:
                     continue
+                if d in VCS_FOLDERS:
+                    vcs.append(rel)
+                    continue
+                if _CONTROL.search(d):
+                    report(rel, "unsafe-path", "a folder name holds a control character")
+                    continue
                 if is_link(full) or getattr(os.path, "isjunction", lambda p: False)(full):
                     report(rel, "symlink")
                     continue
@@ -544,6 +652,9 @@ def walk(root, budget, skip=None, prune=()):
             for name in sorted(filenames):
                 full = os.path.join(dirpath, name)
                 rel = os.path.relpath(full, base).replace(os.sep, "/")
+                if _CONTROL.search(name):
+                    report(rel, "unsafe-path", "a file name holds a control character")
+                    continue
                 try:
                     st = os.lstat(full)
                 except OSError as e:
@@ -562,6 +673,8 @@ def walk(root, budget, skip=None, prune=()):
                 found.append(rel)
     except Stop as e:
         stop = e
+    if vcs and note is not None:
+        note(VCS_NOTE)
     yield from sorted(found)
     if stop is not None:
         raise stop

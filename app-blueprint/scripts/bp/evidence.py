@@ -66,8 +66,9 @@ def study_dir(root, sid):
     return studies_dir(root) / sid
 
 
-def _cmd(root, args):
-    return run_hint(root, args)
+def _cmd(root, args, module="commands/study"):
+    """A console command that runs as printed; module names the command file the project's copy needs (1.8 rule 3)."""
+    return run_hint(root, args, module)
 
 
 def not_found(root, sid):
@@ -119,10 +120,14 @@ def loads(text):
         obj = json.loads(text, parse_constant=_no_constant, parse_float=_finite_float)
     except RecursionError:
         raise ValueError("nested too deeply") from None
-    why = _bad_text(obj)
+    # a lone surrogate can only come from a \u escape of one (decoded UTF-8 never holds one): look only then
+    why = _bad_text(obj) if _SURROGATE_ESCAPE.search(text) else None
     if why:
         raise ValueError(why)
     return obj
+
+
+_SURROGATE_ESCAPE = re.compile(r"\\[uU][dD][89a-fA-F]")
 
 
 def _read_bytes(path):
@@ -229,7 +234,7 @@ def _trim_data(data):
 
 def _safe_rel(p):
     """A stored relative path (5.1): forward slashes, not absolute, no drive, no '..' part, no NUL."""
-    if not isinstance(p, str) or not p or "\x00" in p or "\\" in p:
+    if not isinstance(p, str) or not p or "\\" in p or _CONTROL.search(p):
         return False
     if p.startswith("/") or re.match(r"[A-Za-z]:", p):
         return False
@@ -283,7 +288,11 @@ def make_record(study, kind, key, claim, basis, source, data=None, limitations=(
     if extra:
         raise ValueError(f"source has unknown fields: {', '.join(sorted(extra))}")
     artifact, path, digest = source.get("artifact"), source.get("path"), source.get("digest")
-    if not isinstance(artifact, str) or not artifact or "/" in artifact or "\\" in artifact or "\x00" in artifact:
+    if isinstance(artifact, str):
+        artifact = _scrubbed(artifact)
+    if isinstance(path, str):
+        path = _scrubbed(path)
+    if not isinstance(artifact, str) or not artifact or "/" in artifact or "\\" in artifact or _CONTROL.search(artifact):
         raise ValueError(f"source.artifact {artifact!r} must be a base name or '.'")
     if path is not None and not _safe_rel(path):
         raise ValueError(f"source.path {path!r} must be a relative path with forward slashes")
@@ -326,7 +335,7 @@ def make_record(study, kind, key, claim, basis, source, data=None, limitations=(
            "offset": source.get("offset"), "digest": digest, "excerpt": ex}
     rec = {"id": content_id("ev-", _id_object(kind, key, basis, src, claim), 16), "study": study, "kind": kind,
            "key": key, "claim": claim, "basis": basis, "source": src, "data": clean, "limitations": lims,
-           "coverage": coverage, "links": link_ids, "by": _text(by)}
+           "coverage": coverage, "links": link_ids, "by": _scrubbed(by)}
     if at is not None:
         rec["at"] = at
     return rec
@@ -406,9 +415,22 @@ def edited(rec):
 
 # ------------------------------------------------------------------------------------------------ reading
 
+def shape_ok(rec):
+    """The minimum shape every reader relies on: an object with an id of the evidence form, a kind of the form
+    lane.name, text key and claim, a basis of the three, and a source object. A line without it is malformed: ignored
+    and counted, never handed to a consumer."""
+    if not isinstance(rec, dict):
+        return False
+    rid, kind = rec.get("id"), rec.get("kind")
+    return (isinstance(rid, str) and EVIDENCE_ID.fullmatch(rid) is not None and isinstance(kind, str)
+            and KIND.fullmatch(kind) is not None and isinstance(rec.get("key"), str)
+            and isinstance(rec.get("claim"), str) and isinstance(rec.get("basis"), str) and rec["basis"] in BASES
+            and isinstance(rec.get("source"), dict))
+
+
 def _parse_lines(data):
     """(records, malformed lines): JSON Lines, blank lines skipped, malformed lines counted, the first of duplicate
-    ids kept; a line is a record only when it is an object with an id of the evidence form."""
+    ids kept; a line is a record only when it has the minimum shape (shape_ok)."""
     out, seen, bad = [], set(), 0
     for line in data.decode("utf-8", errors="replace").split("\n"):
         line = line.strip()
@@ -419,10 +441,10 @@ def _parse_lines(data):
         except ValueError:
             bad += 1
             continue
-        rid = rec.get("id") if isinstance(rec, dict) else None
-        if not (isinstance(rid, str) and EVIDENCE_ID.fullmatch(rid)):
+        if not shape_ok(rec):
             bad += 1
             continue
+        rid = rec["id"]
         if rid in seen:
             continue
         seen.add(rid)
@@ -488,10 +510,7 @@ def _study_problem(sid, obj):
         return "has a target path that is not inside the project"
     if t.get("digest") is not None and not (isinstance(t["digest"], str) and DIGEST.fullmatch(t["digest"])):
         return "has a target digest that is not sha256:<64 hex>"
-    for key in ("authorization", "coverage", "counts"):
-        if not isinstance(obj.get(key, {}), dict):
-            return f"has a {key} that is not an object"
-    return None
+    return None  # every other value is type-checked where it is read: a wrong shape shows as empty
 
 
 def read_study(root, sid):
@@ -644,10 +663,11 @@ def empty_coverage():
 
 def counts_of(records):
     """counts of 6.1: evidence (records that are not superseded), byKind, secrets (secret.embedded records)."""
-    live = [r for r in records if r.get("superseded") is not True]
+    live = [r for r in records if isinstance(r, dict) and r.get("superseded") is not True]
     by_kind = {}
     for r in live:
-        by_kind[r["kind"]] = by_kind.get(r["kind"], 0) + 1
+        kind = r.get("kind") if isinstance(r.get("kind"), str) else "?"
+        by_kind[kind] = by_kind.get(kind, 0) + 1
     return {"evidence": len(live), "byKind": dict(sorted(by_kind.items())),
             "secrets": by_kind.get("secret.embedded", 0)}
 
@@ -693,8 +713,8 @@ def append_held(root, sid, records):
 
 def add(root, study_id, rec):
     """Append one record to a study (5.9): deduplicated by id, under core.state_lock. S-notes is created on first use;
-    any other study must exist (study-not-found) with a readable study.json (bad-study). The study's counts are
-    brought up to date. Returns (record as stored, added: bool)."""
+    any other study must exist (study-not-found) with a readable study.json (bad-study). Everything is computed
+    before anything is written: the line, then the study's counts. Returns (record as stored, added: bool)."""
     if not is_study_id(study_id):
         raise not_found(root, study_id)
     with core.state_lock(root):
@@ -708,22 +728,30 @@ def add(root, study_id, rec):
         if rec["id"] in have:
             return have[rec["id"]], False
         rec = dict(rec, study=study_id)
-        append_held(root, study_id, [rec])
         study = dict(study, counts=counts_of(records + [rec]))
+        event = {"event": "evidence-add", "study": study_id, "id": rec["id"], "kind": rec["kind"]}
+        dump_json(study), _line(rec)  # both serialise before the first write
+        append_held(root, study_id, [rec])
         write_study_held(root, study)
-        core.append_log(root, {"event": "evidence-add", "study": study_id, "id": rec["id"], "kind": rec["kind"]})
+        core.append_log(root, event)
     return rec, True
 
 
 # ------------------------------------------------------------------------------------------------ freshness
 
+# Skip reasons and stops that mean "one of the tool's own limits was reached", not "the evidence changed": such a
+# record is unknown and reported as not checked (evidence stale fails --strict on it).
+LIMIT_REASONS = ("too-large", "ratio", "depth", "limit")
+
+
 class _Hashes:
-    """Digests of files on disk for one freshness pass, keyed by the file's identity and version, and bytes of
-    containers read on the way, so a study of 20,000 records hashes each file once."""
+    """Digests of files on disk for one freshness pass, keyed by the file's identity and version; bytes of members and
+    the open archives read on the way, so a study of 20,000 records hashes each file once and opens each container
+    once. Listing an archive is not counted as reading files."""
 
     def __init__(self, budget):
         self.budget = budget
-        self.raw, self.proof, self.blobs = {}, {}, {}
+        self.raw, self.proof, self.blobs, self.zips = {}, {}, {}, {}
 
     @staticmethod
     def _key(path):
@@ -750,6 +778,17 @@ class _Hashes:
             self.proof[k] = core.proof_digest(Path(path))
         return self.proof[k]
 
+    def zip(self, key, data_or_path, depth):
+        z = self.zips.get(key)
+        if z is None:
+            z = self.zips[key] = safety.SafeZip(data_or_path, self.budget, depth=depth, count_files=False)
+        return z
+
+    def close(self):
+        for z in self.zips.values():
+            z.close()
+        self.zips.clear()
+
 
 def _suffix(name):
     name = str(name).lower()
@@ -759,14 +798,13 @@ def _suffix(name):
 
 def _member(hashes, container_key, data_or_path, suffix, inner, depth, resolvers):
     """Bytes of `inner` read from a container (bytes, or a path for the target itself) with the reader for its
-    suffix: the zip family through SafeZip, anything else through resolvers. Skip(MISSING) when it is not there;
-    None when no reader knows the suffix."""
+    suffix: the zip family through SafeZip (opened once per pass), anything else through resolvers. Skip(MISSING)
+    when it is not there; None when no reader knows the suffix."""
     key = container_key + (inner,)
     if key in hashes.blobs:
         return hashes.blobs[key]
     if suffix in safety.ZIP_SUFFIXES:
-        with safety.SafeZip(data_or_path, hashes.budget, depth=depth) as z:
-            data = z.read(inner, hashes.budget.limits["memberBytes"])
+        data = hashes.zip(container_key, data_or_path, depth).read(inner, hashes.budget.limits["memberBytes"])
     else:
         fn = (resolvers or {}).get(suffix)
         if fn is None:
@@ -792,89 +830,112 @@ def locate(root, study, target=None):
     return Path(target) if target is not None else None
 
 
-def _one(hashes, located, is_dir, study_digest, rec, resolvers):
+def _digest_of(rec):
     src = rec.get("source") if isinstance(rec, dict) else None
     digest = src.get("digest") if isinstance(src, dict) else None
-    if not (isinstance(digest, str) and DIGEST.fullmatch(digest)):
-        return "unknown"
-    if located is None:
-        return "unknown"
-    path = src.get("path")
+    return digest if isinstance(digest, str) and DIGEST.fullmatch(digest) else None
+
+
+def _one(hashes, located, base, is_dir, fast, rec, resolvers):
+    """(state, limit or None) for one record; limit names the tool limit that stopped the check."""
+    digest = _digest_of(rec)
+    if digest is None or located is None:
+        return "unknown", None
+    path = rec["source"].get("path")
     if not (isinstance(path, str) and (path == "." or _safe_rel(path))):
-        return "unknown"
-    if study_digest == "fast":
-        return "fresh"
+        return "unknown", None
+    if fast:
+        return "fresh", None
     parts = path.split("!/")
     try:
         if is_dir:
             first = located / parts[0]
-            if parts[0] == "." or not first.exists():
-                return "missing" if parts[0] != "." else "unknown"
+            if parts[0] == ".":
+                return "unknown", None
+            if not first.exists():
+                return "missing", None
             if safety.is_link(first) or not first.is_file():
-                return "unknown"
-            real = os.path.normcase(os.path.realpath(first))
-            base = os.path.normcase(os.path.realpath(located))
-            if not real.startswith(base.rstrip(os.sep) + os.sep):
-                return "unknown"
+                return "unknown", None
+            if not os.path.normcase(os.path.realpath(first)).startswith(base):
+                return "unknown", None
             if len(parts) == 1:
-                return "fresh" if hashes.proof_digest(first) == digest else "stale"
+                return ("fresh" if hashes.proof_digest(first) == digest else "stale"), None
             container, suffix = first, _suffix(parts[0])
             rest = parts[1:]
         else:
             if parts == ["."]:
-                return "fresh" if hashes.raw_digest(located) == digest else "stale"
+                return ("fresh" if hashes.raw_digest(located) == digest else "stale"), None
             container, suffix = located, _suffix(located.name)
             rest = parts
         data, key = container, (str(container),)
         for depth, inner in enumerate(rest):
             data = _member(hashes, key, data, suffix, inner, depth, resolvers)
             if data is None:
-                return "unknown"
+                return "unknown", None
             key, suffix = key + (inner,), _suffix(inner)
-        return "fresh" if sha256_bytes(data) == digest else "stale"
+        return ("fresh" if sha256_bytes(data) == digest else "stale"), None
     except safety.Skip as e:
-        return "missing" if e.reason == safety.MISSING else "unknown"
-    except safety.Stop:
-        return "unknown"
+        if e.reason == safety.MISSING:
+            return "missing", None
+        return "unknown", (e.reason if e.reason in LIMIT_REASONS else None)
+    except safety.Stop as e:
+        return "unknown", e.stoppedBy
     except safety.PARSE_ERRORS:
-        return "unknown"
+        return "unknown", None
     except OSError:
-        return "unknown"
+        return "unknown", None
+
+
+def freshness_check(root, study, records, target=None, resolvers=None, budget=None):
+    """({record id: fresh | stale | missing | unknown}, {record id: limit}) for records of one study (5.6). The
+    second map holds the records that are unknown because one of the tool's own limits was reached (a stop of the
+    budget, or a member too large, past the ratio rule, nested too deep or past the entry limit): not checked.
+    A record whose digest is null, whose study cannot be located (no target path and no --target), whose path cannot
+    be read safely or whose container has no reader is unknown and not in the second map: nothing that cannot be
+    rehashed reads as fresh. Each file is hashed once and each archive opened once."""
+    budget = budget or safety.Budget()
+    hashes = _Hashes(budget)
+    out, unchecked = {}, {}
+    located = locate(root, study, target)
+    is_dir, fast, base = False, False, ""
+    try:
+        if located is not None:
+            try:
+                if safety.is_link(located) and Path(located) != Path(root):
+                    located = None
+                elif not located.exists():
+                    for r in records:
+                        out[r.get("id") if isinstance(r, dict) else None] = "missing" if _digest_of(r) else "unknown"
+                    return out, unchecked
+                else:
+                    is_dir = located.is_dir()
+                    base = os.path.normcase(os.path.realpath(located)).rstrip(os.sep) + os.sep
+                    t = study.get("target") or {}
+                    td = t.get("digest") if isinstance(t, dict) else None
+                    fast = (not is_dir and isinstance(td, str) and DIGEST.fullmatch(td) is not None
+                            and hashes.raw_digest(located) == td)
+            except safety.Stop as e:
+                for r in records:
+                    rid = r.get("id") if isinstance(r, dict) else None
+                    out[rid] = "unknown"
+                    if _digest_of(r):
+                        unchecked[rid] = e.stoppedBy
+                return out, unchecked
+            except OSError:
+                located = None
+        for r in records:
+            rid = r.get("id") if isinstance(r, dict) else None
+            out[rid], limit = _one(hashes, located, base, is_dir, fast, r, resolvers)
+            if limit:
+                unchecked[rid] = limit
+        return out, unchecked
+    finally:
+        hashes.close()
 
 
 def freshness_all(root, study, records, target=None, resolvers=None, budget=None):
-    """{record id: fresh | stale | missing | unknown} for records of one study (5.6), each file hashed once. A record
-    whose digest is null, whose study cannot be located (no target path and no --target), whose path cannot be read
-    safely or whose container has no reader is unknown: nothing that cannot be rehashed reads as fresh. budget bounds
-    the work (a Budget; default: the study limits), and what is past it is unknown."""
-    budget = budget or safety.Budget()
-    hashes = _Hashes(budget)
-    out = {}
-    located = locate(root, study, target)
-    is_dir = False
-    fast = None
-    if located is not None:
-        try:
-            if safety.is_link(located) and Path(located) != Path(root):
-                located = None
-            elif not located.exists():
-                for r in records:
-                    src = r.get("source") if isinstance(r, dict) else None
-                    has = isinstance(src, dict) and isinstance(src.get("digest"), str) and DIGEST.fullmatch(src["digest"])
-                    out[r.get("id") if isinstance(r, dict) else None] = "missing" if has else "unknown"
-                return out
-            else:
-                is_dir = located.is_dir()
-                t = study.get("target") or {}
-                td = t.get("digest") if isinstance(t, dict) else None
-                if not is_dir and isinstance(td, str) and DIGEST.fullmatch(td) and hashes.raw_digest(located) == td:
-                    fast = "fast"
-        except (OSError, safety.Stop):
-            located = None
-    for r in records:
-        rid = r.get("id") if isinstance(r, dict) else None
-        out[rid] = _one(hashes, located, is_dir, fast, r, resolvers)
-    return out
+    """{record id: fresh | stale | missing | unknown} (freshness_check without the not-checked map)."""
+    return freshness_check(root, study, records, target, resolvers, budget)[0]
 
 
 def freshness(root, study, rec, target=None, resolvers=None):
@@ -955,23 +1016,90 @@ def _same(a, b):
     return canonical_json(a) == canonical_json(b)
 
 
+def _short_text(v, most=300):
+    return safety.one_line(_scrubbed(v))[:most] if isinstance(v, str) else None
+
+
+def _count(v):
+    return v if type(v) is int and v >= 0 else 0
+
+
+def _texts(v, most=200):
+    out = []
+    for x in v if isinstance(v, list) else []:
+        t = _short_text(x)
+        if t and t not in out and len(out) < most:
+            out.append(t)
+    return out
+
+
+def rebuild_study(s):
+    """A study record from a bundle, rebuilt from the known keys of 6.1 with every value type-checked and capped
+    (a wrong shape becomes empty); None when its id, kind or target cannot be used. counts are recomputed after the
+    records are merged."""
+    sid = s.get("id") if isinstance(s, dict) else None
+    if not is_study_id(sid) or _study_problem(sid, s):
+        return None
+    t, a = s["target"], s.get("authorization") if isinstance(s.get("authorization"), dict) else {}
+    c = s.get("coverage") if isinstance(s.get("coverage"), dict) else {}
+    skipped = c.get("skipped") if isinstance(c.get("skipped"), dict) else {}
+    limits = s.get("limits") if isinstance(s.get("limits"), dict) else {}
+    lanes = s.get("lanes") if isinstance(s.get("lanes"), list) else []
+    return {"id": sid, "kind": s["kind"],
+            "target": {"name": _short_text(t["name"], 255) or ".", "path": t.get("path"),
+                       "digest": t.get("digest"), "size": t["size"] if type(t.get("size")) is int else None,
+                       "own": t["own"]},
+            "authorization": {"statement": _short_text(a.get("statement"), 500) or "",
+                              "by": _short_text(a.get("by"), 100), "at": _short_text(a.get("at"), 40)},
+            "tool": _short_text(s.get("tool"), 40), "at": _short_text(s.get("at"), 40),
+            "lanes": [x for x in lanes if isinstance(x, str) and re.fullmatch(r"[a-z0-9-]{1,40}", x)][:20],
+            "limits": {k: v for k, v in list(limits.items())[:40]
+                       if isinstance(k, str) and re.fullmatch(r"[A-Za-z]{1,40}", k) and type(v) is int},
+            "coverage": {"filesSeen": _count(c.get("filesSeen")), "filesScanned": _count(c.get("filesScanned")),
+                         "filesSkipped": _count(c.get("filesSkipped")), "bytesRead": _count(c.get("bytesRead")),
+                         "skipped": {k: _count(v) for k, v in skipped.items() if k in safety.SKIP_REASONS},
+                         "missing": _texts(c.get("missing")), "truncated": c.get("truncated") is True,
+                         "stoppedBy": c.get("stoppedBy") if c.get("stoppedBy") in safety.STOP_REASONS else None,
+                         "notes": _texts(c.get("notes"))},
+            "counts": counts_of([])}
+
+
+def _holds_secret(rec):
+    """True when any stored text of a record matches a secret pattern (an imported record is never re-scrubbed, so
+    such a record is refused)."""
+    texts, stack = [], [rec]
+    while stack:
+        v = stack.pop()
+        if isinstance(v, str):
+            texts.append(v)
+        elif isinstance(v, dict):
+            stack.extend(v.keys())
+            stack.extend(v.values())
+        elif isinstance(v, list):
+            stack.extend(v)
+    return any(safety.scrub(t)[1] for t in texts)
+
+
 def import_bundle(root, bundle):
-    """Merge a bundle into the store (5.7): studies by id (an existing study with other content is kept: conflict),
-    records by id within their study (existing kept), behaviours by id per study (existing kept). Everything is
-    checked before core.state_lock is taken; inside it the store is read again and only additions are written (new
-    study folders, appended evidence lines, behaviours.json rewritten with the new entries after the old). Returns
-    counts: added, duplicate, conflict, malformed, in total and per part."""
+    """Merge a bundle into the store (5.7), all or nothing: studies by id (rebuilt from the known keys; an existing
+    study with other content is kept and reported conflict, and nothing of the bundle is merged into it), records by
+    id within their study (existing kept; a record that fails validate_record or holds a secret-pattern match is
+    malformed), behaviours by id per study (existing kept). The bundle is checked before core.state_lock is taken;
+    inside it the store is read and every write is planned, and only then written (new study folders, appended
+    evidence lines, behaviours.json with the new entries after the old, study counts). A damaged study file met
+    while planning is bad-study and nothing is written. Returns counts: added, duplicate, conflict, malformed, in
+    total and per part."""
     parts = {p: {"added": 0, "duplicate": 0, "conflict": 0, "malformed": 0} for p in ("studies", "records",
                                                                                      "behaviours")}
     studies, records, behaviours = {}, {}, {}
     for s in bundle.get("studies", []):
-        sid = s.get("id") if isinstance(s, dict) else None
-        if not is_study_id(sid) or _study_problem(sid, s) or sid in studies:
+        rebuilt = rebuild_study(s)
+        if rebuilt is None or rebuilt["id"] in studies:
             parts["studies"]["malformed"] += 1
             continue
-        studies[sid] = s
+        studies[rebuilt["id"]] = rebuilt
     for r in bundle.get("records", []):
-        if validate_record(r):
+        if validate_record(r) or _holds_secret(r):
             parts["records"]["malformed"] += 1
             continue
         records.setdefault(r["study"], []).append(r)
@@ -988,21 +1116,29 @@ def import_bundle(root, bundle):
             behaviours.setdefault(sid, []).append(b)
     with core.state_lock(root):
         present = set(study_ids(root))
+        new_studies, conflict = {}, set()
         for sid, s in sorted(studies.items()):
             if sid in present:
                 have = load_study(root, sid)
-                parts["studies"]["duplicate" if _same(have, s) else "conflict"] += 1
+                if _same(dict(rebuild_study(have) or {}, counts=None), dict(s, counts=None)):
+                    parts["studies"]["duplicate"] += 1
+                else:
+                    parts["studies"]["conflict"] += 1
+                    conflict.add(sid)
                 continue
-            write_study_held(root, s)
-            sharing_held(root, sid, s["target"]["own"] is True)
-            present.add(sid)
-            parts["studies"]["added"] += 1
+            new_studies[sid] = s
+        known = present | set(new_studies)
+        appends, beh_writes = {}, {}
         for sid, recs in sorted(records.items()):
-            if sid not in present:
-                parts["records"]["malformed"] += len(recs)  # a record whose study is in neither the bundle nor here
+            if sid not in known:
+                parts["records"]["malformed"] += len(recs)  # its study is in neither the bundle nor here
                 continue
-            load_study(root, sid)
-            have = {r["id"]: r for r in load(root, sid)}
+            if sid in conflict:
+                parts["records"]["conflict"] += len(recs)
+                continue
+            have = {r["id"]: r for r in load(root, sid)} if sid in present else {}
+            if sid in present:
+                load_study(root, sid)
             new = []
             for r in recs:
                 if r["id"] in have:
@@ -1011,14 +1147,16 @@ def import_bundle(root, bundle):
                 have[r["id"]] = r
                 new.append(r)
             if new:
-                append_held(root, sid, new)
+                appends[sid] = (new, list(have.values()))
                 parts["records"]["added"] += len(new)
-                write_study_held(root, dict(load_study(root, sid), counts=counts_of(load(root, sid))))
         for sid, items in sorted(behaviours.items()):
-            if sid not in present:
+            if sid not in known:
                 parts["behaviours"]["malformed"] += len(items)
                 continue
-            old, problem = read_behaviours(root, sid)
+            if sid in conflict:
+                parts["behaviours"]["conflict"] += len(items)
+                continue
+            old, problem = read_behaviours(root, sid) if sid in present else ([], None)
             if problem:
                 raise _bad_study(root, sid, BEHAVIOURS_FILE, problem)
             have = {b.get("id"): b for b in old if isinstance(b, dict)}
@@ -1030,10 +1168,24 @@ def import_bundle(root, bundle):
                 have[b["id"]] = b
                 new.append(b)
             if new:
-                write_text(_ensure_dir(root, sid) / BEHAVIOURS_FILE,
-                           dump_json({"study": sid, "behaviours": old + new}))
+                beh_writes[sid] = dump_json({"study": sid, "behaviours": old + new})
                 parts["behaviours"]["added"] += len(new)
-        total = {k: sum(p[k] for p in parts.values()) for k in ("added", "duplicate", "conflict", "malformed")}
+        study_writes = {}
+        for sid in sorted(set(new_studies) | set(appends)):
+            base = new_studies.get(sid) or load_study(root, sid)
+            every = appends[sid][1] if sid in appends else []
+            study_writes[sid] = dict(base, counts=counts_of(every))
+        # every check is done: write
+        for sid in sorted(new_studies):
+            parts["studies"]["added"] += 1
+            write_study_held(root, study_writes[sid])
+            sharing_held(root, sid, new_studies[sid]["target"]["own"] is True)
+        for sid, (new, _) in sorted(appends.items()):
+            append_held(root, sid, new)
+            write_study_held(root, study_writes[sid])
+        for sid, text in sorted(beh_writes.items()):
+            write_text(_ensure_dir(root, sid) / BEHAVIOURS_FILE, text)
+        total = {k: sum(p_[k] for p_ in parts.values()) for k in ("added", "duplicate", "conflict", "malformed")}
         core.append_log(root, dict({"event": "evidence-import"}, **total))
     return dict(total, **parts)
 
@@ -1042,42 +1194,58 @@ def import_bundle(root, bundle):
 
 def validate_context(root, plan):
     """evidenceIds for validate (1.4): every evidence id in the store, so unknowns can warn about ids that are not
-    there (unknown-evidence). Without a root nothing is supplied, and the check is skipped."""
+    there (unknown-evidence). Without a root nothing is supplied, and the check is skipped. When no unknown cites
+    evidence there is nothing to check, so the store is not read (validate runs before every render)."""
     if root is None:
         return {}
-    return {"evidenceIds": all_ids(root)}
+    cites = False
+    for u in plan.get("unknowns") if isinstance(plan, dict) and isinstance(plan.get("unknowns"), list) else []:
+        if isinstance(u, dict) and any(isinstance(u.get(k), list) and u[k] for k in ("evidenceFor", "evidenceAgainst")):
+            cites = True
+            break
+    return {"evidenceIds": all_ids(root) if cites else set()}
 
 
-CONTEXT_LIMITS = {"totalBytes": 128 * 1024 * 1024, "timeLimit": 3600}  # freshness work per map build; the rest unknown
+BEHAVIOURS_SMALL = 1024 * 1024  # the map counts behaviours only from a behaviours.json up to this size
 
 
-def summary(root, study, records, behaviours, states):
-    """One entry of the studies payload (8.5)."""
-    t = study.get("target") or {}
+def summary(study, behaviours=None):
+    """One entry of the studies payload (8.5), from study.json alone (and the behaviour counts when given). No
+    freshness: that is computed only on demand (evidence stale, evidence list --stale, evidence show)."""
+    t = study.get("target") if isinstance(study.get("target"), dict) else {}
     auth = study.get("authorization") if isinstance(study.get("authorization"), dict) else {}
+    counts = study.get("counts") if isinstance(study.get("counts"), dict) else {}
+    by_kind = counts.get("byKind") if isinstance(counts.get("byKind"), dict) else {}
     return {"id": study["id"], "kind": study.get("kind"),
-            "target": {"name": t.get("name"), "own": t.get("own") is True},
+            "target": {"name": t.get("name") if isinstance(t.get("name"), str) else None, "own": t.get("own") is True},
             "authorization": {"statement": auth.get("statement") if isinstance(auth.get("statement"), str) else None},
             "tool": study.get("tool") if isinstance(study.get("tool"), str) else None,
             "at": study.get("at") if isinstance(study.get("at"), str) else None,
             "coverage": core.copy_json(study.get("coverage") if isinstance(study.get("coverage"), dict) else {}),
-            "counts": counts_of(records),
-            "freshness": freshness_counts(states),
-            "behaviours": behaviour_counts(behaviours)}
+            "counts": {"evidence": _count(counts.get("evidence")),
+                       "byKind": {k: _count(v) for k, v in by_kind.items() if isinstance(k, str)},
+                       "secrets": _count(counts.get("secrets"))},
+            "behaviours": behaviour_counts(behaviours) if behaviours is not None else None}
+
+
+def _small_behaviours(root, sid):
+    """The behaviours of a study when its behaviours.json is small (the map's budget), else None."""
+    path = study_dir(root, sid) / BEHAVIOURS_FILE
+    try:
+        if not path.is_file() or path.stat().st_size > BEHAVIOURS_SMALL:
+            return [] if not path.exists() else None
+    except OSError:
+        return None
+    beh, problem = read_behaviours(root, sid)
+    return None if problem else beh
 
 
 def context(root, plan, state, ctx):
-    """ctx["studies"] (8.5): one summary per readable study, sorted by id. Freshness is computed within a fixed amount
-    of work (CONTEXT_LIMITS), so a render stays quick; what is past it counts as unknown, never fresh. asar members
-    are unknown here (the map has no resolvers, 5.6)."""
-    out = []
-    budget = safety.Budget(CONTEXT_LIMITS)
-    for sid, study in sorted(all_studies(root, warn=False).items()):
-        records = load(root, sid)
-        behaviours, _ = read_behaviours(root, sid)
-        states = freshness_all(root, study, records, budget=budget)
-        out.append(summary(root, study, records, behaviours, states))
-    ctx["studies"] = out
+    """ctx["studies"] (8.5): one summary per readable study, sorted by id, read from the small study.json files (and
+    behaviours.json up to 1 MiB). No target is opened or hashed and no evidence.jsonl is parsed here, so studies never
+    slow down status, claim, mark, sync, task or render."""
+    ctx["studies"] = [summary(study, _small_behaviours(root, sid))
+                      for sid, study in sorted(all_studies(root, warn=False).items())]
 
 
 def map_payload(ctx):

@@ -13,6 +13,7 @@ from bp import core
 from bp.core import AGAIN, BlueprintError, emit, find_root, run_hint
 
 SUBCOMMANDS = ("add", "list", "show", "stale", "export", "import")
+MODULE = "commands/evidence"  # what run_hint needs in the project copy (1.8 rule 3)
 
 
 def _common(p):
@@ -38,10 +39,10 @@ def register(name, p):
     a.add_argument("--link", action="append", default=[], help="an evidence id this was derived from")
     a.add_argument("--by", metavar="ID", help="your roster id or name")
     _common(a)
-    li = sub.add_parser("list", help="list evidence with its freshness")
+    li = sub.add_parser("list", help="list evidence (with --stale: what changed or is gone)")
     li.add_argument("--study")
     li.add_argument("--kind")
-    li.add_argument("--stale", action="store_true", help="only stale records")
+    li.add_argument("--stale", action="store_true", help="only stale or missing records (checks freshness)")
     _common(li)
     s = sub.add_parser("show", help="show one record")
     s.add_argument("id", help="an evidence id, ev- and 16 hex digits")
@@ -118,11 +119,26 @@ def _source(root, raw_path, line):
         if line is not None:
             try:
                 text, _ = safety.decode_text(safety.read_file(full, safety.LIMITS["textBytes"], safety.Budget()))
-                lines = text.splitlines()
-                excerpt = lines[line - 1] if line <= len(lines) else None
+                lines = text.split("\n")  # line feeds only, as editors and lanes count
+                if line <= len(lines):
+                    start = sum(len(x) + 1 for x in lines[:line - 1])
+                    # the whole text and the offset, so a line inside a PEM block is seen as one
+                    excerpt = safety.excerpt(text, start) or None
             except safety.Skip:
                 excerpt = None
     return {"artifact": ".", "path": rel, "line": line, "offset": None, "digest": digest, "excerpt": excerpt}
+
+
+def redact_paths(root, text):
+    """Text an agent typed (a claim, a limitation) with the project root and other absolute paths removed: the path
+    part of learn.redact (its URL, e-mail and token rules would damage the claim). Keys are left alone."""
+    from bp import learn
+    from bp.study import safety
+    s = safety.clean_text(str(text))
+    for form in {str(root), root.as_posix(), str(root.resolve()), root.resolve().as_posix()}:
+        s = s.replace(form, "<project>")
+    s = learn._RX_WINPATH.sub("<path>", s)
+    return learn._RX_UNIXPATH.sub("<path>", s)
 
 
 def _add(args, root):
@@ -147,10 +163,10 @@ def _add(args, root):
         known = evidence.all_ids(root)
         if any(link not in known for link in args.link):
             raise BlueprintError("evidence-not-found", "a --link names evidence that is not in .blueprint/studies",
-                                 next=run_hint(root, "evidence list"))
+                                 next=run_hint(root, "evidence list", MODULE))
     src = _source(root, args.path, args.line)
-    rec = evidence.make_record(study, args.kind, args.key, args.claim, args.basis, src, None,
-                               [safety.clean_text(x) for x in args.limitation], "unknown", args.link,
+    rec = evidence.make_record(study, args.kind, args.key, redact_paths(root, args.claim), args.basis, src, None,
+                               [redact_paths(root, x) for x in args.limitation], "unknown", args.link,
                                by=_by(args.by), at=core.now_iso())
     rec, added = evidence.add(root, study, rec)
     emit(args, args.cmd, {"record": rec, "added": added},
@@ -158,10 +174,17 @@ def _add(args, root):
 
 
 def freshness_of(root, sid, study, records, target=None):
+    """(states, not checked: {id: limit}) for records of one study; a study whose study.json is damaged is unknown."""
     from bp import evidence
     if study is None:
-        return {r["id"]: "unknown" for r in records}
-    return evidence.freshness_all(root, study, records, target=target, resolvers=resolvers())
+        return {r["id"]: "unknown" for r in records}, {}
+    return evidence.freshness_check(root, study, records, target=target, resolvers=resolvers())
+
+
+def _not_checked_line(unchecked):
+    limits = sorted(set(unchecked.values()))
+    n = len(unchecked)
+    return f"  {n} record{'s' if n != 1 else ''} not checked: {', '.join(limits)} reached"
 
 
 def _studies(root, sid):
@@ -177,8 +200,9 @@ def _studies(root, sid):
 
 
 def _tags(rec, state):
+    """The marks after an id: the freshness (when it was checked), superseded, edited."""
     from bp import evidence
-    out = ["⚠ " + state if state in evidence.CHANGED else state]
+    out = [] if state is None else ["\u26a0 " + state if state in evidence.CHANGED else state]
     if rec.get("superseded") is True:
         out.append("superseded")
     if evidence.edited(rec):
@@ -187,28 +211,40 @@ def _tags(rec, state):
 
 
 def _list(args, root):
+    """One line per record. Freshness is computed only with --stale (it reads and hashes the targets); then only the
+    stale and missing records are listed, each marked, and records the tool could not check are counted."""
     from bp import evidence
     from bp.study import safety
-    rows, lines = [], []
+    rows, lines, not_checked = [], [], {}
     for sid, study in _studies(root, args.study):
         records = evidence.load(root, sid)
         if args.kind is not None:
             records = [r for r in records if r.get("kind") == args.kind]
-        states = freshness_of(root, sid, study, records)
+        states, unchecked = freshness_of(root, sid, study, records) if args.stale else ({}, {})
         if args.stale:
             records = [r for r in records if evidence.is_changed(states.get(r["id"]))]
-        if not records:
+            if unchecked:
+                not_checked[sid] = {"count": len(unchecked), "limits": sorted(set(unchecked.values()))}
+        if not records and sid not in not_checked:
             continue
         lines.append(f"{sid} ({len(records)} record{'s' if len(records) != 1 else ''})")
+        if sid in not_checked:
+            lines.append(_not_checked_line(unchecked))
         for r in records:
-            state = states.get(r["id"], "unknown")
+            state = states.get(r["id"]) if args.stale else None
             rows.append(dict(r, freshness=state, edited=evidence.edited(r)))
             claim = safety.one_line(str(r.get("claim", "")))
-            lines.append(f"  {r['id']}  {r.get('basis')}  {_tags(r, state)}  {claim}")
+            tags = _tags(r, state)
+            lines.append(f"  {r['id']}  {r.get('basis')}  " + (tags + "  " if tags else "") + claim)
     if not lines:
         lines = ["No evidence" + (" matches." if args.study or args.kind or args.stale else
-                                  " yet. Record some with: " + run_hint(root, "evidence add --help"))]
-    emit(args, args.cmd, {"records": rows}, lines)
+                                  " yet. Record some with: " + run_hint(root, "evidence add --help", MODULE))]
+    data = {"records": rows}
+    if args.stale:
+        data["notChecked"] = not_checked
+    emit(args, args.cmd, data, lines)
+    if args.stale and not_checked:
+        sys.exit(1)  # a check stopped by the tool's own limit is never silent
 
 
 def _show(args, root):
@@ -216,7 +252,7 @@ def _show(args, root):
     from bp.study import safety
     if not evidence.EVIDENCE_ID.fullmatch(args.id):
         raise BlueprintError("evidence-not-found", "that is not an evidence id (ev- and 16 hex digits)",
-                             next=run_hint(root, "evidence list"))
+                             next=run_hint(root, "evidence list", MODULE))
     found = []
     for sid, study in _studies(root, None):
         for r in evidence.load(root, sid):
@@ -224,9 +260,10 @@ def _show(args, root):
                 found.append((sid, study, r))
     if not found:
         raise BlueprintError("evidence-not-found", f"evidence {args.id} is not in .blueprint/studies",
-                             entry=f"evidence {args.id}", next=run_hint(root, "evidence list"))
+                             entry=f"evidence {args.id}", next=run_hint(root, "evidence list", MODULE))
     sid, study, rec = found[0]
-    state = freshness_of(root, sid, study, [rec]).get(rec["id"], "unknown")
+    states, unchecked = freshness_of(root, sid, study, [rec])
+    state = states.get(rec["id"], "unknown")
     src = rec.get("source") if isinstance(rec.get("source"), dict) else {}
     one = safety.one_line
     lines = [f"{rec['id']}  {_tags(rec, state)}",
@@ -246,7 +283,10 @@ def _show(args, root):
     if rec.get("links"):
         lines.append("  links: " + ", ".join(str(x) for x in rec["links"]))
     lines.append(f"  by: {one(str(rec.get('by')))}" + (f" at {rec['at']}" if isinstance(rec.get("at"), str) else ""))
-    emit(args, args.cmd, {"record": rec, "freshness": state, "studies": [s for s, _, _ in found]}, lines)
+    if unchecked:
+        lines.insert(1, _not_checked_line(unchecked))
+    emit(args, args.cmd, {"record": rec, "freshness": state, "notChecked": unchecked.get(rec["id"]),
+                          "studies": [s for s, _, _ in found]}, lines)
 
 
 def _stale(args, root):
@@ -259,21 +299,26 @@ def _stale(args, root):
         if not target.exists():
             raise BlueprintError("target-not-found", "nothing exists at the --target path given",
                                  next=f"{AGAIN} with the path of the studied file or folder")
-    out, stale, missing, lines = {}, {}, {}, []
+    out, stale, missing, not_checked, lines = {}, {}, {}, {}, []
     for sid, study in _studies(root, args.study):
         records = evidence.load(root, sid)
-        states = freshness_of(root, sid, study, records, target)
+        states, unchecked = freshness_of(root, sid, study, records, target)
         out[sid] = evidence.freshness_counts(states)
         stale[sid] = sorted(i for i, s in states.items() if s == "stale")
         missing[sid] = sorted(i for i, s in states.items() if s == "missing")
         c = out[sid]
         lines.append(f"{sid}: {c['fresh']} fresh, {c['stale']} stale, {c['missing']} missing, {c['unknown']} unknown")
-        lines += [f"  ⚠ stale {i}" for i in stale[sid]] + [f"  ⚠ missing {i}" for i in missing[sid]]
+        if unchecked:
+            not_checked[sid] = {"count": len(unchecked), "limits": sorted(set(unchecked.values()))}
+            lines.append(_not_checked_line(unchecked))
+        lines += [f"  \u26a0 stale {i}" for i in stale[sid]] + [f"  \u26a0 missing {i}" for i in missing[sid]]
     if not out:
         lines = ["No studies yet."]
-    emit(args, args.cmd, {"studies": out, "stale": stale, "missing": missing}, lines)
-    if args.strict and (any(stale.values()) or any(missing.values())):
-        sys.exit(1)  # fail closed: evidence that changed or is gone fails; unknown (cannot tell) is only counted
+    emit(args, args.cmd, {"studies": out, "stale": stale, "missing": missing, "notChecked": not_checked}, lines)
+    if args.strict and (any(stale.values()) or any(missing.values()) or not_checked):
+        # fail closed: evidence that changed or is gone fails, and so does a check stopped by the tool's own limit;
+        # unknown because the target is not available here (outside the project, no --target) is only counted
+        sys.exit(1)
 
 
 def _export(args, root):

@@ -1,7 +1,8 @@
 /* Studies tab of map.html (contract 8.4, 8.5): each study of .blueprint/studies, what it read, how much of its
-   evidence still matches the target, and how far its behaviours are reviewed. Plain JavaScript, no dependencies, no
+   evidence it holds and how far its behaviours are reviewed. Freshness is not shown here: it reads and hashes the
+   targets, so it is checked on demand by the evidence stale command. Plain JavaScript, no dependencies, no
    network. Reads D.studies only: [{id, kind, target: {name, own}, authorization: {statement}, tool, at, coverage,
-   counts, freshness: {fresh, stale, missing, unknown}, behaviours: {candidate, reviewed, rejected}}]. Every value is
+   counts, behaviours: {candidate, reviewed, rejected} or null}]. Every value is
    put on the page as text; a value of an unexpected type is shown as empty, never thrown on. */
 (function () {
   'use strict';
@@ -21,15 +22,6 @@
   function entries(D) { return list(D && D.studies).filter(function (s) { return s && typeof s === 'object' && !Array.isArray(s); }); }
   function pill(H, text, kind) { return H.el('span', { cls: 'pill' + (kind ? ' ' + kind : ''), text: text }); }
 
-  function freshCell(H, f) {
-    var out = [];
-    var stale = num(f.stale), missing = num(f.missing), fresh = num(f.fresh), unknown = num(f.unknown);
-    if (stale) out.push(pill(H, '⚠ ' + stale + ' stale', 'warn'), ' ');
-    if (missing) out.push(pill(H, missing + ' missing', 'bad'), ' ');
-    out.push(H.el('span', { cls: 'meta', text: fresh + ' fresh' + (unknown ? ' · ' + unknown + ' unknown' : '') }));
-    return out;
-  }
-
   function coverageText(c) {
     var skipped = new Map(Object.entries(obj(c.skipped))), parts = [];
     Array.from(skipped.keys()).sort().forEach(function (k) { if (num(skipped.get(k))) parts.push(num(skipped.get(k)) + ' ' + k); });
@@ -38,7 +30,7 @@
   }
 
   function row(H, s) {
-    var t = obj(s.target), c = obj(s.coverage), n = obj(s.counts), b = obj(s.behaviours);
+    var t = obj(s.target), c = obj(s.coverage), n = obj(s.counts), b = obj(s.behaviours), counted = s.behaviours && typeof s.behaviours === 'object';
     var own = t.own === true;
     var kind = str(s.kind), label = KIND.get(kind);
     var target = [H.el('div', { text: str(t.name) || '(no name)' }),
@@ -54,8 +46,7 @@
       H.el('td', null, [H.el('code', { text: str(s.id) || '(no id)' }), H.el('div', { cls: 'meta', text: label || kind })]),
       H.el('td', null, target),
       H.el('td', { text: evidence }),
-      H.el('td', null, freshCell(H, obj(s.freshness))),
-      H.el('td', { text: total ? num(b.reviewed) + ' of ' + total + ' reviewed' + (num(b.rejected) ? ' · ' + num(b.rejected) + ' rejected' : '') : 'none yet' }),
+      H.el('td', { text: !counted ? 'not counted here (study show)' : total ? num(b.reviewed) + ' of ' + total + ' reviewed' + (num(b.rejected) ? ' · ' + num(b.rejected) + ' rejected' : '') : 'none yet' }),
       H.el('td', null, cov),
       H.el('td', null, [H.el('div', { text: str(obj(s.authorization).statement) }),
         H.el('div', { cls: 'meta', text: (str(s.at) ? str(s.at).slice(0, 10) : '') + (str(s.tool) ? ' · tool ' + str(s.tool) : '') })])
@@ -74,24 +65,22 @@
         host.appendChild(H.el('p', { cls: 'empty', text: EMPTY }));
         return;
       }
-      var records = 0, stale = 0, reviewed = 0, behaviours = 0;
+      var records = 0, reviewed = 0, behaviours = 0;
       all.forEach(function (s) {
         var b = obj(s.behaviours);
         records += num(obj(s.counts).evidence);
-        stale += num(obj(s.freshness).stale) + num(obj(s.freshness).missing);
         reviewed += num(b.reviewed);
         behaviours += num(b.candidate) + num(b.reviewed) + num(b.rejected);
       });
       var tiles = H.el('div', { cls: 'grid tiles' });
-      [[all.length, 'studies', false], [records, 'evidence records', false], [stale, 'stale or missing', stale > 0],
-        [reviewed + ' / ' + behaviours, 'behaviours reviewed', false]].forEach(function (t) {
+      [[all.length, 'studies', false], [records, 'evidence records', false], [reviewed + ' / ' + behaviours, 'behaviours reviewed', false]].forEach(function (t) {
         tiles.appendChild(H.el('div', { cls: 'card tile' + (t[2] ? ' warn' : '') }, [H.el('div', { cls: 'n', text: String(t[0]) }), H.el('div', { cls: 'l', text: t[1] })]));
       });
       host.appendChild(tiles);
-      host.appendChild(H.el('p', { cls: 'meta', text: 'Evidence is stale when the file it was read from has changed since, and ' +
-        'missing when that file is gone; unknown when the target is outside this project or cannot be read again. ' +
-        'A study of software that is not your own is kept out of git until you remove its .gitignore.' }));
-      var head = H.el('tr', null, ['Study', 'Target', 'Evidence', 'Freshness', 'Behaviours', 'Coverage', 'Authorization'].map(function (h) {
+      host.appendChild(H.el('p', { cls: 'meta', text: 'Whether evidence still matches its target is checked on demand: ' +
+        'run the evidence stale command of this tool. A study of software that is not your own is kept out of git until ' +
+        'you remove its .gitignore.' }));
+      var head = H.el('tr', null, ['Study', 'Target', 'Evidence', 'Behaviours', 'Coverage', 'Authorization'].map(function (h) {
         return H.el('th', { scope: 'col', text: h });
       }));
       var body = H.el('tbody');

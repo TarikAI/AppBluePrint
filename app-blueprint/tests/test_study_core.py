@@ -359,7 +359,7 @@ class ExcerptTest(unittest.TestCase):
         self.assertTrue(ex.startswith("TARGET"))
         self.assertEqual(len(ex), 160)
         self.assertEqual(safety.excerpt("one\r\ntwo", 0), "one")
-        self.assertEqual(safety.excerpt("x\ty\x00z  w\u2028next", 0), "x y z w")  # U+2028 ends the line
+        self.assertEqual(safety.excerpt("x\ty\x00z  w\u2028v\nnext", 0), "x y z w v")  # only a line feed ends it
         self.assertEqual(safety.excerpt("", 0), "")
 
     def test_a_secret_across_the_cut_is_scrubbed_before_cutting(self):
@@ -1053,6 +1053,408 @@ class StudyCommandTest(TempProject):
         import ast
         for rel in OWN_FILES:
             ast.parse((S.PACKAGE / rel).read_text(encoding="utf-8"), feature_version=(3, 10))
+
+
+# ------------------------------------------------------------------------------------------------ review round 1
+
+PEM_BEGIN = "-----BEGIN RSA " + "PRIVATE KEY-----"  # built from pieces for the private-data scan
+PEM_END = "-----END RSA " + "PRIVATE KEY-----"
+PEM_BEGIN_BARE = "-----BEGIN " + "PRIVATE KEY-----"
+FIVE_MIB = 5 * 2 ** 20
+OWN_SOURCES = [S.PACKAGE / rel for rel in OWN_FILES if rel.endswith(".py")]
+
+
+def worst_cases(prefix, filler, term):
+    """Three 5 MiB inputs built from a pattern's structure: its literal prefix repeated; the prefix then its class
+    characters with no terminator; the same with the terminator only at the very end."""
+    n = FIVE_MIB
+    a = (prefix * (n // len(prefix) + 1))[:n]
+    b = (prefix + filler * n)[:n]
+    return a, b, b[:n - len(term)] + term
+
+
+# every regex of this workstream's files: pattern -> (how the code uses it, prefix, filler, terminator)
+REGEX_CASES = {
+    r"S-[a-z0-9][a-z0-9-]{0,47}": ("fullmatch", "S-", "a", "!"),
+    r"ev-[0-9a-f]{16}": ("fullmatch", "ev-", "0", "!"),
+    r"B-[a-z0-9][a-z0-9-]{0,47}": ("fullmatch", "B-", "a", "!"),
+    r"[a-z]+(\.[a-z0-9-]+)+": ("fullmatch", "a.", "a", "!"),
+    r"sha256:[0-9a-f]{64}": ("fullmatch", "sha256:", "0", "!"),
+    r"tool:[a-z0-9-]+@[0-9A-Za-z.+-]+|agent:[^\s\x00-\x1f\x7f]{1,100}|import:(rea|jadx|apktool)": ("fullmatch", "tool:", "a", "!"),
+    r"[\x00-\x1f\x7f\x85\u2028\u2029]": ("sub", "\x01", "a", ""),
+    "[\ud800-\udfff]": ("sub", "a", "a", "\ud800"),
+    r"-----BEGIN [A-Z ]{0,64}PRIVATE KEY-----": ("search", "-----BEGIN ", "A", "PRIVATE KEY-----"),
+    r"-----END [A-Z ]{0,64}PRIVATE KEY-----": ("search", "-----END ", "A", "PRIVATE KEY-----"),
+    r"[A-Za-z0-9+/=]{40,}": ("fullmatch", "A1", "a", "!"),
+    r"\s+": ("sub", " ", " ", "a"),
+    r"[A-Za-z]:": ("match", "C:", "a", ""),
+    r"\[\[?\.\.\.([^\[\]/]+)\]\]?": ("sub", "[[...", "a", "!"),
+    r"\[([^\[\]/.][^\[\]/]*)\]": ("sub", "[", "a", "!"),
+    r"<(?:[A-Za-z_][\w]*:)?([A-Za-z_][\w]*)>": ("sub", "<", "a", ":"),
+    r"\{\*?([A-Za-z_][\w-]*)(\*)?(?::[^{}/]*)?\}": ("sub", "{a:", "a", "!"),
+    r"(?<![\w$]):([A-Za-z_$][\w$]*)(?:\([^)/]{0,200}\))?\??": ("sub", " :", "a", "("),
+    r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}": ("fullmatch", "0", "0", "!"),
+    r"[0-9A-Fa-f]{16,}": ("fullmatch", "0", "0", "!"),
+    r"[A-Za-z0-9_-]{20,}": ("fullmatch", "a", "a", "!"),
+    r"[0-9]+": ("fullmatch", "0", "0", "!"),
+    r"\\[uU][dD][89a-fA-F]": ("search", "\\u", "d", "!"),
+    r"[a-z0-9-]{1,40}": ("fullmatch", "a", "a", "!"),
+    r"[A-Za-z]{1,40}": ("fullmatch", "a", "a", "!"),
+    r"[A-Za-z]+": ("fullmatch", "a", "a", "!"),
+    r"[\x00-\x1f\x7f]": ("sub", "\x01", "a", ""),
+    r"[^\s\x00-\x1f\x7f]{1,100}": ("fullmatch", "a", "a", " "),
+    r"(?<![\w.])(exec|eval|compile|__import__)\(": None,  # not in these files (tests only)
+}
+SECRET_CASES = {   # name -> extra worst cases beyond the generic three
+    "aws-key": [("AKIA", "A", "!")], "google-api-key": [("AIza", "a", "!")],
+    "private-key": [("-----BEGIN ", "A", "PRIVATE KEY-----"), (PEM_BEGIN, "A", "-----END ")],
+    "jwt": [("eyJ", "a", ".eyJ"), (".eyJ", "a", "."), ("eyJ" + "a" * 12 + ".eyJ", "a", "."),
+            ("eyJ" + "a" * 12 + ".eyJ" + "a" * 12 + ".", "a", "!")],
+    "stripe-live": [("sk_live_", "a", "!")], "slack": [("xoxb-", "a", "!")], "github-token": [("ghp_", "a", "!")],
+    "bearer": [("bearer", " ", "x" * 16), ("Bearer ", "a", "!")],
+}
+
+
+def _literal_patterns(path):
+    """The literal patterns given to re.* in one source file."""
+    import ast
+    out = []
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and \
+                isinstance(node.func.value, ast.Name) and node.func.value.id == "re" and node.args and \
+                isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+            out.append(node.args[0].value)
+    return out
+
+
+class LinearRegexTest(unittest.TestCase):
+    """B2: every regex of these files is linear on every input: each gets the worst cases its structure suggests,
+    at 5 MiB, inside the 10 s bound of 6.2."""
+
+    BOUND = 10.0
+
+    def timed(self, fn, *args):
+        started = time.monotonic()
+        fn(*args)
+        return time.monotonic() - started
+
+    def test_every_regex_is_in_the_table(self):
+        seen = set()
+        for path in OWN_SOURCES:
+            seen.update(_literal_patterns(path))
+        missing = sorted(p for p in seen if p not in REGEX_CASES and p not in safety.SECRET_PATTERNS.values())
+        self.assertEqual(missing, [], "a regex without worst cases: add it to REGEX_CASES")
+        self.assertEqual(set(SECRET_CASES), set(safety.SECRET_PATTERNS))
+
+    def test_secret_patterns_are_linear(self):
+        for name, cases in SECRET_CASES.items():
+            for prefix, filler, term in cases:
+                for i, text in enumerate(worst_cases(prefix, filler, term)):
+                    took = self.timed(safety.scrub, text)
+                    self.assertLess(took, self.BOUND, f"{name} case {prefix!r} input {i}: {took:.1f} s")
+                    took = self.timed(safety.excerpt, text, len(text) // 2)
+                    self.assertLess(took, self.BOUND, f"excerpt {name} {prefix!r} {i}")
+
+    def test_every_other_regex_is_linear_as_it_is_used(self):
+        for pattern, case in REGEX_CASES.items():
+            if case is None:
+                continue
+            how, prefix, filler, term = case
+            rx = re.compile(pattern)
+            fn = {"fullmatch": rx.fullmatch, "match": rx.match, "search": rx.search,
+                  "sub": lambda t, rx=rx: rx.sub("", t)}[how]
+            for i, text in enumerate(worst_cases(prefix, filler, term)):
+                took = self.timed(fn, text)
+                self.assertLess(took, self.BOUND, f"{pattern!r} input {i}: {took:.1f} s")
+
+    def test_keys_functions_on_hostile_paths(self):
+        for prefix, filler, term in (("<", "a", ":"), ("{a:", "a", "!"), ("[[...", "a", "!"), (":", "a", "("),
+                                     ("/", "0", "!"), ("/a", "-", "!")):
+            for text in worst_cases(prefix, filler, term):
+                for concrete in (False, True):
+                    self.assertLess(self.timed(keys.path_template, text, concrete), self.BOUND, prefix)
+
+    def test_the_jwt_scan_finds_what_the_pattern_finds(self):
+        rng = random.Random(3)
+        for _ in range(300):
+            parts = [rng.choice(["eyJ", ".eyJ", ".", "a" * rng.randrange(0, 15), "-", " ", "_x"]) for _ in range(12)]
+            text = "".join(parts)
+            want = [m.span() for m in re.finditer(safety.SECRET_PATTERNS["jwt"], text)]
+            self.assertEqual(safety._jwt_spans(text), want, text)
+        token = FT.SECRETS["jwt"]
+        self.assertEqual(safety.scrub(f"x {token} y")[0], "x <secret:jwt> y")
+
+
+class PemRuleTest(TempProject):
+    """M5: no part of a private key is stored, by any route."""
+
+    BODY = "MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gunVTLw7onLRnrq0"
+
+    def pem(self, lines=6):
+        return PEM_BEGIN + "\n" + "\n".join(self.BODY for _ in range(lines)) + \
+               "\n" + PEM_END + "\n"
+
+    def assert_no_body(self, text):
+        for i in range(0, len(self.BODY) - 40):
+            self.assertNotIn(self.BODY[i:i + 40], text)
+
+    def test_an_excerpt_inside_the_block_is_replaced(self):
+        text = "before\n" + self.pem() + "after\n"
+        for line_start in [i + 1 for i, c in enumerate(text) if c == "\n"][:-1]:
+            self.assert_no_body(safety.excerpt(text, line_start))
+        self.assertEqual(safety.excerpt(text, text.index(self.BODY)), "<secret:private-key>")
+        self.assertEqual(safety.excerpt(text, 0), "before")
+        self.assertEqual(safety.excerpt(text, text.index("after")), "after")
+        no_end = "x\n" + PEM_BEGIN_BARE + "\n" + self.BODY + "\n"
+        self.assertEqual(safety.excerpt(no_end, no_end.index(self.BODY)), "<secret:private-key>")
+        self.assertEqual(safety.excerpt(self.BODY), "<secret:private-key>")  # a lane that passed the line alone
+
+    def test_the_block_is_replaced_from_begin_to_end_and_every_line_of_it(self):
+        text = "a\n" + self.pem() + "b\n"
+        self.assertEqual(safety.scrub(text), ("a\n<secret:private-key>\nb\n", ["private-key"]))
+        enc = "x\n" + PEM_BEGIN + "\nProc-Type: 4,ENCRYPTED\nshort\n" + PEM_END + "\ny"
+        for marker in ("Proc-Type", "short", "-----END"):
+            self.assertEqual(safety.excerpt(enc, enc.index(marker)), "<secret:private-key>", marker)
+        self.assertEqual(safety.excerpt(enc, enc.index("y", enc.index("END"))), "y")
+
+    def test_a_block_across_a_window_edge_is_scrubbed_whole(self):
+        for pad in (64 * 1024 - 200, 64 * 1024 - 1024 - 20, 2 * 63 * 1024 - 50):
+            text = "x" * pad + self.pem(lines=60) + "y" * 70_000
+            out, found = safety.scrub(text)
+            self.assertEqual(found, ["private-key"], pad)
+            self.assert_no_body(out)
+            out, _ = safety.scrub("x" * pad + PEM_BEGIN_BARE + "\n" + (self.BODY + "\n") * 2000)
+            self.assert_no_body(out)
+
+    def test_evidence_add_and_a_lane_store_no_key_body(self):
+        self.put("key.pem", self.pem())
+        self.put("src/conf.js", "const k = `" + self.pem() + "`;\n")
+        for line in range(1, 9):
+            r = self.cli("evidence", "add", "--kind", "note.key", "--key", f"pem{line}", "--claim", "A key file.",
+                         "--basis", "observed", "--path", "key.pem", "--line", line, "--json")
+            self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.cli("study", "source", self.root, "--json").returncode, 0)
+        for name, text in project_text(self.root).items():
+            self.assert_no_body(text)
+            self.assert_no_body(json.dumps(text))
+
+
+class EmitterRobustnessTest(TempProject):
+    def test_lane_supplied_values_never_end_a_study(self):
+        """M2: 1,000 seeded random facts with control characters, empty and huge strings and bad paths."""
+        rng = random.Random(1000)
+        pieces = ["", " ", "\x00", "\x01", "\x7f", "\n", "\u2028", "a" * 5000, "..", "/abs", "C:\\x", "a\\b",
+                  "ok", "\ud800", FT.SECRETS["aws-key"], "x.y", "Bad", "\t", "\u00e9"]
+
+        def junk():
+            return "".join(rng.choice(pieces) for _ in range(rng.randrange(0, 4)))
+        em = engine.Emitter("S-f", "app.apk", safety.Budget(), f"tool:mobile@{TOOL_VERSION}")
+        for _ in range(1000):
+            kind = rng.choice(["stub.fact", "stub.other", junk(), 5, None])
+            path = rng.choice([junk(), None, "a/b.txt", "../x", 7])
+            em.emit(kind, rng.choice([junk(), 3, None]), rng.choice([junk(), None]), path=path,
+                    digest=rng.choice([None, "sha256:" + "a" * 64, "bad"]), excerpt=rng.choice([None, junk(), 4]),
+                    line=rng.choice([None, 0, 1, True]), data=rng.choice([None, {"k": junk()}, [1], "x"]),
+                    limitations=rng.choice([(), [junk()], [5]]))
+        records, cov = em.finish()
+        self.assertGreater(len(records), 0)
+        self.assertGreater(cov["skipped"].get("malformed", 0), 0)
+        for r in records:
+            self.assertEqual(evidence.validate_record(r), [])
+            json.dumps(r, ensure_ascii=False).encode("utf-8")
+        self.assertNotIn(FT.SECRETS["aws-key"], json.dumps(records) + json.dumps(cov))
+
+    def test_manifest_facts_skips_a_key_of_control_characters(self):
+        em = engine.Emitter("S-x", "a.apk", safety.Budget(), f"tool:mobile@{TOOL_VERSION}")
+        engine.manifest_facts([(0, "manifest", {"package": "a.b"}), (1, "uses-permission", {"name": "\x7f"}),
+                               (1, "uses-permission", {"name": "\x01\x02"})], em, path="AndroidManifest.xml",
+                              digest=None, by=f"tool:mobile@{TOOL_VERSION}")
+        self.assertEqual(sorted(r["kind"] for r in em.records.values()), ["mobile.package"])
+
+    def test_a_file_deleted_between_listing_and_reading_is_a_skip(self):
+        """M3: Skip(MISSING) from a read is recorded under error, the study goes on."""
+        for i in range(3):
+            self.put(f"src/{i}.js", f"x{i}\n")
+
+        class Vanishing:
+            LANE = "source"
+
+            @staticmethod
+            def run(target, em, opts):
+                names = list(target.files())
+                (target.path / names[1]).unlink()
+                for rel in names:
+                    try:
+                        data = target.read(rel, 1000)
+                    except safety.Skip as e:
+                        em.skip(rel, e.reason, e.note)
+                        continue
+                    em.emit("stub.file", rel, "A file.", path=rel, digest=target.digest_of(rel, data))
+        s = engine.run_study(self.root, "source", self.root / "src", tracked=True, lanes=[Vanishing])
+        self.assertEqual(s["coverage"]["skipped"], {"error": 1})
+        self.assertIn("disappeared while reading", s["coverage"]["notes"])
+        self.assertEqual(s["counts"]["evidence"], 2)
+
+    def test_a_parse_error_escaping_a_lane_is_a_skip_and_other_lanes_run(self):
+        """m5."""
+        import json as _json, plistlib, sqlite3, struct, xml.etree.ElementTree as _ET, xml.parsers.expat as _ex
+        errors = [struct.error("x"), IndexError(), ValueError(), KeyError("k"), UnicodeDecodeError("utf-8", b"", 0, 1, "x"),
+                  _json.JSONDecodeError("x", "", 0), plistlib.InvalidFileException(), _ex.ExpatError(),
+                  _ET.ParseError(), sqlite3.DatabaseError(), RecursionError()]
+        for i, err in enumerate(errors):
+            class Raising:
+                LANE = "first"
+
+                @staticmethod
+                def run(t, em, o, err=err):
+                    em.emit("stub.before", "k", "Before the error.", path=None, digest=None)
+                    raise err
+
+            class After:
+                LANE = "second"
+
+                @staticmethod
+                def run(t, em, o):
+                    em.emit("stub.after", "k", "The next lane ran.", path=None, digest=None)
+            s = engine.run_study(self.root, "source", self.root, study_id=f"S-p{i}", lanes=[Raising, After])
+            self.assertEqual(s["coverage"]["skipped"], {"malformed": 1}, type(err).__name__)
+            self.assertTrue(any("first lane stopped" in n for n in s["coverage"]["notes"]))
+            self.assertEqual(s["counts"]["byKind"], {"stub.after": 1, "stub.before": 1})
+
+    def test_notes_are_capped_and_counted(self):
+        """n7."""
+        em = engine.Emitter("S-n", ".", safety.Budget(), f"tool:source@{TOOL_VERSION}")
+        started = time.monotonic()
+        for i in range(20_000):
+            em.note(f"note {i}")
+            em.note(f"note {i}")
+        self.assertLess(time.monotonic() - started, 5)
+        _, cov = em.finish()
+        self.assertEqual(len(cov["notes"]), engine.NOTES_MAX + 1)
+        self.assertEqual(cov["notes"][-1], f"{20_000 - engine.NOTES_MAX} more notes not kept")
+
+    def test_secrets_in_names_are_scrubbed_with_a_note(self):
+        """m3."""
+        key = FT.SECRETS["aws-key"]
+        self.put(f"src/{key}.js", "x\n")
+        p = FA.make_apk(self.tmp / f"{key}.apk", FA.SNAGDESK_MANIFEST, None, None, files={f"assets/{key}.txt": "x"})
+        s1 = engine.run_study(self.root, "source", self.root / "src", tracked=True, lanes=[SOURCE])
+        s2 = engine.run_study(self.root, "mobile", p, study_id="S-k", own=True, lanes=[MOBILE])
+        self.assertTrue(any("credential-like" in n for n in s1["coverage"]["notes"]))
+        self.assertTrue(any("credential-like" in n for n in s2["coverage"]["notes"]))
+        for name, text in project_text(self.root).items():
+            self.assertNotIn(key, text, name)
+
+
+class WalkRound1Test(TempProject):
+    def test_version_control_folders_are_never_read(self):
+        """m8."""
+        for rel in (".git/config", "sub/.hg/hgrc", "a/b/.svn/entries", "src/ok.js", "src/.gitignore"):
+            self.put(rel, "url = https://user:pw@host/x\n", self.tmp / "t")
+        notes = []
+        got = list(safety.walk(self.tmp / "t", safety.Budget(), note=notes.append))
+        self.assertEqual(got, ["src/.gitignore", "src/ok.js"])
+        self.assertEqual(notes, [safety.VCS_NOTE])
+        s = engine.run_study(self.root, "source", self.tmp / "t", authorization="The owner of this code agreed.",
+                             lanes=[SOURCE])
+        self.assertIn(safety.VCS_NOTE, s["coverage"]["notes"])
+
+    def test_control_characters_in_names_are_unsafe(self):
+        """n1."""
+        z = safety.SafeZip(FA.zip_bytes([FA.ZipEntry("a\nb\x1b[31m.txt", "x"), FA.ZipEntry("ok.txt", "x")]),
+                           safety.Budget())
+        self.assertEqual([n for n, _ in z.members()], ["ok.txt"])
+        self.assertEqual([r for _, r, _ in z.skipped], ["unsafe-path"])
+        try:
+            self.put("w/a\x1bb.txt", "x", self.tmp)
+        except (OSError, ValueError):
+            self.skipTest("this file system refuses control characters in names")
+        skips = []
+        self.assertEqual(list(safety.walk(self.tmp / "w", safety.Budget(), skip=lambda r, why, n=None: skips.append(why))), [])
+        self.assertEqual(skips, ["unsafe-path"])
+
+    def test_hard_links_add_a_note(self):
+        """n8."""
+        self.put("outside/secret.txt", "secret\n", self.tmp)
+        (self.tmp / "t").mkdir()
+        try:
+            os.link(self.tmp / "outside/secret.txt", self.tmp / "t/link.txt")
+        except (OSError, NotImplementedError):
+            self.skipTest("cannot make a hard link here")
+        s = engine.run_study(self.root, "source", self.tmp / "t", authorization="The owner of this code agreed.",
+                             lanes=[SOURCE])
+        self.assertTrue(any("more than one hard link" in n for n in s["coverage"]["notes"]))
+
+
+class EngineRound1Test(TempProject):
+    def test_at_is_the_start_time(self):
+        """n2."""
+        class Slow:
+            LANE = "source"
+
+            @staticmethod
+            def run(t, em, o):
+                time.sleep(1.2)
+        before = core.now_iso()
+        s = engine.run_study(self.root, "source", self.root, lanes=[Slow])
+        self.assertLessEqual(s["at"], s["authorization"]["at"])
+        self.assertGreaterEqual(s["at"], before)
+        log = (self.root / ".blueprint/log.jsonl").read_text(encoding="utf-8").splitlines()
+        self.assertLess(s["at"], json.loads(log[-1])["at"])
+
+    def test_the_statement_is_one_line_of_at_most_500_characters(self):
+        """n4."""
+        a, _ = engine.authorize("web", False, False, "The vendor\nallows   this analysis.")
+        self.assertEqual(a["statement"], "The vendor allows this analysis.")
+        with self.assertRaises(BlueprintError) as cm:
+            engine.authorize("web", False, False, "x" * 501)
+        self.assertEqual((cm.exception.error, cm.exception.code), ("usage", 64))
+        self.assertEqual(engine.authorize("web", False, False, "x" * 500)[0]["statement"], "x" * 500)
+
+    def test_the_target_digest_counts_and_respects_the_byte_limit(self):
+        """n6: a target larger than the byte limit is target-unsupported; the hash counts in bytesRead."""
+        p = self.put("t.bin", b"z" * 5000)
+        s = engine.run_study(self.root, "mobile", p, own=True, lanes=[])
+        self.assertEqual(s["coverage"]["bytesRead"], 5000)
+        with mock.patch.dict(safety.LIMITS, {"totalBytes": 4000}):
+            with self.assertRaises(BlueprintError) as cm:
+                engine.run_study(self.root, "mobile", p, study_id="S-big", own=True, lanes=[])
+        self.assertEqual(cm.exception.error, "target-unsupported")
+        self.assertFalse((self.root / ".blueprint/studies/S-big").exists())
+
+    def test_the_empty_study_list_names_no_flag_and_no_dot(self):
+        """m7."""
+        r = self.cli("study", "list")
+        self.assertIn("study source <folder>", r.stdout)
+        self.assertNotIn("--own", r.stdout)
+        self.assertNotIn(" . ", r.stdout)
+
+
+@unittest.skipUnless(shutil.which("git"), "git is not installed")
+class LiteralPathspecTest(TempProject):
+    """M4: a folder named like pathspec magic is a name: untracked, so it needs a statement (exit 3)."""
+
+    def test_magic_names_are_not_tracked(self):
+        env = dict(os.environ, GIT_CONFIG_NOSYSTEM="1", HOME=str(self.tmp))
+        self.put("src/a.js", "a\n")
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True, capture_output=True, env=env)
+        subprocess.run(["git", "add", "src/a.js"], cwd=self.root, check=True, capture_output=True, env=env)
+        tried = 0
+        for name in (":", ":!x", ":(top)", "*", "s*", ":(glob)**"):
+            try:
+                self.put(f"{name}/foreign.js", "x\n")
+            except (OSError, ValueError):
+                continue  # Windows cannot hold these names
+            tried += 1
+            r = self.cli("study", "source", self.root / name, "--json")
+            self.assertEqual(r.returncode, 3, f"{name}: {r.stdout}")
+            self.assertEqual(json.loads(r.stdout)["error"]["code"], "not-authorized")
+        r = self.cli("study", "source", self.root / "src", "--json")
+        self.assertEqual(r.returncode, 0, r.stdout)  # the tracked folder itself still counts as the user's own
+        src = (S.PACKAGE / "commands" / "study.py").read_text(encoding="utf-8")
+        self.assertIn('"--literal-pathspecs"', src)  # also where the names below cannot be made (Windows)
+        if not tried:
+            self.skipTest("this file system cannot hold pathspec-like names (Windows); the source check ran")
 
 
 if __name__ == "__main__":

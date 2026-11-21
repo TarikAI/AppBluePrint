@@ -46,13 +46,6 @@ def resolvers():
     return {".asar": fn} if callable(fn) else {}
 
 
-def freshness_of(root, study, records):
-    from bp import evidence
-    if study is None:
-        return {r["id"]: "unknown" for r in records}
-    return evidence.freshness_all(root, study, records, resolvers=resolvers())
-
-
 def _authorization(p, required=False):
     g = p.add_mutually_exclusive_group(required=required)
     g.add_argument("--authorization", metavar="TEXT", help='what the user said allows the analysis, in their words '
@@ -164,12 +157,14 @@ def _tracked(root, real):
         return False
     if rel == "." or rel == ".." or rel.startswith(".." + os.sep) or os.path.isabs(rel):
         return False
-    return bool(core._git(root, "ls-files", "--cached", "--", rel.replace(os.sep, "/") + "/"))
+    # --literal-pathspecs: a folder named ':', ':!x' or '*' is a name, never pathspec magic
+    return bool(core._git(root, "--literal-pathspecs", "ls-files", "--cached", "--", rel.replace(os.sep, "/") + "/"))
 
 
 def _skipped_text(cov):
     skipped = cov.get("skipped") if isinstance(cov.get("skipped"), dict) else {}
-    n = sum(v for v in skipped.values() if isinstance(v, int))
+    skipped = {k: v for k, v in skipped.items() if type(v) is int and v > 0}
+    n = sum(skipped.values())
     if not n:
         return "0 skipped"
     return f"{n} skipped (" + ", ".join(f"{v} {k}" for k, v in sorted(skipped.items())) + ")"
@@ -198,41 +193,57 @@ def _list(args, root):
     from bp import evidence
     rows, lines = [], []
     for sid, study in sorted(evidence.all_studies(root).items()):
-        records = evidence.load(root, sid)
-        beh, _ = evidence.read_behaviours(root, sid)
-        s = evidence.summary(root, study, records, beh, freshness_of(root, study, records))
+        beh, problem = evidence.read_behaviours(root, sid)
+        s = evidence.summary(study, None if problem else beh)
         rows.append(s)
         b = s["behaviours"]
         lines.append(f"{sid}  {s['kind']}  {evidence.safety.one_line(str(s['target']['name']))}  "
-                     f"{s['counts']['evidence']} evidence  {s['freshness']['stale']} stale  "
-                     f"behaviours {b['reviewed']}/{sum(b.values())} reviewed")
-    if not rows:
-        lines = ["No studies yet. Start with: " + run_hint(root, "study source . --own", "commands/study")]
+                     f"{s['counts']['evidence']} evidence  "
+                     + (f"behaviours {b['reviewed']}/{sum(b.values())} reviewed" if b else "behaviours unreadable"))
+    if rows:
+        lines.append("Freshness: " + run_hint(root, "evidence stale", "commands/evidence"))
+    else:
+        lines = ["No studies yet. Start with: " + run_hint(root, "study source <folder>", "commands/study")
+                 + " (the project itself needs no statement; anything else needs the user's --authorization)"]
     emit(args, args.cmd, {"studies": rows}, lines)
 
 
 def _show(args, root):
+    """The study record and its coverage; every value read from study.json is type-checked (a wrong shape shows
+    as empty)."""
     from bp import evidence
     study = evidence.load_study(root, args.study)
     beh, problem = evidence.read_behaviours(root, study["id"])
     if problem:
         print(f"warning: .blueprint/studies/{study['id']}/behaviours.json {problem}", file=sys.stderr)
     one = evidence.safety.one_line
-    t, cov = study["target"], study.get("coverage") or {}
-    auth = study.get("authorization") if isinstance(study.get("authorization"), dict) else {}
-    lines = [f"{study['id']}  {study['kind']}  {one(str(t.get('name')))}" + ("  (own)" if t.get("own") else ""),
-             f"  authorization: {one(str(auth.get('statement')))}",
-             f"  tool {study.get('tool')}, studied at {study.get('at')}, lanes: "
-             + ", ".join(str(x) for x in study.get("lanes") or []),
-             f"  coverage: {cov.get('filesSeen', 0)} files seen, {cov.get('filesScanned', 0)} scanned, "
-             f"{_skipped_text(cov)}, {cov.get('bytesRead', 0)} bytes read"
-             + (f", stopped by the {cov.get('stoppedBy')}" if cov.get("truncated") else ""),
-             f"  evidence: {(study.get('counts') or {}).get('evidence', 0)}, behaviours: "
+
+    def obj(v):
+        return v if isinstance(v, dict) else {}
+
+    def text(v):
+        return one(v) if isinstance(v, str) else ""
+
+    def num(v):
+        return v if type(v) is int and v >= 0 else 0
+
+    def texts(v):
+        return [one(x) for x in v if isinstance(x, str)] if isinstance(v, list) else []
+
+    t, cov, auth = obj(study.get("target")), obj(study.get("coverage")), obj(study.get("authorization"))
+    skipped = {k: num(v) for k, v in obj(cov.get("skipped")).items() if isinstance(k, str)}
+    lines = [f"{study['id']}  {text(study.get('kind'))}  {text(t.get('name'))}" + ("  (own)" if t.get("own") is True
+                                                                                  else ""),
+             f"  authorization: {text(auth.get('statement'))}",
+             f"  tool {text(study.get('tool'))}, studied at {text(study.get('at'))}, lanes: "
+             + ", ".join(texts(study.get("lanes"))),
+             f"  coverage: {num(cov.get('filesSeen'))} files seen, {num(cov.get('filesScanned'))} scanned, "
+             f"{_skipped_text({'skipped': skipped})}, {num(cov.get('bytesRead'))} bytes read"
+             + (f", stopped by the {text(cov.get('stoppedBy'))}" if cov.get("truncated") is True else ""),
+             f"  evidence: {num(obj(study.get('counts')).get('evidence'))}, behaviours: "
              f"{len(beh)} ({evidence.behaviour_counts(beh)['reviewed']} reviewed)"]
-    for m in cov.get("missing") or []:
-        lines.append(f"  missing: {one(str(m))}")
-    for n in cov.get("notes") or []:
-        lines.append(f"  note: {one(str(n))}")
+    lines += [f"  missing: {m}" for m in texts(cov.get("missing"))]
+    lines += [f"  note: {n}" for n in texts(cov.get("notes"))]
     if (evidence.study_dir(root, study["id"]) / ".gitignore").is_file():
         lines.append(NOT_COMMITTED)
     emit(args, args.cmd, {"study": study, "behaviours": beh}, lines)

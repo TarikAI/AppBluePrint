@@ -24,6 +24,7 @@ LANE_KINDS = ("source", "web", "desktop", "mobile", "data")  # study kinds run b
 OWN_STATEMENT = "the user's own software"                    # --own
 PROJECT_STATEMENT = "own project"                            # the source lane on the project or a tracked folder in it
 AUTHORIZATION_MIN = 15
+STATEMENT_MAX = 500
 NOTES_MAX = 200
 NOTE_LEN = 300
 NOT_AUTHORIZED = ('State that you may analyse this target: --authorization "I wrote this app" or "the vendor\'s '
@@ -44,20 +45,25 @@ def proof_digest_bytes(data):
     return sha256_bytes(data)
 
 
-def _file_digest(path):
-    """(raw sha256 digest, size) of a file, streamed; the target as a whole (5.1)."""
+def _file_digest(path, budget=None):
+    """(raw sha256 digest, size) of a file, streamed; the target as a whole (5.1). With a budget the bytes count in
+    bytesRead and the time limit is checked per MiB."""
     h, size = hashlib.sha256(), 0
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
             size += len(chunk)
+            if budget is not None:
+                budget.bytes(len(chunk))
+                budget.check_time()
     return "sha256:" + h.hexdigest(), size
 
 
 class Target:
     """What a lane reads (6.3). kind "folder" or "file"; name the basename; path the real path on this machine (never
     stored); digest and size for a file target (raw sha256 of the whole file, 5.1). files() lists a folder's files
-    (safe, sorted: safety.walk; on the project root without .blueprint/); read(rel, cap) reads one (rel "." is a file target itself); zip() opens a file
+    (safe, sorted: safety.walk, never .git, .hg, .svn; on the project root without .blueprint/); read(rel, cap)
+    reads one (rel "." is a file target itself); zip() opens a file
     target that is an archive (SafeZip); digest_of(rel, data) is the digest rule of 5.1 for what was read.
     Every read counts in the study budget; skips found while listing go to on_skip(rel, reason, note)."""
 
@@ -70,19 +76,34 @@ class Target:
         self.name = self.path.name or "."
         self.digest = self.size = None
         if self.kind == "file":
-            self.digest, self.size = _file_digest(self.path)
+            limit = budget.limits["totalBytes"]
+            if self.path.stat().st_size > limit:
+                raise BlueprintError("target-unsupported", f"the target is larger than {limit // 2 ** 20} MiB, the "
+                                     "most one study reads (it must be hashed whole)",
+                                     next=f"{core.AGAIN} with a smaller target")
+            try:
+                self.digest, self.size = _file_digest(self.path, budget)
+            except safety.Stop:
+                raise BlueprintError("target-unsupported", "the target could not be hashed within the time limit",
+                                     next=f"{core.AGAIN} with a larger --time-limit") from None
         self.on_skip = None
+        self.on_note = None
         self._zip = None
 
     def files(self):
         if self.kind != "folder":
             return iter(())
         # the project's own .blueprint folder (the plan, state, studies) is never part of what a study reads
-        return safety.walk(self.path, self.budget, skip=self._skip, prune=(".blueprint",) if self.is_project_root else ())
+        return safety.walk(self.path, self.budget, skip=self._skip, note=self._note,
+                           prune=(".blueprint",) if self.is_project_root else ())
 
     def _skip(self, rel, reason, note=None):
         if self.on_skip is not None:
             self.on_skip(rel, reason, note)
+
+    def _note(self, text):
+        if self.on_note is not None:
+            self.on_note(text)
 
     def read(self, rel, cap):
         if self.kind == "file":
@@ -142,14 +163,27 @@ class Emitter:
         self._kinds = {}
         self._over = set()
         self._limit = {}
+        self._notes = set()
+        self._dropped = set()
+        self._scrubbed_path = False
         self.coverage = evidence.empty_coverage()
 
     def emit(self, kind, key, claim, *, path, digest, basis="observed", line=None, offset=None, excerpt=None,
              data=None, limitations=(), coverage="complete", links=(), by=None):
         src = {"artifact": self.artifact, "path": path, "line": line, "offset": offset, "digest": digest,
                "excerpt": excerpt}
-        rec = evidence.make_record(self.study, kind, key, claim, basis, src, data, limitations, coverage, links,
-                                   by=by or self.by)
+        try:
+            rec = evidence.make_record(self.study, kind, key, claim, basis, src, data, limitations, coverage, links,
+                                       by=by or self.by)
+        except (ValueError, TypeError) as e:
+            # a value the record rules refuse (an empty key, a path that is not relative, ...) never ends the study
+            label = kind if isinstance(kind, str) and evidence.KIND.fullmatch(kind) else "a"
+            self.skip(path if isinstance(path, str) else ".", "malformed",
+                      f"a {label} record was not stored: {str(e).split(':', 1)[0][:80]}")
+            return None
+        if not self._scrubbed_path and isinstance(path, str) and rec["source"]["path"] != safety.clean_text(path):
+            self._scrubbed_path = True
+            self.note("a path held a credential-like string; it is stored with the match replaced")
         rid = rec["id"]
         if rid in self.records:
             return rid
@@ -173,6 +207,8 @@ class Emitter:
         self._over.add(kind)
 
     def skip(self, path, reason, note=None):
+        if reason == safety.MISSING:  # what a read raises when the file went away after it was listed
+            reason, note = "error", note or "disappeared while reading"
         if reason not in safety.SKIP_REASONS:
             raise ValueError(f"unknown skip reason {reason!r}")
         cov = self.coverage
@@ -181,11 +217,15 @@ class Emitter:
         if note:
             self.note(note)
 
-    def note(self, text):
-        notes = self.coverage["notes"]
+    def note(self, text, force=False):
         text = _note_text(text)
-        if text and text not in notes:
-            notes.append(text)
+        if not text or text in self._notes:
+            return
+        if len(self._notes) >= NOTES_MAX and not force:
+            self._dropped.add(text)
+            return
+        self._notes.add(text)
+        self.coverage["notes"].append(text)
 
     def missing(self, part):
         part = _note_text(part)
@@ -200,13 +240,13 @@ class Emitter:
             if len(self._kinds[kind]) > cap:
                 self._prune(kind, cap)
             if kind in self._over:
-                self.note(f"{kind}: more than {cap} records; the {cap} with the lowest ids were kept")
+                self.note(f"{kind}: more than {cap} records; the {cap} with the lowest ids were kept", force=True)
         kept = sorted(self.records)
         if len(kept) > total:
             for rid in kept[total:]:
                 del self.records[rid]
             kept = kept[:total]
-            self.note(f"more than {total} records; the {total} with the lowest ids were kept")
+            self.note(f"more than {total} records; the {total} with the lowest ids were kept", force=True)
             self._over.add("*")
         if self._over:
             cov["truncated"] = True
@@ -215,9 +255,11 @@ class Emitter:
         cov["filesScanned"] = self.budget.files_scanned
         cov["bytesRead"] = self.budget.bytes_read
         cov["skipped"] = dict(sorted(cov["skipped"].items()))
-        if len(cov["notes"]) > NOTES_MAX:
-            extra = len(cov["notes"]) - NOTES_MAX
-            cov["notes"] = cov["notes"][:NOTES_MAX] + [f"{extra} more notes not kept"]
+        if self.budget.hardlinks:
+            self.note(f"{self.budget.hardlinks} file(s) read have more than one hard link (another name may be "
+                      "outside the target)", force=True)
+        if self._dropped:
+            cov["notes"].append(f"{len(self._dropped)} more notes not kept")
         return [self.records[r] for r in kept], cov
 
 
@@ -228,7 +270,10 @@ def authorize(kind, target_is_root, tracked, authorization=None, own=False):
     on the project root, or on a folder inside it that git tracks (`tracked`, decided by the caller), is implicitly
     the user's own. Anything else needs --own or an --authorization statement of at least 15 characters (stored with
     learn.redact and secrets scrubbed, otherwise verbatim); without one: not-authorized (exit 3)."""
-    statement = authorization if isinstance(authorization, str) else None
+    statement = safety.one_line(authorization) if isinstance(authorization, str) else None
+    if statement is not None and len(statement) > STATEMENT_MAX:
+        raise BlueprintError("usage", f"the --authorization statement must be at most {STATEMENT_MAX} characters",
+                             code=64, next=f"{core.AGAIN} with a shorter statement")
     implicit = kind == "source" and (target_is_root or tracked)
     if statement is not None and len(statement.strip()) < AUTHORIZATION_MIN:
         raise BlueprintError("not-authorized", f"the --authorization statement must be at least {AUTHORIZATION_MIN} "
@@ -252,7 +297,7 @@ def default_id(target_path):
     """S- + slug of the target's basename without its extension (6.1)."""
     p = Path(target_path)
     name = p.stem if p.is_file() else p.name
-    return "S-" + core.slug(name or "project")
+    return "S-" + core.slug(safety.scrub(safety.clean_text(name))[0] or "project")
 
 
 def check_new_id(root, sid, replace):
@@ -270,7 +315,7 @@ def check_new_id(root, sid, replace):
     return sid
 
 
-def study_record(sid, kind, target, authorization, own, lanes, limits, coverage, records):
+def study_record(sid, kind, target, authorization, own, lanes, limits, coverage, records, at=None):
     """study.json (6.1)."""
     rel = None
     if target.root is not None:
@@ -281,9 +326,9 @@ def study_record(sid, kind, target, authorization, own, lanes, limits, coverage,
         except ValueError:
             rel = None
     return {"id": sid, "kind": kind,
-            "target": {"name": target.name, "path": rel, "digest": target.digest,
+            "target": {"name": safety.scrub(safety.clean_text(target.name))[0], "path": rel, "digest": target.digest,
                        "size": target.size, "own": own},
-            "authorization": authorization, "tool": TOOL_VERSION, "at": now_iso(),
+            "authorization": authorization, "tool": TOOL_VERSION, "at": at or now_iso(),
             "lanes": list(lanes), "limits": dict(limits), "coverage": coverage,
             "counts": evidence.counts_of(records)}
 
@@ -348,6 +393,7 @@ def run_study(root, kind, target_path, study_id=None, authorization=None, own=Fa
     record. `lanes` are lane objects (LANE, detect, run); `tracked` says the target is a folder git tracks inside the
     project (decided by the caller, which may run git); `opts` is passed to every lane, with projectRoot,
     isProjectRoot and study added."""
+    started = now_iso()
     root = Path(root)
     lanes = list(lanes or [])
     raw = Path(target_path)
@@ -388,6 +434,9 @@ def run_study(root, kind, target_path, study_id=None, authorization=None, own=Fa
     em = Emitter(sid, "." if target.kind == "folder" else target.name, budget,
                  f"tool:{lane_names[0] if lane_names else kind}@{TOOL_VERSION}")
     target.on_skip = em.skip
+    target.on_note = em.note
+    if safety.scrub(safety.clean_text(target.name))[1]:
+        em.note("the target's name held a credential-like string; it is stored with the match replaced")
     run_opts = dict(opts or {}, projectRoot=root, isProjectRoot=is_root, study=sid)
     try:
         for lane, name in zip(lanes, lane_names):
@@ -396,6 +445,8 @@ def run_study(root, kind, target_path, study_id=None, authorization=None, own=Fa
                 lane.run(target, em, run_opts)
             except safety.Skip as e:
                 em.skip(".", e.reason if e.reason in safety.SKIP_REASONS else "error", e.note)
+            except safety.PARSE_ERRORS as e:  # a lane that let a parser error escape: its unit, not the study, is lost
+                em.skip(".", "malformed", f"the {name} lane stopped on malformed input ({type(e).__name__})")
     except safety.Stop as e:
         em.coverage["truncated"] = True
         em.coverage["stoppedBy"] = e.stoppedBy
@@ -403,7 +454,7 @@ def run_study(root, kind, target_path, study_id=None, authorization=None, own=Fa
     finally:
         target.close()
     records, coverage = em.finish()
-    study = study_record(sid, kind, target, auth, mine, lane_names, limits, coverage, records)
+    study = study_record(sid, kind, target, auth, mine, lane_names, limits, coverage, records, at=started)
     return commit(root, study, records, replace)
 
 
@@ -496,7 +547,7 @@ def manifest_facts(elements, em, *, path, digest, by, basis="observed", limitati
     lims = list(limitations)
 
     def emit(kind, key, claim, data):
-        if not isinstance(key, str) or not key.strip():
+        if not isinstance(key, str) or not safety.one_line(key):
             return
         out.append(em.emit(kind, key, claim, path=path, digest=digest, basis=basis, data=data, limitations=lims,
                            by=by))
