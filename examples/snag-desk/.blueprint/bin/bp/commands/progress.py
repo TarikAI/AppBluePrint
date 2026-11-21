@@ -16,14 +16,15 @@ from pathlib import Path
 
 from bp import registry
 from bp.version import TOOL_VERSION
-from bp.core import (BlueprintError, append_log, bp_dir, die, emit, find_root, git_head, norm, now_iso, path_key,
-                     project_path)
+from bp.core import (BlueprintError, bp_dir, die, emit, find_root, git_head, norm, now_iso, path_key,
+                     project_path, run_hint)
 from bp.globs import pattern_instance_rx
 from bp.learn import record_incident
-from bp.plan import GLYPH, LABEL, STATES, load_plan, load_state, owner_of, planned_file, save_state
+from bp.plan import GLYPH, LABEL, STATES, load_plan, owner_of, planned_file
 from bp.registry import command_built
 from bp.validate import validate_plan
 from bp.views.render import render_all
+from bp.views.structure import one_line
 
 # status flags of 2.0 -> the module that implements them (through its status_lines or status_card hook)
 STATUS_FLAGS = {"feature": "features", "features": "features", "milestone": "roadmap", "tasks": "roadmap",
@@ -142,12 +143,31 @@ def _write_refusal(args, root, plan, path, by):
     return msg
 
 
+def _render_after(args, root, plan, state):
+    """The views, after a command's own result is saved (sync, verify --run, hook post). A failure here (state-busy,
+    bad-state, or a crash, which is recorded as an incident) prints one line on stderr and never changes the
+    command's exit code, as a view conflict does not (contract 8)."""
+    try:
+        render_all(root, plan, state, quiet=True)
+    except BlueprintError as e:
+        print(f"views not refreshed: {e.message}" + (f"; {e.next}" if e.next else ""), file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 - the command's own work is saved; say so and keep its exit code
+        record_incident(args, exc)
+        print("views not refreshed: an unexpected error (incident recorded); run render", file=sys.stderr)
+
+
 def cmd_sync(args):
+    """sync scans first, without the lock, then sets only the keys it owns (patterns, unplanned, ignoredTracked,
+    missingModify, syncedAt, head, and data apart from db-check's data.live) on the state as it is under the lock;
+    file records written by claim, mark and verify meanwhile are kept. Damage confined to a key sync rewrites is
+    repaired, as 1.3.0's rewrite did; damage in what it only reads (files) is bad-state."""
     from bp.data import scan_data
-    from bp.status import compute, repo_files
+    from bp.status import change_state, compute, load_state, repo_files
     root = find_root(args.root)
     plan = load_plan(root)
-    state = load_state(root)
+    owned_keys = ("patterns", "unplanned", "ignoredTracked", "missingModify") + (
+        ("data",) if plan["stores"] or plan["resources"] else ())  # data is rewritten only when there is data to scan
+    state = load_state(root, owned_keys)
     ignored_tracked = []
     disk = repo_files(root, plan, ignored_tracked)
     disk_set = set(disk)
@@ -168,20 +188,27 @@ def cmd_sync(args):
         if not hit:
             unplanned.append(p)
     missing_modify = [f["path"] for f in plan["files"] if f.get("action") == "modify" and f["path"] not in disk_set]
-    state["patterns"] = patterns
-    state["unplanned"] = unplanned
-    state["ignoredTracked"] = {"count": len(ignored_tracked), "paths": ignored_tracked[:20]}
-    state["missingModify"] = missing_modify
-    state["syncedAt"] = now_iso()
-    state["head"] = git_head(root)
-    data_issues = []
+    owned = {"patterns": patterns, "unplanned": unplanned,
+             "ignoredTracked": {"count": len(ignored_tracked), "paths": ignored_tracked[:20]},
+             "missingModify": missing_modify, "syncedAt": now_iso(), "head": git_head(root)}
+    state.update(owned)
+    data_issues, data = [], None
     if plan["stores"] or plan["resources"]:
-        state["data"] = scan_data(root, plan, state, disk)
-        data_issues = state["data"]["issues"]
-    save_state(root, state)
-    comp = compute(root, plan, state)
-    c = comp["counts"]
-    append_log(root, {"event": "sync", "head": state["head"], "counts": c, "unplanned": len(unplanned), "dataIssues": len(data_issues)})
+        data = state["data"] = scan_data(root, plan, state, disk)
+        data_issues = data["issues"]
+    scanned_files = state["files"]
+    counts = {"c": compute(root, plan, state)["counts"]}  # before the lock: this hashes the files
+
+    def change(fresh):
+        fresh.update(owned)
+        if data is not None:
+            fresh["data"] = dict(data, live=(fresh.get("data") or {}).get("live"))  # db-check's live, as it is now
+        if fresh["files"] != scanned_files:  # a claim, mark or proof landed meanwhile: count the state written
+            counts["c"] = compute(root, plan, fresh)["counts"]  # (the hashes are cached, so this is quick)
+        return [{"event": "sync", "head": owned["head"], "counts": counts["c"], "unplanned": len(unplanned),
+                 "dataIssues": len(data_issues)}]
+    state = change_state(root, change, owned_keys)
+    c = counts["c"]
     if not args.quiet:
         print(f"Synced {len(disk)} files on disk against {len(plan['files'])} planned files and {len(plan['patterns'])} patterns.")
         print("  " + "  ".join(f"{GLYPH[s]} {LABEL[s]} {c[s]}" for s in STATES))
@@ -200,8 +227,8 @@ def cmd_sync(args):
                 print("    !", p)
         if state.get("data"):
             dt = state["data"]
-            print(f"  Data: {len(dt['tables'])} table(s) in schema files, {len(plan['resources'])} declared resource(s), "
-                  f"{len(dt['observed'])} file(s) touching data, {len(data_issues)} issue(s).")
+            print(f"  Data: {len(dt.get('tables') or [])} table(s) in schema files, {len(plan['resources'])} declared "
+                  f"resource(s), {len(dt.get('observed') or {})} file(s) touching data, {len(data_issues)} issue(s).")
             for i in data_issues[:12]:
                 print(f"    ~ [{i['type']}] {i['detail']}")
             if len(data_issues) > 12:
@@ -212,14 +239,53 @@ def cmd_sync(args):
             if not args.quiet:
                 print(f"  Views not refreshed: the blueprint has {len(errors)} validation error(s). Run validate.")
         else:
-            render_all(root, plan, state, quiet=True)
-    serious = [i for i in data_issues if i["type"] != "declared-not-found"]
+            _render_after(args, root, plan, state)
+    serious =[i for i in data_issues if i["type"] != "declared-not-found"]
     if getattr(args, "strict", False) and (unplanned or missing_modify or serious):
         sys.exit(1)
 
 
+def _flat(text):
+    """roadmap.flat: runs of whitespace collapse to one space (the wording of the roadmap's unknown-milestone)."""
+    return " ".join(str(text).split())
+
+
+def _check_selectors(ctx, args):
+    """An unknown --feature or --milestone id is one error in both forms (unknown-feature / unknown-milestone, 7.3;
+    exit 1, the failure envelope with --json), raised before status prints anything. The modules' own checks run
+    first, through the hooks the text form calls (status_card; status_lines, whose lines are dropped), so the wording
+    and next are theirs; the core's check after them is the fallback for a module that does not check, in the
+    same words as the module's."""
+    from bp.plan import section_index
+    plan = ctx["plan"]
+    if getattr(args, "feature", None) and registry.hook("status_card") is not None:
+        registry.hook("status_card")(ctx, args.feature)
+    if getattr(args, "milestone", None):
+        registry.collect("status_lines", ctx, args)
+    fid = getattr(args, "feature", None)
+    if fid and fid not in section_index(plan, "features"):
+        raise BlueprintError("unknown-feature", f"feature {fid} is not in the plan", entry=f"feature {fid}",
+                             next=run_hint(ctx["root"], "status --features", "features"))
+    mid = getattr(args, "milestone", None)
+    if mid and mid not in section_index(plan, "milestones"):
+        known = list(section_index(plan, "milestones"))
+        raise BlueprintError("unknown-milestone", f"{_flat(mid)!r} is not a milestone in the plan"
+                             + (" (milestones: " + ", ".join(_flat(m) for m in known) + ")" if known else ""),
+                             entry=f"milestone {_flat(mid)}",
+                             next=run_hint(ctx["root"], "migrate", "commands/migrate") if plan.get("_from") == 1
+                             else run_hint(ctx["root"], "status"))
+
+
+def _blocked(ctx, key):
+    """The strings in ctx["blocked"][key] (phases, or files: the planned files claim refuses, filled by the unknowns
+    module); a missing, None or malformed value at any level is empty, never a crash (review of #16, N9)."""
+    blocked = ctx.get("blocked")
+    value = blocked.get(key) if isinstance(blocked, dict) else None
+    return {x for x in value if isinstance(x, str)} if isinstance(value, (list, set, frozenset, tuple)) else set()
+
+
 def cmd_status(args):
-    from bp.status import next_ready, summarize
+    from bp.status import load_state, next_ready, summarize
     from bp.views.context import blocked_by, build_context, status_json
     root = find_root(args.root)
     plan = load_plan(root)
@@ -228,6 +294,7 @@ def cmd_status(args):
         if getattr(args, flag, None) and not registry.exists(module):
             raise not_built(f"status --{flag}", module)
     ctx = build_context(root, plan, state)
+    _check_selectors(ctx, args)
     comp = ctx["comp"]
     rows = comp["rows"]
     if args.owner:
@@ -237,6 +304,10 @@ def cmd_status(args):
     if args.json:
         out = status_json(ctx, {"rows": rows, "patterns": comp["patterns"], "unplanned": state.get("unplanned", []),
                                 "syncedAt": state.get("syncedAt")})
+        for flag, key in (("feature", "features"), ("milestone", "milestones")):  # the selectors of the text form
+            want = getattr(args, flag, None)
+            if want and isinstance(out.get(key), list):
+                out[key] = [x for x in out[key] if isinstance(x, dict) and x.get("id") == want]
         print(json.dumps(out, indent=2, ensure_ascii=False))
         return
     if getattr(args, "feature", None):  # the feature card only (status_card, features)
@@ -249,35 +320,47 @@ def cmd_status(args):
     total = len(rows)
     done = sum(1 for r in rows if r["status"] == "verified")
     built = sum(1 for r in rows if r["status"] in ("built", "verified"))
-    print(f"{plan['app'].get('name')}: {total} planned files"
-          + (f" for {args.owner}" if args.owner else "") + (f" in {args.phase}" if args.phase else ""))
-    print(f"  verified {done}/{total}, built or better {built}/{total}. Last sync: {state.get('syncedAt') or 'never'}")
+    print(f"{one_line(plan['app'].get('name'))}: {total} planned files"
+          + (f" for {one_line(args.owner)}" if args.owner else "") + (f" in {one_line(args.phase)}" if args.phase else ""))
+    print(f"  verified {done}/{total}, built or better {built}/{total}. Last sync: {one_line(state.get('syncedAt') or 'never')}")
     print("\n  By phase:")
     for ph in plan["phases"]:
         d = summarize([r for r in rows if r["phase"] == ph["id"]], "phase").get(ph["id"])
         if d:
             n = sum(d.values())
-            print(f"    {ph['id']:<4} {ph.get('name', ''):<28} " + " ".join(f"{GLYPH[s]}{d[s]}" for s in STATES if d[s]) + f"  ({d['verified']}/{n} verified)")
+            print(f"    {one_line(ph['id']):<4} {one_line(ph.get('name', '')):<28} " + " ".join(f"{GLYPH[s]}{d[s]}" for s in STATES if d[s]) + f"  ({d['verified']}/{n} verified)")
     if not args.owner:
         print("\n  By owner:")
         for o, d in sorted(summarize(rows, "owner").items()):
             n = sum(d.values())
-            print(f"    {o:<28} " + " ".join(f"{GLYPH[s]}{d[s]}" for s in STATES if d[s]) + f"  ({d['verified']}/{n} verified)")
+            print(f"    {one_line(o):<28} " + " ".join(f"{GLYPH[s]}{d[s]}" for s in STATES if d[s]) + f"  ({d['verified']}/{n} verified)")
     blocked = [r for r in rows if r["status"] == "blocked"]
     if blocked:
         print("\n  Blocked:")
         for r in blocked:
-            print(f"    ▲ {r['path']} ({r['owner']}): {r.get('note') or ''}")
+            print(f"    ▲ {one_line(r['path'])} ({one_line(r['owner'])}): {one_line(r.get('note') or '')}")
     if args.next:
-        blocked = set(ctx["blocked"].get("phases") or ())
-        ready = next_ready(plan, comp["rows"], args.owner, blocked_phases=blocked)
+        blocked = _blocked(ctx, "phases")
+        # files claim refuses (ctx["blocked"]["files"], unknowns) are never offered; given as blocked rows, so a file
+        # that depends on one waits as it does on any file not yet built
+        keys = {path_key(p) for p in _blocked(ctx, "files")}
+        held = [r for r in comp["rows"] if path_key(r["path"]) in keys and r["status"] in ("planned", "claimed", "ondisk")
+                and r["phase"] not in blocked]
+        held_ids = {id(r) for r in held}
+        offer_rows = [dict(r, status="blocked") if id(r) in held_ids else r for r in comp["rows"]]
+        ready = next_ready(plan, offer_rows, args.owner, blocked_phases=blocked)
         print("\n  Ready to build next:")
         for ph in plan["phases"]:  # 2.6: files of a phase blocked by an open unknown are not offered
             if ph.get("id") in blocked and any(r["phase"] == ph["id"] and r["status"] in ("planned", "claimed", "ondisk")
                                                for r in comp["rows"]):
-                print(f"    (phase {ph['id']} skipped: blocked by {', '.join(blocked_by(ctx, 'phase', ph['id'])) or 'an open unknown'})")
+                print(f"    (phase {one_line(ph['id'])} skipped: blocked by "
+                      f"{one_line(', '.join(blocked_by(ctx, 'phase', ph['id'])) or 'an open unknown')})")
+        # the count is of the files that would be offered without the block, so it never names a later phase's file
+        held = [r for r in next_ready(plan, comp["rows"], args.owner, blocked_phases=blocked) if id(r) in held_ids]
+        if held:
+            print(f"    ({len(held)} file(s) skipped: blocked by an open unknown; see status --unknowns)")
         for r in ready[:20]:
-            print(f"    {r['path']}  ({r['owner']}, {r['phase']})")
+            print(f"    {one_line(r['path'])}  ({one_line(r['owner'])}, {one_line(r['phase'])})")
         if not ready:
             print("    nothing: everything in the current phase is claimed, built or waiting on a dependency")
     n_stale = sum(1 for r in rows if r.get("stale"))
@@ -321,8 +404,7 @@ def cmd_claim(args):
         if got:  # a message, or (message, error, next) from the hook (review N5)
             msg, error, nxt = (tuple(got) + (None, None))[:3] if isinstance(got, (tuple, list)) else (got, None, None)
             raise BlueprintError(error or "blocked-by-unknown", str(msg), entry=f"file {path}", code=3,
-                                 next=nxt or "blueprint.py status --unknowns (or claim again with --force if the "
-                                             "lead says so)")
+                                 next=nxt or run_hint(root, "status --unknowns", "unknowns"))
     set_file_state(root, path, "claimed", args.by, args.note)
     print(f"{args.by} claimed {path}")
 
@@ -347,6 +429,7 @@ def cmd_mark(args):
 def _verify_feature(args, root, plan):
     """verify --feature F (7.2) through the verify_feature hook of records. Fail closed: exit 0 only when the hook says
     0 and every record it returns has result pass."""
+    from bp.status import load_state
     from bp.views.context import build_context
     fn = registry.hook("verify_feature")
     if fn is None:
@@ -360,27 +443,38 @@ def _verify_feature(args, root, plan):
 
 
 def cmd_verify(args):
-    from bp.verify import record_file_proofs, run_check, verify_groups
+    """verify --run runs each check without the lock, then records that group's proofs (its own files' "verified")
+    and its log line on the state as it is under the lock; the lock is never held while a check runs."""
+    from bp.status import change_state, load_state
+    from bp.verify import record_file_proofs, run_check, stale_instances, verify_groups
     feature = getattr(args, "feature", None)
     with_feature = {"--criterion": getattr(args, "criterion", None), "--repeat": getattr(args, "repeat", None),
                     "--by": getattr(args, "by", None), "--json": getattr(args, "json", False) or None}
     used = [k for k, v in with_feature.items() if v is not None]
+    root = find_root(args.root)  # never fails: the usage errors below name a command that runs as printed
     if used and not feature:
         raise BlueprintError("usage", f"{', '.join(used)} go{'es' if len(used) == 1 else ''} with --feature F",
-                             next="blueprint.py verify --feature F --run", code=64)
+                             next=run_hint(root, "verify --feature F --run"), code=64)
     if getattr(args, "repeat", None) is not None and args.repeat < 1:
-        raise BlueprintError("usage", "--repeat must be 1 or more", next="blueprint.py verify --feature F --run --repeat 3",
+        raise BlueprintError("usage", "--repeat must be 1 or more", next=run_hint(root, "verify --feature F --run --repeat 3"),
                              code=64)
-    root = find_root(args.root)
     plan = load_plan(root)
     if feature:
         _verify_feature(args, root, plan)
         return
     only = None
+    # a version 2 plan also proves the pattern instances recorded in state (option B); version 1 keeps 1.x's groups
+    state = load_state(root) if plan.get("_from") != 1 else None
     if getattr(args, "stale", False):  # files whose last proof passed but no longer holds (contract 4.7)
         from bp.status import compute
-        only = {r["path"] for r in compute(root, plan, load_state(root))["rows"] if r["stale"]}
-    groups = verify_groups(plan, phase=args.phase, owner=args.owner, only=only)
+        current = state if state is not None else load_state(root)
+        only = {r["path"] for r in compute(root, plan, current)["rows"] if r["stale"]}
+        if state is not None:
+            only |= stale_instances(root, plan, state)
+    skipped = set()  # recorded instances that are not this project's paths (review of #17, F5)
+    groups = verify_groups(plan, phase=args.phase, owner=args.owner, only=only, state=state, root=root, skipped=skipped)
+    if skipped:
+        print(f"skipped {len(skipped)} recorded instance(s) that are not project paths")
     if not groups:
         print("No verify commands in scope.")
         return
@@ -389,8 +483,12 @@ def cmd_verify(args):
         for cmd, paths in groups.items():
             print(f"  {cmd}    # {len(paths)} file(s)")
         return
-    state = load_state(root)
+    state = load_state(root)  # a state that cannot be used is reported before any check runs
+    # each file's record as this verify found it: a reset to planned, or a claim by another owner, made after this
+    # point wins over the proof of a check that started before it (the proof is not saved)
+    started = {p: _rec_key(state["files"].get(p)) for paths in groups.values() for p in paths}
     failed = 0
+    failed_paths = set()  # an instance under two commands is proven only when every one passed (review of #17, F6)
     for cmd, paths in groups.items():
         print(f"$ {cmd}")
         result = run_check(cmd, root, args.timeout)
@@ -400,12 +498,54 @@ def cmd_verify(args):
         print(f"  {'passed' if ok else 'FAILED'} for {len(paths)} file(s)")
         failed += 0 if ok else 1
         if not ok:
+            failed_paths.update(paths)
             registry.signal(root, "verify", f"verify-{result['result']}")  # 9.4
-        record_file_proofs(root, plan, state, cmd, paths, result)
-        append_log(root, {"event": "verify", "cmd": cmd, "ok": ok, "files": len(paths)})
-    save_state(root, state)
-    render_all(root, plan, state, quiet=True)
+        proofs = {"files": {}}
+        record_file_proofs(root, plan, proofs, cmd, paths, result)  # hashed before the lock is taken
+
+        reset = {}
+
+        def change(fresh, paths=paths, proofs=proofs["files"], cmd=cmd, ok=ok, reset=reset):
+            reset.clear()
+            for p in paths:
+                rec = fresh["files"].setdefault(p, {})
+                if "verified" not in proofs.get(p, {}):
+                    continue  # no proof for this file (not on disk): nothing to save, nothing to undo
+                if ok and p in failed_paths:
+                    continue  # another command covering it failed in this run: that failure stands
+                if _reset_since(started.get(p), _rec_key(rec)):
+                    reset[p] = _rec_key(rec)  # changed while the check ran: that change wins, the proof is not saved
+                    continue
+                rec["verified"] = proofs[p]["verified"]
+            event = {"event": "verify", "cmd": cmd, "ok": ok, "files": len(paths)}
+            if reset:
+                event["notSaved"] = sorted(reset)  # the files whose proof this line does not stand for
+            return [event]
+        state = change_state(root, change)
+        if ok:  # a failed check is already reported (and fails the command) once: its reset files are not again
+            for p, (st, by, _) in sorted(reset.items()):
+                what = "marked planned" if st == "planned" else "claimed"
+                print(f"  {p}: not verified: it was {what} by {by} while the check ran; verify it again when it is built")
+            failed += 1 if reset else 0
+    _render_after(args, root, plan, state)
     sys.exit(1 if failed else 0)
+
+
+def _rec_key(rec):
+    """(state, by, at) of a file record: what verify compares to see that it changed while a check ran."""
+    rec = rec if isinstance(rec, dict) else {}
+    return rec.get("state"), rec.get("by"), rec.get("at")
+
+
+def _reset_since(was, now):
+    """A file's record changed in a way that a proof from a check started at `was` must not undo: it went back to
+    planned, or it was claimed by a different owner than the one recorded then (no record then means no previous
+    owner to differ from, so a first claim, by anyone, is not a reset)."""
+    if now == was:
+        return False
+    if now[0] == "planned":
+        return True
+    return now[0] == "claimed" and was is not None and was[1] is not None and now[1] != was[1]
 
 
 def cmd_guard(args):
@@ -450,7 +590,7 @@ def cmd_hook(args):
     # BLUEPRINT_GUARD: block (default) stops the write and tells the agent why;
     # ask lets the person approve it; off disables the guard.
     mode = os.environ.get("BLUEPRINT_GUARD", "block")
-    if mode not in ("block", "ask", "off"):  # review R2-N4: an unknown value is block (1.x allowed every write)
+    if args.when == "pre" and mode not in ("block", "ask", "off"):  # review R2-N4: an unknown value is block (1.x allowed every write)
         print(f"BLUEPRINT_GUARD={mode!r} is not one of block, ask, off.", file=sys.stderr)  # treated as block
         mode = "block"
     if args.when == "pre" and mode == "off":

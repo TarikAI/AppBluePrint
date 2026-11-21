@@ -5,22 +5,27 @@ return (ROADMAP.md, FEATURES.md, contract 8) and map.html. The map gets the map_
 and every tab-*.js asset inlined at the template's /*__TABS_JS__*/ placeholder, in sorted order (8.4).
 """
 import json
+import math
+import os
 import re
+import stat
 import sys
+from pathlib import Path
 
 from bp.version import TOOL_VERSION
 from bp import registry
-from bp.core import TOOL_HOME, BlueprintError, bp_dir, find_asset, write_text_if_changed
-from bp.plan import GLYPH, LABEL, STATES, save_state
+from bp.core import TOOL_HOME, BlueprintError, bp_dir, find_asset, state_lock, write_state, write_text_if_changed
+from bp.plan import GLYPH, LABEL, STATES
 from bp.data import data_view
-from bp.status import compute
+from bp.status import compute, load_state
 from bp.views.context import build_context, merged
 from bp.views.structure import render_structure
 from bp.views.roster import render_roster
+from bp.core import copy_json, run_hint  # on its own line, apart from the bp.core import above (PR #14 rewrites that one)
 
 BASE_VIEWS = ("STRUCTURE.md", "ROSTER.md", "map.html")
 RESERVED_VIEWS = BASE_VIEWS + ("README.md",)  # init writes README.md for people to edit
-_VIEW_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*\.md$")
+_VIEW_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\.md")  # used with fullmatch: "$" would accept a final newline
 
 
 def find_template():
@@ -38,7 +43,9 @@ def tab_scripts():
 
 
 def _script(text):
-    return text.replace("</script", "<\\/script")
+    """An asset's text, safe inside a script element: '</script' in any case and '<!--' cannot close the element or
+    start the HTML parser's escaped-comment state (review of #16, N1)."""
+    return re.sub(r"(?i)</(script)", r"<\\/\1", text).replace("<!--", "<\\!--")
 
 
 def render_map(plan, state, comp, ctx=None):
@@ -53,17 +60,61 @@ def render_map(plan, state, comp, ctx=None):
             "data": data_view(plan, state)}
     if ctx is not None:  # 2.0: keys from the map_payload hooks (contract 8.5); a collision is a bug
         data = merged("map_payload", ctx, data)
-    payload = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
-    html = tpl.read_text(encoding="utf-8")
     mm = find_asset("mindmap.js")
     mm_js = _script(mm.read_text(encoding="utf-8")) if mm else "function mindMap(host){host.textContent='Mind map unavailable: run init --refresh-tool.';return {expandAll:function(){},collapseAll:function(){},zoom:function(){},fit:function(){}};}"
-    html = html.replace("/*__MINDMAP_JS__*/", mm_js)
-    html = html.replace("/*__TABS_JS__*/", "\n;\n".join(_script(t) for t in tab_scripts()))
-    return html.replace("__APP_NAME__", _html_escape(plan["app"].get("name", "App"))).replace("__BLUEPRINT_DATA__", payload)
+    values = {"__APP_NAME__": _html_escape(plan["app"].get("name", "App")), "__BLUEPRINT_DATA__": script_json(data),
+              "/*__MINDMAP_JS__*/": mm_js, "/*__TABS_JS__*/": "\n;\n".join(_script(t) for t in tab_scripts())}
+    text = tpl.read_text(encoding="utf-8")
+    missing = [name for name in values if name not in text]
+    if missing:  # a broken template copy is a bug, never a map with a hole in it (review of #16, N11)
+        raise RuntimeError(f"{tpl} has no {', '.join(missing)} placeholder: run init --refresh-tool")
+    # One pass over the template: text put in for one placeholder is never searched for another (core review C4).
+    return _PLACEHOLDER.sub(lambda m: values[m.group(0)], text)
+
+
+_PLACEHOLDER = re.compile(r"__APP_NAME__|__BLUEPRINT_DATA__|/\*__MINDMAP_JS__\*/|/\*__TABS_JS__\*/")
+# what script_json writes as a \u escape: <, >, &, U+2028, U+2029 and every surrogate (written as escapes, not
+# literal characters, here: many tools treat a literal U+2028 as a line break)
+_SCRIPT_UNSAFE = re.compile("[<>&\u2028\u2029\ud800-\udfff]")
+
+
+def _finite(value):
+    """value with every non-finite float (NaN, Infinity, -Infinity, at any depth) as None: a browser's JSON.parse
+    rejects them, although Python's JSON reader accepts them in a plan (review of #16, M2). A copy only when needed,
+    made without recursion."""
+    try:
+        json.dumps(value, allow_nan=False)
+        return value
+    except ValueError:
+        pass
+    root = copy_json(value)
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        keys = node.keys() if isinstance(node, dict) else range(len(node))
+        for k in keys:
+            v = node[k]
+            if isinstance(v, float) and not math.isfinite(v):
+                node[k] = None
+            elif isinstance(v, (dict, list)):
+                stack.append(v)
+    return root
+
+
+def script_json(value):
+    """Strict JSON, safe to embed in a script element: non-finite numbers become null; <, >, &, U+2028, U+2029 and
+    lone surrogates become \\u escapes, so no plan text can close the element, open a comment or a CDATA section,
+    end a line in an older JavaScript parser or make the file unencodable (review of #16, M3). Those characters occur
+    only inside JSON strings, where the escape stands for the same character: the value parses back equal."""
+    text = json.dumps(_finite(value), ensure_ascii=False, allow_nan=False)
+    return _SCRIPT_UNSAFE.sub(lambda m: "\\u%04x" % ord(m.group(0)), text)
 
 
 def _html_escape(s):
-    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+    """Text for an HTML element; a lone surrogate becomes a character reference (shown as U+FFFD), so the page
+    stays encodable (review of #16, M3)."""
+    text = str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+    return re.sub("[\ud800-\udfff]", lambda m: "&#x%x;" % ord(m.group(0)), text)
 
 
 def _hook_views(ctx):
@@ -73,47 +124,151 @@ def _hook_views(ctx):
     out = {}
     for name, views in registry.collect("views", ctx):
         for fname, text in (views or {}).items():
-            if not isinstance(fname, str) or not _VIEW_NAME.match(fname) or fname in RESERVED_VIEWS or fname in out:
+            if not isinstance(fname, str) or not _VIEW_NAME.fullmatch(fname) or fname in RESERVED_VIEWS or fname in out:
                 raise RuntimeError(f"{name}.views returned the view name {fname!r}: a .md file name in .blueprint/, "
                                    "not a base view, not README.md and not one another module returns")
-            out[fname] = (name, str(text))
+            text = str(text)
+            if not _has_header(text):
+                raise RuntimeError(f"{name}.views returned {fname!r} without a line starting {GENERATED_HEADER!r} in "
+                                   "its first five lines (contract 8)")
+            out[fname] = (name, text)
     return out
 
 
-def render_all(root, plan, state, quiet=False, check=False):
+GENERATED_HEADER = "<!-- Generated by blueprint.py render"
+
+
+def _has_header(text):
+    """True when one of the first five lines starts with the generated header (contract 8)."""
+    return any(line.startswith(GENERATED_HEADER) for line in text.splitlines()[:5])
+
+
+def _is_plain_file(path):
+    """True for a regular file that is not a link: not a symlink or other reparse point, one hard link only, and
+    directly in its folder (review P7-1). Anything else at a view's name is never adopted or written through."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+        return False
+    if getattr(st, "st_file_attributes", 0) & 0x400:  # FILE_ATTRIBUTE_REPARSE_POINT (Windows)
+        return False
+    try:
+        return Path(path).resolve().parent == Path(path).parent.resolve()
+    except OSError:
+        return False
+
+
+def _adoptable(path):
+    """An existing file render may take over: a plain file (_is_plain_file) whose first five lines, read at most 4096
+    bytes each (review P7-2), carry the generated header. A file that is not text simply has no header."""
+    if not _is_plain_file(path):
+        return False
+    try:
+        with path.open("rb") as f:
+            head = b"".join(f.readline(4096) for _ in range(5))
+    except OSError:
+        return False
+    return _has_header(head.decode("utf-8", errors="replace"))
+
+
+class ViewBlocked(Exception):
+    """A view's file entry cannot be replaced: render_all reports it like a view conflict (contract 8)."""
+
+
+def _write_view(path, text):
+    """Write a view, never through a link (review P7-1): an existing file that is a symlink, a reparse point or a
+    hard link to another name gets a new directory entry (temp file in the same folder, then os.replace) instead of
+    being written in place. Whatever sits at the temp name is removed first, and the temp file is created
+    exclusively; an entry that cannot be removed or replaced (a folder, read-only, locked, open elsewhere) raises
+    ViewBlocked naming it, and render's own temp file is removed (review P10-4). Returns True when the file changed."""
+    if not os.path.lexists(path) or _is_plain_file(path):
+        return write_text_if_changed(path, text)
+    tmp = path.with_name(path.name + ".tmp")
+    if os.path.isdir(tmp) and not os.path.islink(tmp):
+        raise ViewBlocked(f"render: .blueprint/{path.name} cannot be written: .blueprint/{tmp.name} is a folder; "
+                          "remove it, then run render again.")
+    created = False
+    try:
+        if os.path.lexists(tmp):  # a leftover file or a link: drop the entry, never write through or into it
+            os.unlink(tmp)
+        with open(tmp, "x", encoding="utf-8") as f:  # create only: a name that appeared meanwhile is not written
+            created = True
+            f.write(text)
+        os.replace(tmp, path)
+    except OSError as e:
+        if created:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+        raise ViewBlocked(f"render: .blueprint/{path.name} cannot be written ({e.strerror or e}); make "
+                          f".blueprint/{path.name} and .blueprint/{tmp.name} writable or remove them, then run render "
+                          "again.") from e
+    return True
+
+
+def render_all(root, plan, state, quiet=False, check=False, fail_on_conflict=False):
     """Write (or with check=True, compare) every view that should exist for this plan; returns the stale names.
 
     The views hooks' files are recorded in state.json as "generatedViews": the union of the old and new names is
     saved before any view is written, and the exact list after the deletions, so a crash in between leaves a superset
     that the next render cleans up (review R2-M4). A recorded name that no module returns any more should not exist:
-    render deletes it, render --check reports it. Base views are never deleted; a file render never wrote is never
-    touched, and a view whose name is such a file is not written: render names it and the module, renders the other
-    views, and fails (view-conflict, exit 1). A plan with no hook views writes no key."""
+    render deletes it, render --check reports it. Base views are never deleted, and a file never recorded is never
+    deleted. Every hook view carries the generated header in its first five lines. An existing, unrecorded file is
+    adopted (overwritten and recorded) when it carries that header too; any other is a conflict: the view is not
+    written, the conflict line goes to stderr, the other views are written, render --check lists the name, and only
+    with fail_on_conflict (cmd_render) is view-conflict raised (exit 1), so sync, verify --run and hook post keep
+    their own exit code (contract 8). A plan with no hook views writes no key.
+
+    Every text is computed first; writing then happens under the state lock (core.state_lock), on state.json as it is
+    then: render owns only generatedViews, and two renders never interleave a view file."""
     ctx = build_context(root, plan, state)
     comp = ctx["comp"]
     outputs = {"STRUCTURE.md": render_structure(plan, state, comp, ctx), "ROSTER.md": render_roster(plan, state, comp, ctx)}
-    current = state.get("generatedViews") if "generatedViews" in state else []
-    recorded = [n for n in current if isinstance(n, str) and _VIEW_NAME.match(n) and n not in RESERVED_VIEWS]         if isinstance(current, list) else []
     hook = _hook_views(ctx)
-    conflicts = {n: mod for n, (mod, _) in hook.items() if n not in recorded and (bp_dir(root) / n).exists()}
+    m = render_map(plan, state, comp, ctx)
+    if check:
+        return _put_views(root, state, outputs, hook, m, quiet, True, fail_on_conflict)
+    with state_lock(root):
+        fresh = load_state(root)
+        try:
+            return _put_views(root, fresh, outputs, hook, m, quiet, False, fail_on_conflict)
+        finally:
+            if "generatedViews" in fresh:
+                state["generatedViews"] = fresh["generatedViews"]
+
+
+def _put_views(root, state, outputs, hook, m, quiet, check, fail_on_conflict):
+    """render_all after the texts are computed (with check=False, called holding the state lock)."""
+    current = state.get("generatedViews") if "generatedViews" in state else []
+    recorded = [n for n in current if isinstance(n, str) and _VIEW_NAME.fullmatch(n) and n not in RESERVED_VIEWS]         if isinstance(current, list) else []
+    conflicts = {n: mod for n, (mod, _) in hook.items()
+                 if n not in recorded and (bp_dir(root) / n).exists() and not _adoptable(bp_dir(root) / n)}
     views = {n: text for n, (_, text) in hook.items() if n not in conflicts}
     outputs.update(views)
     if not check:
         union = sorted(set(recorded) | set(views))
         if union != current:
             state["generatedViews"] = union
-            save_state(root, state)
-    m = render_map(plan, state, comp, ctx)
+            write_state(root, state)
     if m is not None:
         outputs["map.html"] = m
-    stale = []
+    stale, blocked = [], {}
     for name, text in outputs.items():
         path = bp_dir(root) / name
         if check:
             if not path.exists() or path.read_text(encoding="utf-8") != text:
                 stale.append(name)
-        elif write_text_if_changed(path, text) and not quiet:
-            print(f"wrote .blueprint/{name}")
+        else:
+            try:
+                changed = _write_view(path, text)
+            except ViewBlocked as e:  # reported like a view conflict below
+                blocked[name] = str(e)
+                continue
+            if changed and not quiet:
+                print(f"wrote .blueprint/{name}")
     for name in recorded:
         path = bp_dir(root) / name
         if name in outputs or not path.exists():
@@ -126,14 +281,18 @@ def render_all(root, plan, state, quiet=False, check=False):
                 print(f"removed .blueprint/{name} (nothing to show)")
     if not check and sorted(views) != state.get("generatedViews", []):
         state["generatedViews"] = sorted(views)
-        save_state(root, state)
+        write_state(root, state)
     for name, mod in sorted(conflicts.items()):
         print(f"render: .blueprint/{name} exists and was not written by blueprint.py, but the view module {mod} writes "
               "that name; move or rename it, then run render again.", file=sys.stderr)
         stale.append(name)
     if m is None and not quiet:
         print("map.template.html not found next to the script; map.html skipped. Run init --refresh-tool.")
-    if conflicts and not check:
-        raise BlueprintError("view-conflict", f"{len(conflicts)} view(s) not written: " + ", ".join(sorted(conflicts)),
-                             next="move or rename the file(s) named above, then run render")
+    for name, line in sorted(blocked.items()):
+        print(line, file=sys.stderr)
+        stale.append(name)
+    not_written = sorted(set(conflicts) | set(blocked))
+    if not_written and not check and fail_on_conflict:
+        raise BlueprintError("view-conflict", f"{len(not_written)} view(s) not written: " + ", ".join(not_written),
+                             next=f"move or rename the file(s) named above, then run: {run_hint(root, 'render')}")
     return stale
