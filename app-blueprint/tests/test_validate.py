@@ -1240,6 +1240,482 @@ class FindingsTest(HermeticRoot):
 MARK = '"__DEEP__"'
 
 
+# ------------------------------------------------------------------------------- values JSON cannot write back
+
+def tree_bytes(root):
+    """{relative path: bytes} of every file under .blueprint (what a refused command must leave as it was)."""
+    d = root / ".blueprint"
+    return {str(p.relative_to(d)): p.read_bytes() for p in sorted(d.rglob("*")) if p.is_file()}
+
+
+def _put(path, value):
+    """A change to a plan dict: set the value at path (a list of keys and indexes)."""
+    def change(plan):
+        node = plan
+        for k in path[:-1]:
+            node = node[k]
+        node[path[-1]] = value
+    return change
+
+
+def _key(plan):
+    plan["app"]["x\udc80y"] = 1
+
+
+UNUSABLE = [  # (label, change to the plan dict, the key path the error names, the message's description)
+    ("lone surrogate", _put(["app", "name"], "Snag \ud800 Desk"), "app.name",
+     "an unpaired surrogate (\\ud800), which is not valid Unicode"),
+    ("low surrogate in a list", _put(["files", 1, "dependsOn"], ["\udfff"]), "files[1].dependsOn[0]",
+     "an unpaired surrogate (\\udfff), which is not valid Unicode"),
+    ("surrogate in a key", _key, "the key app.x\\udc80y", "an unpaired surrogate (\\udc80), which is not valid Unicode"),
+    ("NaN", _put(["app", "extra"], [1, {"n": float("nan")}]), "app.extra[1].n",
+     "a number that is not finite (NaN), which JSON does not have"),
+    ("Infinity", _put(["app", "extra"], float("inf")), "app.extra",
+     "a number that is not finite (Infinity), which JSON does not have"),
+    ("-Infinity", _put(["app", "extra"], float("-inf")), "app.extra",
+     "a number that is not finite (-Infinity), which JSON does not have"),
+    ("1e400", _put(["app", "extra"], "@BIG@"), "app.extra",
+     "a number that is not finite (Infinity), which JSON does not have"),
+]
+
+
+def unusable_text(version, change):
+    """The plan text with the change: json.dumps writes a lone surrogate as an escape and NaN/Infinity as such."""
+    plan = v1_plan() if version == 1 else v2_plan()
+    change(plan)
+    return json.dumps(plan, indent=2).replace('"@BIG@"', "1e400")
+
+
+class UnusableJsonTest(TempRoot):
+    """A plan holding a value JSON cannot write back (a lone surrogate, NaN, Infinity, or a number too large) is the
+    bad-json load error naming its key path, for every command and both schema versions, migrate included; in
+    state.json it is bad-state. Nothing is written."""
+
+    COMMANDS = [(["validate"], 1), (["validate", "--json"], 1), (["status"], 1), (["status", "--json"], 1),
+                (["status", "--next"], 1), (["sync"], 1), (["render"], 1), (["render", "--force"], 1),
+                (["export", "json"], 1), (["export", "csv"], 1), (["claim", "Cargo.toml", "--by", "cto-architect"], 1),
+                (["mark", "Cargo.toml", "built", "--by", "cto-architect"], 1), (["verify"], 1), (["migrate"], 1),
+                (["migrate", "--dry-run"], 1), (["guard", "Cargo.toml"], 2)]
+
+    def test_every_command_refuses_the_plan(self):
+        for version in (1, 2):
+            for label, put, where, what in UNUSABLE:
+                text = unusable_text(version, put)
+                (self.root / ".blueprint" / "blueprint.json").write_text(text, encoding="utf-8")
+                before = tree_bytes(self.root)
+                message = f"blueprint.json cannot be used: {where} holds {what}"
+                for argv, code in self.COMMANDS:
+                    with self.subTest(version=version, value=label, cmd=" ".join(argv)):
+                        r = self.cli(*argv)
+                        self.assertEqual(r.returncode, code, r.stdout + r.stderr)
+                        self.assertNotIn("Traceback", r.stderr)
+                        if "--json" in argv:
+                            env = json.loads(r.stdout)
+                            self.assertEqual((env["ok"], env["error"]["code"], env["error"]["message"]),
+                                             (False, "bad-json", message))
+                        else:
+                            self.assertIn(message, r.stderr)
+                        self.assertEqual(tree_bytes(self.root), before, "nothing is written")
+
+    def test_load_raw_plan_is_the_one_place(self):
+        from bp import plan as P
+        text = unusable_text(2, UNUSABLE[0][1])
+        (self.root / ".blueprint" / "blueprint.json").write_text(text, encoding="utf-8")
+        for fn in (P.load_raw_plan, P.load_plan):
+            with self.subTest(fn=fn.__name__):
+                with self.assertRaises(SystemExit) as cm:
+                    quiet(fn, self.root)
+                self.assertEqual((cm.exception.code, cm.exception.error), (1, "bad-json"))
+
+    def test_hook_pre_fails_closed(self):
+        (self.root / ".blueprint" / "blueprint.json").write_text(unusable_text(2, UNUSABLE[3][1]), encoding="utf-8")
+        payload = json.dumps({"cwd": str(self.root), "tool_input": {"file_path": str(self.root / "Cargo.toml")}})
+        r = S.run_script(self.launcher(), ["hook", "pre"], self.root, stdin=payload, env=S.tool_env())
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("blueprint.json cannot be used: app.extra[1].n holds a number that is not finite (NaN)", r.stderr)
+
+    def test_the_same_values_in_state_are_bad_state(self):
+        self.write_plan(v2_plan())
+        cases = [('{"files": {"Cargo.toml": {"state": "built", "note": "a\\ud800"}}}',
+                  'files["Cargo.toml"].note', "an unpaired surrogate (\\ud800), which is not valid Unicode"),
+                 ('{"files": {}, "syncedAt": NaN}', "syncedAt", "a number that is not finite (NaN), which JSON does not have"),
+                 ('{"files": {}, "x": [1e999]}', "x[0]", "a number that is not finite (Infinity), which JSON does not have")]
+        for text, where, what in cases:
+            (self.root / ".blueprint" / "state.json").write_text(text, encoding="utf-8")
+            self.touch("Cargo.toml")
+            before = tree_bytes(self.root)
+            for argv in (["status"], ["status", "--json"], ["sync"], ["mark", "Cargo.toml", "built", "--by", "cto-architect"]):
+                with self.subTest(state=text, cmd=" ".join(argv)):
+                    r = self.cli(*argv)
+                    self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                    self.assertNotIn("Traceback", r.stderr)
+                    shown = json.loads(r.stdout)["error"] if "--json" in argv else None
+                    msg = f".blueprint/state.json is damaged: {where} holds {what}"
+                    if shown:
+                        self.assertEqual((shown["code"], shown["message"]), ("bad-state", msg))
+                    else:
+                        self.assertIn(msg, r.stderr)
+                    # state.json and every other file are left as they are; taking the lock may add state.lock and
+                    # its .gitignore lines (core.state_lock), which are not project content
+                    lock = {"state.lock", ".gitignore"}
+                    self.assertEqual({k: v for k, v in tree_bytes(self.root).items() if k not in lock},
+                                     {k: v for k, v in before.items() if k not in lock}, "state.json is left as it is")
+
+    def test_a_clean_plan_is_unchanged(self):  # the check costs nothing to a plan without such values
+        self.write_plan(v2_plan())
+        self.assertEqual(self.cli("validate").returncode, 0)
+        plan = v2_plan()
+        plan["app"]["name"] = "Snag \U0001F600 Desk \u2028"  # a real astral character and a separator are fine
+        plan["app"]["extra"] = [1.5, -0.0, 1e308, 10 ** 30]
+        self.write_plan(plan)
+        self.assertEqual(self.cli("validate").returncode, 0)
+
+
+class LoadNextTest(TempRoot):
+    """Item 2: the load errors' and the schema-v1 warning's next run as printed. The schema-v1 finding is data
+    (validate --json), so it holds nothing machine-specific: the copy's form when the copy has migrate, else the
+    portable <skill> form."""
+
+    def hint(self, args):
+        return f'python "{S.SCRIPTS / "blueprint.py"}" {args} --root "{self.root.resolve()}"'
+
+    def copy(self, *modules):
+        bin_ = self.root / ".blueprint" / "bin"
+        (bin_ / "bp" / "commands").mkdir(parents=True, exist_ok=True)
+        (bin_ / "blueprint.py").write_text("# copy\n", encoding="utf-8")
+        for m in modules:
+            (bin_ / "bp" / (m + ".py")).write_text("# copy\n", encoding="utf-8")
+
+    def test_load_errors(self):
+        r = self.cli("status", "--json")
+        self.assertEqual(json.loads(r.stdout)["error"]["next"], self.hint('init --name "App name"'))
+        (self.root / ".blueprint" / "blueprint.json").write_text("{", encoding="utf-8")
+        r = self.cli("status", "--json")
+        self.assertEqual(json.loads(r.stdout)["error"]["next"], f"fix .blueprint/blueprint.json, then run: {self.hint('validate')}")
+        self.write_plan({"version": 2, "files": 5})
+        r = self.cli("status", "--json")
+        self.assertEqual(json.loads(r.stdout)["error"]["code"], "bad-shape")
+        self.assertEqual(json.loads(r.stdout)["error"]["next"], f"fix .blueprint/blueprint.json, then run: {self.hint('validate')}")
+        self.copy()
+        r = self.cli("status", "--json")
+        self.assertEqual(json.loads(r.stdout)["error"]["next"],
+                         "fix .blueprint/blueprint.json, then run: python .blueprint/bin/blueprint.py validate")
+
+    def test_schema_v1_warning(self):
+        self.write_plan(v1_plan())
+        first = json.loads(self.cli("validate", "--json").stdout)["data"]["warnings"][0]
+        self.assertEqual((first["code"], first["next"]), ("schema-v1", self.hint("migrate")))  # F3, F10: runnable
+        self.copy("commands/migrate")
+        first = json.loads(self.cli("validate", "--json").stdout)["data"]["warnings"][0]
+        self.assertEqual(first["next"], "python .blueprint/bin/blueprint.py migrate")
+
+
+# ---------------------------------------------------------------------------------- next texts that run as printed
+
+PORTABLE_NOTE = " (run from the project folder)"
+# folder names a shell would run or expand when pasted inside double quotes (bash, PowerShell, cmd)
+HOSTILE_DIRS = ["a$(touch PWNED)b", "a`touch PWNED`b", "a%PATH%b", "a!b", "a&b", "a;b", "a'b", "a$HOME", "a^b"]
+if os.name != "nt":
+    HOSTILE_DIRS += ['a"b', "a\\", "a\\b"]  # bash collapses \\\\ inside double quotes (R2-3)
+SAFE_DIRS = ["plain", "with space", "p(1)[2]", "a+b,c@d=e", "été 日本", "x-y_z.w",
+             "RUNNER~1", "~start", "~user x"]  # ~ is literal inside double quotes in all three shells (CI: 8.3 names)
+
+
+class RunHintTest(unittest.TestCase):
+    """Review of #17, F8: run_hint never prints a command that runs something else when pasted. A path goes inside the
+    command only when every character is literal inside double quotes in bash, PowerShell and cmd (letters and
+    digits, non-ASCII ones too, space and - _ . / \\ : + , @ = ( ) [ ], not ending in a backslash). Otherwise: the copy
+    form when the project's copy has the command, else the portable form with the <skill> placeholder."""
+
+    def setUp(self):
+        self.base = Path(tempfile.mkdtemp(prefix="bp-hint-"))
+        self.addCleanup(shutil.rmtree, self.base, True)
+
+    def project(self, name, plan=True):
+        root = self.base / name
+        (root / ".blueprint").mkdir(parents=True, exist_ok=True)
+        if plan:
+            (root / ".blueprint" / "blueprint.json").write_text(json.dumps(v2_plan(), indent=2), encoding="utf-8")
+        return root
+
+    def test_the_rule(self):
+        for name in SAFE_DIRS:
+            with self.subTest(name=name):
+                root = self.project(name)
+                self.assertEqual(core.run_hint(root, "status"), f'python "{core.TOOL_HOME / "blueprint.py"}" status --root "{root}"')
+        for name in HOSTILE_DIRS:
+            with self.subTest(name=name):
+                root = self.project(name)
+                hint = core.run_hint(root, "status")
+                self.assertEqual(hint, "python <skill>/scripts/blueprint.py status --root ." + PORTABLE_NOTE)
+                bin_ = root / ".blueprint" / "bin"
+                (bin_ / "bp").mkdir(parents=True)
+                (bin_ / "blueprint.py").write_text("# copy\n", encoding="utf-8")
+                self.assertEqual(core.run_hint(root, "status"), "python .blueprint/bin/blueprint.py status")
+                self.assertEqual(core.run_hint(root, "migrate", "commands/migrate"),
+                                 "python <skill>/scripts/blueprint.py migrate --root ." + PORTABLE_NOTE)
+        root = self.project("plain2")
+        with mock.patch.object(core, "TOOL_HOME", Path(str(self.base / "tool$(x)"))):
+            self.assertEqual(core.run_hint(root, "status"), "python <skill>/scripts/blueprint.py status --root ." + PORTABLE_NOTE)
+        with mock.patch.object(core, "TOOL_HOME", Path(str(self.base / "tool"))):  # use_copy=False: never the copy
+            bin_ = root / ".blueprint" / "bin"
+            (bin_ / "bp").mkdir(parents=True)
+            (bin_ / "blueprint.py").write_text("# copy\n", encoding="utf-8")
+            self.assertEqual(core.run_hint(root, "init --refresh-tool", use_copy=False),
+                             f'python "{self.base / "tool" / "blueprint.py"}" init --refresh-tool --root "{root}"')
+
+    def shells(self):
+        """(name, how to run a pasted line) for the shells of this OS: the line is written to a script file, as pasting
+        it into an interactive prompt would run it."""
+        out = []
+        if os.name == "nt":
+            if shutil.which("powershell"):
+                out.append(("powershell", ".ps1", lambda f: ["powershell", "-NoProfile", "-NonInteractive",
+                                                             "-ExecutionPolicy", "Bypass", "-File", str(f)]))
+            out.append(("cmd", ".cmd", lambda f: ["cmd", "/d", "/c", str(f)]))
+        elif shutil.which("bash"):
+            out.append(("bash", ".sh", lambda f: ["bash", "--norc", str(f)]))
+        return out
+
+    def paste(self, line, cwd, suffix, argv):
+        script = self.base / ("pasted" + suffix)
+        text = ("@echo off\r\nchcp 65001 >nul\r\n" + line + "\r\n") if suffix == ".cmd" else line + "\n"
+        script.write_text(text, encoding="utf-8-sig" if suffix == ".ps1" else "utf-8")
+        env = S.tool_env(PYTHONIOENCODING="utf-8")
+        exe = os.path.dirname(sys.executable)
+        env["PATH"] = exe + os.pathsep + env.get("PATH", "")
+        if os.name != "nt":  # the printed command says `python`; a system with only python3 gets a shim, as a user would
+            shim = self.base / "shim"
+            if not (shim / "python").exists():
+                shim.mkdir(exist_ok=True)
+                os.symlink(sys.executable, shim / "python")
+            env["PATH"] = str(shim) + os.pathsep + env["PATH"]
+        if os.name == "nt" and not (Path(exe) / "python.exe").is_file():
+            self.skipTest("no python.exe on PATH for the shells")
+        return subprocess.run(argv(script), cwd=str(cwd), capture_output=True, text=True, encoding="utf-8", errors="replace",
+                              env=env, timeout=120)
+
+    def test_pasted_commands_run_and_run_nothing_else(self):
+        shells = self.shells()
+        if not shells:
+            self.skipTest("no shell to paste into")
+        if os.name == "nt" and not shutil.which("python"):
+            self.skipTest("python is not on PATH")
+        for name in SAFE_DIRS:  # the path form, pasted: it runs status on that project
+            root = self.project(name)
+            line = core.run_hint(root, "status")
+            for shell, suffix, argv in shells:
+                with self.subTest(name=name, shell=shell):
+                    r = self.paste(line, self.base, suffix, argv)
+                    self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                    self.assertIn("Snag Desk: 5 planned files", r.stdout)
+        scripts_dir = Path(os.path.abspath(os.sep)) / "scripts"
+        had_scripts = scripts_dir.exists()
+        for name in HOSTILE_DIRS:  # no copy: the placeholder form. It is not meant to run; pasted, it runs nothing
+            root = self.project(name)
+            line = core.run_hint(root, "status")
+            self.assertEqual(line, "python <skill>/scripts/blueprint.py status --root ." + PORTABLE_NOTE)
+            for shell, suffix, argv in shells:
+                with self.subTest(name=name, shell=shell, form="placeholder"):
+                    empty = Path(tempfile.mkdtemp(prefix="paste-", dir=self.base))
+                    r = self.paste(line, empty, suffix, argv)
+                    self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+                    self.assertEqual([x.name for x in empty.iterdir()], [], "nothing is created")
+                    self.assertEqual(scripts_dir.exists(), had_scripts, "the > in <skill> creates nothing")
+        for name in HOSTILE_DIRS:  # no path printed; the copy form, pasted in the project, runs the copy only
+            root = self.project(name)
+            r = S.run_script(S.LAUNCHER, ["init", "--refresh-tool", "--root", root], root)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            line = core.run_hint(root, "status")
+            self.assertEqual(line, "python .blueprint/bin/blueprint.py status")
+            for shell, suffix, argv in shells:
+                with self.subTest(name=name, shell=shell):
+                    r = self.paste(line, root, suffix, argv)
+                    self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                    self.assertIn("Snag Desk: 5 planned files", r.stdout)
+        self.assertEqual([p for p in self.base.rglob("PWNED*")], [])
+
+
+class RunHintAsGivenTest(unittest.TestCase):
+    """Review of #17, round 2 (R2-0): run_hint prints the root and the launcher as given (made absolute, never resolved
+    through realpath), so a root under an 8.3 short name stays as the caller spelled it; the allowlist alone decides.
+    R2-3: a backslash is paste-safe on Windows only (bash collapses \\\\ inside double quotes)."""
+
+    def test_an_8_3_short_root_is_printed_as_given(self):
+        if os.name != "nt":
+            self.skipTest("8.3 short names are a Windows thing")
+        import ctypes
+        base = Path(tempfile.mkdtemp(prefix="bp-short-"))
+        self.addCleanup(shutil.rmtree, base, True)
+        long = base / "a long folder name"
+        (long / ".blueprint").mkdir(parents=True)
+        buf = ctypes.create_unicode_buffer(1024)
+        if not ctypes.windll.kernel32.GetShortPathNameW(str(long), buf, 1024) or "~" not in buf.value:
+            self.skipTest("this volume has no 8.3 short names")
+        short = Path(buf.value)
+        self.assertEqual(core.run_hint(short, "status"),
+                         f'python "{core.TOOL_HOME / "blueprint.py"}" status --root "{short}"')
+
+    def test_a_backslash_is_safe_on_windows_only(self):
+        self.assertEqual(core.paste_safe("C:\\x\\y"), os.name == "nt")
+        self.assertFalse(core.paste_safe("a\\"))
+
+
+class SchemaV1ConsoleTest(TempRoot):
+    def test_the_console_warning_runs_as_printed(self):
+        """F10: the console schema-v1 warning names migrate in the runnable form, like the finding's next (F3: printed
+        text may carry real paths; one form for the console and the envelope)."""
+        self.write_plan(v1_plan())
+        hint = f'python "{S.SCRIPTS / "blueprint.py"}" migrate --root "{self.root.resolve()}"'
+        r = self.cli("validate")
+        self.assertIn("warning: blueprint.json is schema version 1; it still works. To use milestones, features, tasks "
+                      f"and unknowns, run: {hint}", r.stdout)
+        first = json.loads(self.cli("validate", "--json").stdout)["data"]["warnings"][0]
+        self.assertEqual(first["next"], hint)
+        self.assertIn(f"run: {hint}", first["message"])
+
+
+class WorkedByTest(TempRoot):
+    """state.files[p].workedBy: every distinct id that ever claimed or marked the entry, in first-seen order. It only
+    grows (status.set_file_state, the one writer); verify and sync never add to it; an older state reads as [by]."""
+
+    PATH = "apps/web/src/Inbox.tsx"
+    OWNER = "frontend-engineer"
+
+    def setUp(self):
+        super().setUp()
+        self.write_plan(v2_plan())
+        self.touch(self.PATH)
+
+    def state(self):
+        return json.loads((self.root / ".blueprint" / "state.json").read_text(encoding="utf-8"))
+
+    def run_ok(self, *argv):
+        r = self.cli(*argv)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return r
+
+    def test_it_grows_and_never_shrinks(self):
+        p, o = self.PATH, self.OWNER
+        self.run_ok("claim", p, "--by", o)
+        self.run_ok("mark", p, "built", "--by", o)
+        self.run_ok("claim", p, "--by", "cto-architect", "--force")
+        self.run_ok("mark", p, "built", "--by", o)
+        self.run_ok("mark", p, "planned", "--by", "backend-lead", "--force")
+        self.assertEqual(self.state()["files"][p]["workedBy"], [o, "cto-architect", "backend-lead"])
+        self.assertEqual(self.state()["files"][p]["by"], "backend-lead")
+        self.run_ok("sync")
+        plan = v2_plan()
+        for m in plan["modules"]:
+            m["verify"] = f'"{sys.executable}" -c pass'
+        for f in plan["files"]:
+            f.pop("verify", None)
+        self.write_plan(plan)
+        self.run_ok("mark", p, "built", "--by", o)
+        self.run_ok("verify", "--run")
+        self.assertEqual(self.state()["files"][p]["workedBy"], [o, "cto-architect", "backend-lead"])
+
+    def test_an_older_state_reads_as_its_last_by(self):
+        from bp import status
+        self.assertEqual(status.worked_by({"state": "claimed", "by": "x"}), ["x"])
+        self.assertEqual(status.worked_by({"state": "planned"}), [])
+        self.assertEqual(status.worked_by({"by": "x", "workedBy": ["a", "x"]}), ["a", "x"])
+        self.assertEqual(status.worked_by(None), [])
+        (self.root / ".blueprint" / "state.json").write_text(json.dumps(
+            {"files": {self.PATH: {"state": "claimed", "by": "old-id", "at": "2026-01-01T00:00:00Z"}}}), encoding="utf-8")
+        self.run_ok("mark", self.PATH, "built", "--by", self.OWNER)
+        self.assertEqual(self.state()["files"][self.PATH]["workedBy"], ["old-id", self.OWNER])
+
+    def test_a_damaged_list_is_bad_state(self):
+        for bad in ("x", [1], {"a": 1}, ["ok", None]):
+            with self.subTest(workedBy=bad):
+                text = json.dumps({"files": {self.PATH: {"state": "claimed", "by": "a", "workedBy": bad}}})
+                (self.root / ".blueprint" / "state.json").write_text(text, encoding="utf-8")
+                for argv in (["status"], ["sync"], ["claim", self.PATH, "--by", self.OWNER]):
+                    r = self.cli(*argv)
+                    self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                    self.assertIn(f'.blueprint/state.json is damaged: files["{self.PATH}"].workedBy must be a list of ids',
+                                  r.stderr)
+                    self.assertEqual((self.root / ".blueprint" / "state.json").read_text(encoding="utf-8"), text)
+
+    def test_a_by_an_older_copy_wrote_joins_the_list(self):
+        """An older copy of the tool (a project copy not refreshed yet) sets by without growing workedBy: worked_by is
+        the list, then by when it is not in it already; a missing or null by adds nothing."""
+        from bp import status
+        self.assertEqual(status.worked_by({"by": "newer", "workedBy": ["a", "b"]}), ["a", "b", "newer"])
+        self.assertEqual(status.worked_by({"by": "a", "workedBy": ["a", "b"]}), ["a", "b"])
+        self.assertEqual(status.worked_by({"by": None, "workedBy": ["a"]}), ["a"])
+        self.assertEqual(status.worked_by({"workedBy": []}), [])
+        (self.root / ".blueprint" / "state.json").write_text(json.dumps(
+            {"files": {self.PATH: {"state": "built", "by": "old-copy", "workedBy": [self.OWNER]}}}), encoding="utf-8")
+        self.run_ok("mark", self.PATH, "built", "--by", "cto-architect", "--force")
+        self.assertEqual(self.state()["files"][self.PATH]["workedBy"], [self.OWNER, "old-copy", "cto-architect"])
+
+    def test_a_damaged_raw_entry_is_never_nobody(self):
+        """worked_by on a raw entry whose workedBy is damaged raises bad-state, like the state reader: it never answers
+        an empty list, which a caller would read as nobody."""
+        from bp import status
+        from bp.core import BlueprintError
+        for bad in ("x", [1], {"a": 1}, ["ok", None], 5):
+            with self.subTest(workedBy=bad):
+                with self.assertRaises(BlueprintError) as cm:
+                    status.worked_by({"by": "a", "workedBy": bad})
+                self.assertEqual(cm.exception.error, "bad-state")
+
+    def test_the_route_through_an_older_tool(self):
+        """R2-1: a1 claims with this tool; an older tool overwrites by with b-old-tool and leaves the list; c1 claims
+        with this tool: all three are in worked_by, and the stored list keeps b-old-tool from then on."""
+        from bp import status
+        p = self.PATH
+        self.run_ok("claim", p, "--by", "a1", "--force")
+        state = self.state()
+        state["files"][p]["by"] = "b-old-tool"  # what a tool without workedBy writes
+        (self.root / ".blueprint" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        self.assertEqual(status.worked_by(self.state()["files"][p]), ["a1", "b-old-tool"])
+        self.run_ok("claim", p, "--by", "c1", "--force")
+        self.assertEqual(self.state()["files"][p]["workedBy"], ["a1", "b-old-tool", "c1"])
+        self.run_ok("claim", p, "--by", "d1", "--force")
+        self.assertEqual(status.worked_by(self.state()["files"][p]), ["a1", "b-old-tool", "c1", "d1"])
+
+    def test_null_reads_as_empty(self):
+        """R2-5: "workedBy": null reads as empty, like the sibling keys; the latest by still counts."""
+        from bp import status
+        self.assertEqual(status.worked_by({"by": "a", "workedBy": None}), ["a"])
+        text = json.dumps({"files": {self.PATH: {"state": "claimed", "by": "a", "workedBy": None}}})
+        (self.root / ".blueprint" / "state.json").write_text(text, encoding="utf-8")
+        self.run_ok("status")
+        self.run_ok("claim", self.PATH, "--by", self.OWNER)
+        self.assertEqual(self.state()["files"][self.PATH]["workedBy"], ["a", self.OWNER])
+
+    def test_parallel_claims_keep_every_id(self):
+        ids = [f"agent-{i}" for i in range(6)]
+        procs = [subprocess.Popen([S.PY, str(S.LAUNCHER), "claim", self.PATH, "--by", i, "--force", "--root", str(self.root)],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=S.tool_env()) for i in ids]
+        for p in procs:
+            self.assertEqual(p.wait(timeout=120), 0, p.stderr.read())
+        self.assertEqual(sorted(self.state()["files"][self.PATH]["workedBy"]), ids)
+
+
+@unittest.skipUnless(os.name == "nt", "a junction is a Windows link")
+class LockKeyJunctionTest(HermeticRoot):
+    def test_a_junction_to_the_project_is_the_same_lock(self):
+        """The lock is keyed by the project's real path: a junction (made without any privilege) names the same project
+        (review of #14; without realpath this test fails on Windows)."""
+        from bp import core
+        self.write_plan(v2_plan())
+        link = Path(tempfile.mkdtemp(prefix="bp-junction-")) / "j"
+        self.addCleanup(shutil.rmtree, link.parent, True)
+        r = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(self.root)], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.addCleanup(lambda: os.path.isdir(link) and os.rmdir(link))
+        self.assertNotEqual(os.path.normcase(str(link)), os.path.normcase(str(self.root)))
+        with core.state_lock(link):
+            self.assertTrue(core._holding(self.root))
+            with self.assertRaises(RuntimeError):
+                with core.state_lock(self.root):
+                    pass
+
+
 def deep_json(depth):
     return "[" * depth + "1" + "]" * depth
 

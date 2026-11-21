@@ -21,7 +21,7 @@ from bp.status import compute, load_state
 from bp.views.context import build_context, merged
 from bp.views.structure import render_structure
 from bp.views.roster import render_roster
-from bp.core import copy_json  # on its own line, apart from the bp.core import above (PR #14 rewrites that one)
+from bp.core import copy_json, run_hint  # on its own line, apart from the bp.core import above (PR #14 rewrites that one)
 
 BASE_VIEWS = ("STRUCTURE.md", "ROSTER.md", "map.html")
 RESERVED_VIEWS = BASE_VIEWS + ("README.md",)  # init writes README.md for people to edit
@@ -243,7 +243,7 @@ def render_all(root, plan, state, quiet=False, check=False, fail_on_conflict=Fal
 def _put_views(root, state, outputs, hook, m, quiet, check, fail_on_conflict):
     """render_all after the texts are computed (with check=False, called holding the state lock)."""
     current = state.get("generatedViews") if "generatedViews" in state else []
-    recorded = [n for n in current if isinstance(n, str) and _VIEW_NAME.match(n) and n not in RESERVED_VIEWS]         if isinstance(current, list) else []
+    recorded = [n for n in current if isinstance(n, str) and _VIEW_NAME.fullmatch(n) and n not in RESERVED_VIEWS]         if isinstance(current, list) else []
     conflicts = {n: mod for n, (mod, _) in hook.items()
                  if n not in recorded and (bp_dir(root) / n).exists() and not _adoptable(bp_dir(root) / n)}
     views = {n: text for n, (_, text) in hook.items() if n not in conflicts}
@@ -294,5 +294,5 @@ def _put_views(root, state, outputs, hook, m, quiet, check, fail_on_conflict):
     not_written = sorted(set(conflicts) | set(blocked))
     if not_written and not check and fail_on_conflict:
         raise BlueprintError("view-conflict", f"{len(not_written)} view(s) not written: " + ", ".join(not_written),
-                             next="move or rename the file(s) named above, then run render")
+                             next=f"move or rename the file(s) named above, then run: {run_hint(root, 'render')}")
     return stale
