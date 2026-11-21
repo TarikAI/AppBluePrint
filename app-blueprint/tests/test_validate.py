@@ -1536,6 +1536,78 @@ class SchemaV1ConsoleTest(TempRoot):
         self.assertIn(f"run: {hint}", first["message"])
 
 
+class WorkedByTest(TempRoot):
+    """state.files[p].workedBy: every distinct id that ever claimed or marked the entry, in first-seen order. It only
+    grows (status.set_file_state, the one writer); verify and sync never add to it; an older state reads as [by]."""
+
+    PATH = "apps/web/src/Inbox.tsx"
+    OWNER = "frontend-engineer"
+
+    def setUp(self):
+        super().setUp()
+        self.write_plan(v2_plan())
+        self.touch(self.PATH)
+
+    def state(self):
+        return json.loads((self.root / ".blueprint" / "state.json").read_text(encoding="utf-8"))
+
+    def run_ok(self, *argv):
+        r = self.cli(*argv)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return r
+
+    def test_it_grows_and_never_shrinks(self):
+        p, o = self.PATH, self.OWNER
+        self.run_ok("claim", p, "--by", o)
+        self.run_ok("mark", p, "built", "--by", o)
+        self.run_ok("claim", p, "--by", "cto-architect", "--force")
+        self.run_ok("mark", p, "built", "--by", o)
+        self.run_ok("mark", p, "planned", "--by", "backend-lead", "--force")
+        self.assertEqual(self.state()["files"][p]["workedBy"], [o, "cto-architect", "backend-lead"])
+        self.assertEqual(self.state()["files"][p]["by"], "backend-lead")
+        self.run_ok("sync")
+        plan = v2_plan()
+        for m in plan["modules"]:
+            m["verify"] = f'"{sys.executable}" -c pass'
+        for f in plan["files"]:
+            f.pop("verify", None)
+        self.write_plan(plan)
+        self.run_ok("mark", p, "built", "--by", o)
+        self.run_ok("verify", "--run")
+        self.assertEqual(self.state()["files"][p]["workedBy"], [o, "cto-architect", "backend-lead"])
+
+    def test_an_older_state_reads_as_its_last_by(self):
+        from bp import status
+        self.assertEqual(status.worked_by({"state": "claimed", "by": "x"}), ["x"])
+        self.assertEqual(status.worked_by({"state": "planned"}), [])
+        self.assertEqual(status.worked_by({"by": "x", "workedBy": ["a", "x"]}), ["a", "x"])
+        self.assertEqual(status.worked_by(None), [])
+        (self.root / ".blueprint" / "state.json").write_text(json.dumps(
+            {"files": {self.PATH: {"state": "claimed", "by": "old-id", "at": "2026-01-01T00:00:00Z"}}}), encoding="utf-8")
+        self.run_ok("mark", self.PATH, "built", "--by", self.OWNER)
+        self.assertEqual(self.state()["files"][self.PATH]["workedBy"], ["old-id", self.OWNER])
+
+    def test_a_damaged_list_is_bad_state(self):
+        for bad in ("x", [1], {"a": 1}, ["ok", None]):
+            with self.subTest(workedBy=bad):
+                text = json.dumps({"files": {self.PATH: {"state": "claimed", "by": "a", "workedBy": bad}}})
+                (self.root / ".blueprint" / "state.json").write_text(text, encoding="utf-8")
+                for argv in (["status"], ["sync"], ["claim", self.PATH, "--by", self.OWNER]):
+                    r = self.cli(*argv)
+                    self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                    self.assertIn(f'.blueprint/state.json is damaged: files["{self.PATH}"].workedBy must be a list of ids',
+                                  r.stderr)
+                    self.assertEqual((self.root / ".blueprint" / "state.json").read_text(encoding="utf-8"), text)
+
+    def test_parallel_claims_keep_every_id(self):
+        ids = [f"agent-{i}" for i in range(6)]
+        procs = [subprocess.Popen([S.PY, str(S.LAUNCHER), "claim", self.PATH, "--by", i, "--force", "--root", str(self.root)],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=S.tool_env()) for i in ids]
+        for p in procs:
+            self.assertEqual(p.wait(timeout=120), 0, p.stderr.read())
+        self.assertEqual(sorted(self.state()["files"][self.PATH]["workedBy"]), ids)
+
+
 @unittest.skipUnless(os.name == "nt", "a junction is a Windows link")
 class LockKeyJunctionTest(HermeticRoot):
     def test_a_junction_to_the_project_is_the_same_lock(self):
