@@ -709,7 +709,7 @@ def worked_by(rec):
             ids += [x for x in rec["workedBy"] if isinstance(x, str)]
         if isinstance(rec.get("by"), str):
             ids.append(rec["by"])
-    return ids
+    return list(dict.fromkeys(ids))
 
 
 def independence_problem(plan, feature, items, by, state=None, _roster=None):

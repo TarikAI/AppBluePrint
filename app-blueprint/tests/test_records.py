@@ -2363,8 +2363,9 @@ class ReviewTwoTest(Project):
         for by in ("evaluator", "cto-architect"):
             r = self.cli("accept", FID, "--by", by, "--mode", "cli", "--result", "C3=pass", "--json")
             out = json.loads(r.stdout)
-            self.assertEqual((r.returncode, out["error"]["code"]), (3, "not-independent"), r.stdout)
-        # the core may call this bad-state first; this module never reads it as "nobody worked on it"
+            # with the core's state check the damage is bad-state (1) before accept looks; without it this module refuses (3)
+            self.assertIn((r.returncode, out["error"]["code"]), ((3, "not-independent"), (1, "bad-state")), r.stdout)
+            self.assertFalse(any(x["kind"] == "evaluation" for x in self.records()))
 
     # ---- R2-7 and R2-8: evidence
     def test_r2_7_a_string_or_bytes_cannot_answer_membership(self):
