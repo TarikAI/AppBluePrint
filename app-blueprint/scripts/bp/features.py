@@ -11,6 +11,7 @@ status_card. FEATURES.md is the views hook of bp/views/features_md.py, which rea
 """
 import json
 import re
+import unicodedata
 from pathlib import Path
 
 from bp.core import BlueprintError, norm, run_hint
@@ -669,12 +670,87 @@ def roster_ids(plan):
     return out
 
 
-def independent_ids(plan, feature, items, _roster=None):
-    """The roster ids that may accept a feature: not its owner and owning none of its items (4.4). Whether an id may
-    accept depends on ownership alone, never on a roster entry's own fields, so an id listed twice is one id."""
-    owners = {owner_of(plan, it["path"])[0] for it in items}
-    owner = _s(feature.get("owner"))
-    return [r for r in (_roster if _roster is not None else roster_ids(plan)) if r != owner and r not in owners]
+def _fold(s):
+    """The form in which two ids are compared for independence only (never to allow anything): compatibility
+    characters, case and outer whitespace are folded, so ids that fold to one value are one person here."""
+    return unicodedata.normalize("NFKC", s).strip().casefold()
+
+
+def _same_person(a, b):
+    return isinstance(a, str) and isinstance(b, str) and _fold(a) != "" and (a == b or _fold(a) == _fold(b))
+
+
+def worked_damage(rec):
+    """True when a file record's `workedBy` is present but is not a list of strings (null counts as absent), or the
+    record itself is neither an object nor null: nobody can then be shown to be independent of that file."""
+    if rec is None:
+        return False
+    if not isinstance(rec, dict):
+        return True
+    wb = rec.get("workedBy")
+    return wb is not None and not (isinstance(wb, list) and all(isinstance(x, str) for x in wb))
+
+
+def worked_by(rec):
+    """Every id recorded as having claimed or marked a file: always the union of the core's `status.worked_by` answer
+    (when the core has that reader), the `workedBy` list of the record and its latest `by`. A damaged `workedBy`
+    contributes nothing here; `worked_damage` says it is damaged and `independence_problem` then refuses everyone."""
+    ids = []
+    try:
+        from bp import status
+        reader = getattr(status, "worked_by", None)
+        if callable(reader) and isinstance(rec, dict):
+            got = reader(rec)
+            ids += [x for x in got if isinstance(x, str)] if isinstance(got, (list, tuple, set)) else []
+    except (ImportError, TypeError, ValueError, AttributeError, BlueprintError):
+        pass  # a damaged value is judged by worked_damage, never read as "nobody"
+    if isinstance(rec, dict):
+        if isinstance(rec.get("workedBy"), list):
+            ids += [x for x in rec["workedBy"] if isinstance(x, str)]
+        if isinstance(rec.get("by"), str):
+            ids.append(rec["by"])
+    return list(dict.fromkeys(ids))
+
+
+def independence_problem(plan, feature, items, by, state=None, _roster=None):
+    """Why `by` may not accept the feature, or None: the one rule behind `accept` and the ROSTER.md table (4.4).
+    `by` must be a roster id (whole value, never blank), and must not be the feature's owner, the owner (by the owner
+    rules) of any item, or an id recorded for any item as having claimed or marked it (`state["files"][path]`: every id
+    in `workedBy`, which the core grows with each claim and mark, and the latest `by`). Independence covers the
+    feature's items, not the files they depend on: someone who wrote a `dependsOn` file may still accept.
+    Ids are compared whole-value, except that two ids that fold to the same value (NFKC, case, outer whitespace)
+    count as one person: that can only refuse."""
+    files = state.get("files") if isinstance(state, dict) and isinstance(state.get("files"), dict) else {}
+    for it in items:  # a damaged record is judged first, for every id: nobody can be shown to be independent of it
+        path = it.get("path") if isinstance(it, dict) else None
+        if isinstance(path, str) and worked_damage(files.get(path)):
+            return (f"the record of {path} in .blueprint/state.json is damaged (workedBy must be a list of ids), so nobody can be "
+                    "shown to be independent of it: repair .blueprint/state.json")
+    roster = _roster if _roster is not None else roster_ids(plan)
+    if not isinstance(by, str) or not by.strip() or by not in roster:
+        return f"{by!r} is not in the roster"
+    if _same_person(by, feature.get("owner")):
+        return f"{by} is the owner of {_s(feature.get('id')) or 'the feature'}"
+    for it in items:
+        path = it.get("path") if isinstance(it, dict) else None
+        if not isinstance(path, str):
+            continue
+        try:
+            owner = owner_of(plan, path)[0]
+        except (KeyError, TypeError, AttributeError):
+            owner = None
+        if _same_person(by, owner):
+            return f"{by} owns {path}, which serves {_s(feature.get('id')) or 'the feature'}"
+        if any(_same_person(by, who) for who in worked_by(files.get(path))):
+            return f"{by} claimed or built {path}, which serves {_s(feature.get('id')) or 'the feature'}"
+    return None
+
+
+def independent_ids(plan, feature, items, _roster=None, state=None):
+    """The roster ids that may accept a feature (4.4), by independence_problem: not its owner, owning none of its
+    items and not recorded as having claimed or built one. An id listed twice is one id."""
+    roster = _roster if _roster is not None else roster_ids(plan)
+    return [r for r in roster if independence_problem(plan, feature, items, r, state, roster) is None]
 
 
 def _cell(v):
@@ -704,7 +780,7 @@ def roster_sections(ctx):
     for f in feats:
         if f["draft"]:
             continue
-        who = independent_ids(plan, index.get(f["id"], {}), f["items"], roster)
+        who = independent_ids(plan, index.get(f["id"], {}), f["items"], roster, ctx.get("state"))
         body.append(f"| {_cell(f['id'])} | {_cell(', '.join(who)) if who else '(nobody: add an evaluator to the roster)'} |")
     sec.append(("Who may accept what", "\n".join(body)))
     return sec
