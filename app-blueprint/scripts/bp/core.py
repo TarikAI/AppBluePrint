@@ -8,6 +8,7 @@ import datetime as _dt
 import errno
 import hashlib
 import json
+import math
 import os
 import random
 import re
@@ -54,6 +55,49 @@ def read_json(path, default=None):
         return default
     with path.open(encoding="utf-8") as f:
         return json.load(f)
+
+
+_SURROGATE = re.compile("[\\ud800-\\udfff]")
+_PLAIN_KEY = re.compile(r"[^.\[\]\"]+")
+
+
+def _key_path(where, key):
+    """where + one key, as the load errors name it: a.b for a plain key, a["x.y"] for a key with '.', '[', ']' or '"'
+    (or an empty one); an unpaired surrogate is shown as its \\uXXXX escape, so the text prints anywhere."""
+    shown = key.encode("utf-8", "backslashreplace").decode("utf-8")
+    if _PLAIN_KEY.fullmatch(key):
+        return f"{where}.{shown}" if where else shown
+    return f'{where}["{shown}"]'
+
+
+def unusable_json(value):
+    """(key path, what) for the first value of parsed JSON that the tool could not write back faithfully, else None:
+    a string or key holding an unpaired surrogate (json reads the escape \\ud800 alone into one, and no UTF-8 file can
+    hold it), or a number that is not finite (NaN, Infinity, -Infinity, or a literal too large such as 1e400, which
+    Python's JSON reader accepts and JSON does not have). Walked without recursion, in document order."""
+    stack = [("", value)]
+    while stack:
+        where, v = stack.pop()
+        if isinstance(v, str):
+            m = _SURROGATE.search(v)
+            if m:
+                return where or "the top level", _surrogate(m.group(0))
+        elif isinstance(v, float) and not math.isfinite(v):
+            return where or "the top level", (f"a number that is not finite ({'NaN' if v != v else 'Infinity' if v > 0 else '-Infinity'}), "
+                                               "which JSON does not have")
+        elif isinstance(v, dict):
+            for k in v:
+                m = _SURROGATE.search(k) if isinstance(k, str) else None
+                if m:
+                    return "the key " + _key_path(where, k), _surrogate(m.group(0))
+            stack.extend((_key_path(where, k), x) for k, x in reversed(list(v.items())))
+        elif isinstance(v, list):
+            stack.extend((f"{where}[{i}]", x) for i, x in reversed(list(enumerate(v))))
+    return None
+
+
+def _surrogate(ch):
+    return f"an unpaired surrogate (\\u{ord(ch):04x}), which is not valid Unicode"
 
 
 def _retry_windows(fn, *args, budget=2.0):
@@ -443,14 +487,37 @@ _STATE_TMP = re.compile(r"^state\.json\.\d+-[0-9a-f]{8}\.tmp$")  # write_json's 
 _HELD = set()  # the lock files this process holds: the lock is never nested, so a second take is a bug
 
 
-def run_hint(root, args, module=None):
-    """A command line that runs as printed: `python .blueprint/bin/blueprint.py <args>` when the project's copy has
-    the command (module, e.g. "commands/roadmap", names the file it needs; None: any copy), else this running tool
-    with --root."""
+# characters that are literal inside double quotes in bash, PowerShell and cmd (besides letters and digits, which
+# str.isalnum accepts in any script): a path made only of these can be printed inside a command (review of #17, F8)
+# ~ is literal inside double quotes too (8.3 short names hold it); a backslash only on Windows: bash reads \\\\ inside
+# double quotes as one backslash (review of #17, R2-3)
+PASTE_SAFE = frozenset(" -_./:+,@=()[]~" + ("\\" if os.name == "nt" else ""))
+PORTABLE_NOTE = " (run from the project folder)"
+
+
+def paste_safe(text):
+    """True when `text` can go inside double quotes in a printed command: every character a letter, a digit (any
+    script) or in PASTE_SAFE, and no backslash at the end (in bash it would escape the closing quote)."""
+    return bool(text) and all(c.isalnum() or c in PASTE_SAFE for c in text) and not text.endswith("\\")
+
+
+def run_hint(root, args, module=None, use_copy=True):
+    """A command line that runs as printed, and runs nothing else when pasted into bash, PowerShell or cmd:
+    - the project's copy, `python .blueprint/bin/blueprint.py <args>`, when it has the command (module, e.g.
+      "commands/roadmap", names the file it needs; None: any copy) and use_copy is true (no path in it);
+    - else this running tool, `python "<launcher>" <args> --root "<root>"`, when both paths are paste_safe;
+    - else the portable form, `python <skill>/scripts/blueprint.py <args> --root . (run from the project folder)`.
+    args is the tool's own text (a subcommand and flags), never something a caller typed."""
     copy = bp_dir(root) / "bin"
-    if (copy / "blueprint.py").is_file() and (module is None or (copy / "bp" / (module + ".py")).is_file()):
+    if use_copy and (copy / "blueprint.py").is_file() and (module is None or (copy / "bp" / (module + ".py")).is_file()):
         return f"python .blueprint/bin/blueprint.py {args}"
-    return f'python "{TOOL_HOME / "blueprint.py"}" {args} --root "{root}"'
+    # as given, made absolute, never resolved (review of #17, R2-0): an 8.3 short name such as RUNNER~1 stays as the
+    # caller spelled it, a link still names the same project (the state lock is keyed by the real path); the
+    # allowlist alone decides between this form and the fallback
+    launcher, where = os.path.abspath(TOOL_HOME / "blueprint.py"), os.path.abspath(root)
+    if paste_safe(launcher) and paste_safe(where):
+        return f'python "{launcher}" {args} --root "{where}"'
+    return f"python <skill>/scripts/blueprint.py {args} --root .{PORTABLE_NOTE}"
 
 
 def _bad_state(why, next, name="state.json"):  # noqa: A002 (next is the contract's name)
@@ -709,6 +776,11 @@ def _files_damage(raw):
     for p, rec in raw["files"].items():
         if not isinstance(rec, dict):
             return f"files[{json.dumps(p, ensure_ascii=False)}] must be an object (got {_json_kind(rec)})"
+        ids = rec.get("workedBy") or []  # null reads as empty, like the sibling keys (review of #17, R2-5)
+        if not isinstance(ids, list) or any(not isinstance(x, str) for x in ids):
+            bad = ids if not isinstance(ids, list) else next(x for x in ids if not isinstance(x, str))
+            return (f"files[{json.dumps(p, ensure_ascii=False)}].workedBy must be a list of ids "
+                    f"(got {_json_kind(bad)}{'' if not isinstance(ids, list) else ' in it'})")
     return None
 
 
@@ -836,6 +908,9 @@ def read_state(root, prepare=None, owned=()):
                              "(nested too deeply)", fix) from None
         if not isinstance(raw, dict):
             raise _bad_state(f"must be a JSON object (got {_json_kind(raw)})", fix)
+        bad = unusable_json(raw)  # a value no write could keep: refused, as a plan holding one is
+        if bad:
+            raise _bad_state(f"is damaged: {bad[0]} holds {bad[1]}", fix)
         why = _damage(raw, owned)
         if why:
             raise _bad_state(f"is damaged: {why}", fix)

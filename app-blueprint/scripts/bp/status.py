@@ -9,7 +9,7 @@ import re
 import subprocess
 
 from bp import core
-from bp.core import die, norm, now_iso
+from bp.core import BlueprintError, die, norm, now_iso
 from bp.globs import glob_match, pattern_instance_rx
 from bp.migrate import upgrade_state
 from bp.plan import DEFAULT_IGNORE, STATES, features_of, item_verify, owner_of, phase_index, planned_file
@@ -263,12 +263,38 @@ def require_owner(plan, path, by, force):
         die(f"{path} is owned by {owner}, not {by}. Ask its owner, or use --force if you are the lead reassigning it.", 3)
 
 
+def worked_by(entry):
+    """Every id that claimed or marked a file entry: the ids of state.files[p].workedBy in first-seen order, then the
+    entry's latest by when it is not among them (an older copy of the tool sets by without growing the list; an entry
+    written before the key existed, or with a null list, reads as [by]). A missing or null by adds nothing; no entry
+    is []. A workedBy that
+    is not a list of strings raises bad-state, as the state reader does: never an empty list a caller would read as
+    nobody. Public: the features and records modules read it."""
+    if not isinstance(entry, dict):
+        return []
+    ids = entry.get("workedBy")
+    ids = [] if ids is None else ids  # missing or null reads as empty, as at load (core._files_damage)
+    if not isinstance(ids, list) or any(not isinstance(x, str) for x in ids):
+        raise BlueprintError("bad-state", ".blueprint/state.json is damaged: a file entry's workedBy must be a list of ids",
+                             entry=".blueprint/state.json",
+                             next="fix .blueprint/state.json or move it away (progress is then tracked from scratch)")
+    out = list(dict.fromkeys(ids))
+    by = entry.get("by")
+    if isinstance(by, str) and by and by not in out:
+        out.append(by)
+    return out
+
+
 def set_file_state(root, path, new_state, by, note=None):
     """claim and mark: one file's record (state, by, at, note; planned drops its proof), changed under the state lock
-    on the state as it is then, with its log line."""
+    on the state as it is then, with its log line. workedBy only grows: by joins it (once, as given) and nothing here
+    or elsewhere removes an id; only the entry's own removal does (verify and sync never touch it)."""
     def change(state):
         rec = state["files"].setdefault(path, {})
-        rec.update({"state": new_state, "by": by, "at": now_iso()})
+        ids = worked_by(rec)
+        if isinstance(by, str) and by and by not in ids:
+            ids.append(by)
+        rec.update({"state": new_state, "by": by, "at": now_iso(), "workedBy": ids})
         if note is not None:
             rec["note"] = note
         if new_state == "planned":
