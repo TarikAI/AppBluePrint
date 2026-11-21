@@ -1416,7 +1416,7 @@ PORTABLE_NOTE = " (run from the project folder)"
 # folder names a shell would run or expand when pasted inside double quotes (bash, PowerShell, cmd)
 HOSTILE_DIRS = ["a$(touch PWNED)b", "a`touch PWNED`b", "a%PATH%b", "a!b", "a&b", "a;b", "a'b", "a$HOME", "a^b"]
 if os.name != "nt":
-    HOSTILE_DIRS += ['a"b', "a\\"]
+    HOSTILE_DIRS += ['a"b', "a\\", "a\\b"]  # bash collapses \\\\ inside double quotes (R2-3)
 SAFE_DIRS = ["plain", "with space", "p(1)[2]", "a+b,c@d=e", "été 日本", "x-y_z.w",
              "RUNNER~1", "~start", "~user x"]  # ~ is literal inside double quotes in all three shells (CI: 8.3 names)
 
@@ -1536,6 +1536,31 @@ class RunHintTest(unittest.TestCase):
         self.assertEqual([p for p in self.base.rglob("PWNED*")], [])
 
 
+class RunHintAsGivenTest(unittest.TestCase):
+    """Review of #17, round 2 (R2-0): run_hint prints the root and the launcher as given (made absolute, never resolved
+    through realpath), so a root under an 8.3 short name stays as the caller spelled it; the allowlist alone decides.
+    R2-3: a backslash is paste-safe on Windows only (bash collapses \\\\ inside double quotes)."""
+
+    def test_an_8_3_short_root_is_printed_as_given(self):
+        if os.name != "nt":
+            self.skipTest("8.3 short names are a Windows thing")
+        import ctypes
+        base = Path(tempfile.mkdtemp(prefix="bp-short-"))
+        self.addCleanup(shutil.rmtree, base, True)
+        long = base / "a long folder name"
+        (long / ".blueprint").mkdir(parents=True)
+        buf = ctypes.create_unicode_buffer(1024)
+        if not ctypes.windll.kernel32.GetShortPathNameW(str(long), buf, 1024) or "~" not in buf.value:
+            self.skipTest("this volume has no 8.3 short names")
+        short = Path(buf.value)
+        self.assertEqual(core.run_hint(short, "status"),
+                         f'python "{core.TOOL_HOME / "blueprint.py"}" status --root "{short}"')
+
+    def test_a_backslash_is_safe_on_windows_only(self):
+        self.assertEqual(core.paste_safe("C:\\x\\y"), os.name == "nt")
+        self.assertFalse(core.paste_safe("a\\"))
+
+
 class SchemaV1ConsoleTest(TempRoot):
     def test_the_console_warning_runs_as_printed(self):
         """F10: the console schema-v1 warning names migrate in the runnable form, like the finding's next (F3: printed
@@ -1636,6 +1661,31 @@ class WorkedByTest(TempRoot):
                 with self.assertRaises(BlueprintError) as cm:
                     status.worked_by({"by": "a", "workedBy": bad})
                 self.assertEqual(cm.exception.error, "bad-state")
+
+    def test_the_route_through_an_older_tool(self):
+        """R2-1: a1 claims with this tool; an older tool overwrites by with b-old-tool and leaves the list; c1 claims
+        with this tool: all three are in worked_by, and the stored list keeps b-old-tool from then on."""
+        from bp import status
+        p = self.PATH
+        self.run_ok("claim", p, "--by", "a1", "--force")
+        state = self.state()
+        state["files"][p]["by"] = "b-old-tool"  # what a tool without workedBy writes
+        (self.root / ".blueprint" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        self.assertEqual(status.worked_by(self.state()["files"][p]), ["a1", "b-old-tool"])
+        self.run_ok("claim", p, "--by", "c1", "--force")
+        self.assertEqual(self.state()["files"][p]["workedBy"], ["a1", "b-old-tool", "c1"])
+        self.run_ok("claim", p, "--by", "d1", "--force")
+        self.assertEqual(status.worked_by(self.state()["files"][p]), ["a1", "b-old-tool", "c1", "d1"])
+
+    def test_null_reads_as_empty(self):
+        """R2-5: "workedBy": null reads as empty, like the sibling keys; the latest by still counts."""
+        from bp import status
+        self.assertEqual(status.worked_by({"by": "a", "workedBy": None}), ["a"])
+        text = json.dumps({"files": {self.PATH: {"state": "claimed", "by": "a", "workedBy": None}}})
+        (self.root / ".blueprint" / "state.json").write_text(text, encoding="utf-8")
+        self.run_ok("status")
+        self.run_ok("claim", self.PATH, "--by", self.OWNER)
+        self.assertEqual(self.state()["files"][self.PATH]["workedBy"], ["a", self.OWNER])
 
     def test_parallel_claims_keep_every_id(self):
         ids = [f"agent-{i}" for i in range(6)]

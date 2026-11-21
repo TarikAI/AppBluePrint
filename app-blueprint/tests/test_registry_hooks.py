@@ -2279,6 +2279,56 @@ class PatternVerifyRoundOneTest(PatternVerifyTest):
         self.assertEqual(code, 0, out + err)
 
 
+class InstanceEdgesTest(PatternVerifyTest):
+    """Review of #17, round 2: an instance that is not a file (gone since the last sync, or a Windows device name such
+    as CON.ts) is skipped and counted with nothing written (R2-6); an instance under .blueprint/ and one whose path
+    goes through a link to another place in the project are skipped (R2-2, N7 and N9)."""
+
+    def set_instances(self, instances, pattern="screen"):
+        state = self.state()
+        state["patterns"][pattern]["instances"] = instances
+        (self.root / ".blueprint" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+
+    def test_an_instance_that_is_not_a_file(self):
+        gone = ["src/screens/Gone.ts"] + (["src/screens/CON.ts"] if os.name == "nt" else [])
+        self.set_instances(gone + ["src/screens/A.ts"])
+        code, out, err = self.run_("verify", "--run")
+        self.assertEqual(code, 0, out + err)
+        self.assertIn(f"skipped {len(gone)} recorded instance(s) that are not project paths", out)
+        files = self.state()["files"]
+        for p in gone:
+            self.assertNotIn(p, files)
+
+    def test_blueprint_folder_and_links_inside_the_project(self):
+        plan = json.loads(json.dumps(self.plan))
+        plan["patterns"].append({"id": "bp", "glob": ".blueprint/*.md", "module": plan["modules"][0]["id"],
+                                 "phase": plan["phases"][0]["id"], "purpose": "notes", "instance": "one",
+                                 "verify": self.other})
+        plan["patterns"].append({"id": "linked", "glob": "src/linked/*.ts", "module": plan["modules"][0]["id"],
+                                 "phase": plan["phases"][0]["id"], "purpose": "through a link", "instance": "one",
+                                 "verify": self.other})
+        self.write_plan(plan)
+        (self.root / ".blueprint" / "notes.md").write_text("x\n", encoding="utf-8")
+        link = self.root / "src" / "linked"
+        if os.name == "nt":
+            r = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(self.root / "src" / "screens")],
+                               capture_output=True, text=True)
+            if r.returncode:
+                self.skipTest("no junction here")
+        else:
+            os.symlink(self.root / "src" / "screens", link, target_is_directory=True)
+        state = self.state()
+        state["patterns"]["bp"] = {"instances": [".blueprint/notes.md"]}
+        state["patterns"]["linked"] = {"instances": ["src/linked/A.ts"]}
+        (self.root / ".blueprint" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        code, out, err = self.run_("verify", "--run")
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("skipped 2 recorded instance(s) that are not project paths", out)
+        files = self.state()["files"]
+        self.assertNotIn(".blueprint/notes.md", files)
+        self.assertNotIn("src/linked/A.ts", files)
+
+
 class RecordedViewNamesWindowsSafeTest(CliTestBase):
     def test_a_name_that_only_starts_like_a_view_is_never_deleted(self):
         """F12: 'NOTES.md.bak' starts like a view name; with match instead of fullmatch it would count as recorded and
