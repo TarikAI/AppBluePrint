@@ -1483,6 +1483,12 @@ class RunHintTest(unittest.TestCase):
         env = S.tool_env(PYTHONIOENCODING="utf-8")
         exe = os.path.dirname(sys.executable)
         env["PATH"] = exe + os.pathsep + env.get("PATH", "")
+        if os.name != "nt":  # the printed command says `python`; a system with only python3 gets a shim, as a user would
+            shim = self.base / "shim"
+            if not (shim / "python").exists():
+                shim.mkdir(exist_ok=True)
+                os.symlink(sys.executable, shim / "python")
+            env["PATH"] = str(shim) + os.pathsep + env["PATH"]
         if os.name == "nt" and not (Path(exe) / "python.exe").is_file():
             self.skipTest("no python.exe on PATH for the shells")
         return subprocess.run(argv(script), cwd=str(cwd), capture_output=True, text=True, encoding="utf-8", errors="replace",

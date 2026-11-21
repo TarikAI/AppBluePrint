@@ -2016,7 +2016,7 @@ class ClaimRefusalNextTest(CliTestBase):
 
     def test_without_a_copy(self):
         from bp import core
-        want = f'next: python "{core.TOOL_HOME / "blueprint.py"}" status --unknowns --root "{self.root}"'
+        want = f'next: python "{core.TOOL_HOME / "blueprint.py"}" status --unknowns --root "{self.root.resolve()}"'
         self.assertIn(want, self.claim_next())
 
     def test_with_a_copy_that_has_the_command(self):
@@ -2163,7 +2163,7 @@ class RunnableNextTest(CliTestBase):
 
     def hint(self, args):
         from bp import core
-        return f'python "{core.TOOL_HOME / "blueprint.py"}" {args} --root "{self.root}"'
+        return f'python "{core.TOOL_HOME / "blueprint.py"}" {args} --root "{self.root.resolve()}"'
 
     def copy(self, *modules):
         bin_ = self.root / ".blueprint" / "bin"
