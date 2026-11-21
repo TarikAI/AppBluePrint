@@ -3,9 +3,7 @@
 load_plan runs upgrade_plan on every plan it reads, so all code sees version 2; the migrate command (W0-B) writes the
 result. Nothing here reads or writes files. Imports core only (contract 1.2).
 """
-import copy
-
-from bp.core import BlueprintError
+from bp.core import BlueprintError, copy_json
 
 NEW_SECTIONS = ("milestones", "features", "tasks", "unknowns")  # plan.SECTIONS_V2; repeated here so migrate stays pure
 
@@ -17,7 +15,8 @@ def plan_version(raw):
 
 
 def upgrade_plan(raw):
-    """A new dict at schema version 2. Version 2: a deep copy. Version 1: every key in its order, version set to 2, and
+    """A new dict at schema version 2, sharing nothing with raw (copied without recursion, so any nesting the JSON
+    reader accepts is fine). Version 2: a copy. Version 1: every key in its order, version set to 2, and
     the four new sections appended as [] when missing; nothing else changes. Any other version: schema-too-new.
     load_plan reports a missing or non-integer version before calling this (3.3)."""
     if not isinstance(raw, dict):
@@ -27,13 +26,13 @@ def upgrade_plan(raw):
         what = "is required" if v is None else "must be a whole number"
         raise BlueprintError("bad-shape", f"blueprint.json: version {what}", next="fix it, then run validate")
     if v == 2:
-        return copy.deepcopy(raw)
+        return copy_json(raw)
     if v < 1:
         raise BlueprintError("bad-shape", "blueprint.json: version must be 1 or 2", next="fix it, then run validate")
     if v != 1:
         raise BlueprintError("schema-too-new", f"blueprint.json is schema version {v}; this tool reads 1 and 2",
                              next="update the skill, then run init --refresh-tool")
-    out = {k: copy.deepcopy(val) for k, val in raw.items()}
+    out = {k: copy_json(val) for k, val in raw.items()}
     out["version"] = 2
     for key in NEW_SECTIONS:
         if key not in out:
@@ -48,11 +47,11 @@ def upgrade_state(raw):
     if not isinstance(raw, dict):
         return raw
     if raw.get("stateVersion") == 2 and type(raw.get("stateVersion")) is int:
-        out = copy.deepcopy(raw)
+        out = copy_json(raw)
         out.setdefault("tasks", {})  # review R2-N5
         return out
     out = {"stateVersion": 2}  # no stateVersion, or any value but the int 2: version 1 (review N2)
-    out.update({k: copy.deepcopy(v) for k, v in raw.items() if k != "stateVersion"})
+    out.update({k: copy_json(v) for k, v in raw.items() if k != "stateVersion"})
     if not isinstance(out.get("tasks"), dict):
         out["tasks"] = {}
     return out

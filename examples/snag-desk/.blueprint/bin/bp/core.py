@@ -3,14 +3,28 @@
 TOOL_HOME is the folder holding the launcher (scripts/ in the skill, .blueprint/bin in a project); 1.x called it HERE.
 """
 import codecs
+import contextlib
 import datetime as _dt
+import errno
 import hashlib
 import json
+import math
 import os
+import random
 import re
+import secrets
+import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
+
+try:  # the state lock (state_lock): msvcrt on Windows, flock on POSIX
+    import msvcrt
+    fcntl = None
+except ImportError:
+    msvcrt = None
+    import fcntl
 
 
 TOOL_HOME = Path(__file__).resolve().parent.parent
@@ -43,11 +57,82 @@ def read_json(path, default=None):
         return json.load(f)
 
 
+_SURROGATE = re.compile("[\\ud800-\\udfff]")
+_PLAIN_KEY = re.compile(r"[^.\[\]\"]+")
+
+
+def _key_path(where, key):
+    """where + one key, as the load errors name it: a.b for a plain key, a["x.y"] for a key with '.', '[', ']' or '"'
+    (or an empty one); an unpaired surrogate is shown as its \\uXXXX escape, so the text prints anywhere."""
+    shown = key.encode("utf-8", "backslashreplace").decode("utf-8")
+    if _PLAIN_KEY.fullmatch(key):
+        return f"{where}.{shown}" if where else shown
+    return f'{where}["{shown}"]'
+
+
+def unusable_json(value):
+    """(key path, what) for the first value of parsed JSON that the tool could not write back faithfully, else None:
+    a string or key holding an unpaired surrogate (json reads the escape \\ud800 alone into one, and no UTF-8 file can
+    hold it), or a number that is not finite (NaN, Infinity, -Infinity, or a literal too large such as 1e400, which
+    Python's JSON reader accepts and JSON does not have). Walked without recursion, in document order."""
+    stack = [("", value)]
+    while stack:
+        where, v = stack.pop()
+        if isinstance(v, str):
+            m = _SURROGATE.search(v)
+            if m:
+                return where or "the top level", _surrogate(m.group(0))
+        elif isinstance(v, float) and not math.isfinite(v):
+            return where or "the top level", (f"a number that is not finite ({'NaN' if v != v else 'Infinity' if v > 0 else '-Infinity'}), "
+                                               "which JSON does not have")
+        elif isinstance(v, dict):
+            for k in v:
+                m = _SURROGATE.search(k) if isinstance(k, str) else None
+                if m:
+                    return "the key " + _key_path(where, k), _surrogate(m.group(0))
+            stack.extend((_key_path(where, k), x) for k, x in reversed(list(v.items())))
+        elif isinstance(v, list):
+            stack.extend((f"{where}[{i}]", x) for i, x in reversed(list(enumerate(v))))
+    return None
+
+
+def _surrogate(ch):
+    return f"an unpaired surrogate (\\u{ord(ch):04x}), which is not valid Unicode"
+
+
+def _retry_windows(fn, *args, budget=2.0):
+    """fn(*args), retried for up to `budget` seconds on Windows while another process has the file open (a reader
+    holding state.json makes os.replace fail with PermissionError there). Elsewhere, or past the budget, it raises."""
+    deadline = time.monotonic() + budget
+    delay = 0.01
+    while True:
+        try:
+            return fn(*args)
+        except PermissionError:
+            if os.name != "nt" or time.monotonic() >= deadline:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 0.1)
+
+
 def write_json(path, data):
+    """Write JSON atomically, with the 1.x bytes: through a temp file unique to this process and call
+    (<name>.<pid>-<random>.tmp, beside the file, so concurrent writers never share one), then os.replace. The temp
+    file is removed on any failure. A read-only target on Windows fails at once rather than being retried."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    tmp = path.with_name(f"{path.name}.{os.getpid()}-{secrets.token_hex(4)}.tmp")
+    try:
+        with open(tmp, "x", encoding="utf-8") as f:
+            f.write(text)
+        if os.name == "nt" and path.is_file() and not os.access(path, os.W_OK):
+            os.replace(tmp, path)  # read-only: no other process can make this succeed
+        else:
+            _retry_windows(os.replace, tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 def write_text_if_changed(path, text):
@@ -59,11 +144,21 @@ def write_text_if_changed(path, text):
     return False
 
 
-def append_log(root, event):
+def _append_log_line(root, event):
     event = dict(event)
     event.setdefault("at", now_iso())
     with (bp_dir(root) / "log.jsonl").open("a", encoding="utf-8") as f:
         f.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+
+def append_log(root, event):
+    """Append one event to log.jsonl as one line, inside the state lock (taken here unless this process holds it), so
+    parallel writers never tear or interleave lines."""
+    if _holding(root):
+        _append_log_line(root, event)
+        return
+    with state_lock(root):
+        _append_log_line(root, event)
 
 
 def norm(p):
@@ -71,6 +166,56 @@ def norm(p):
     while p.startswith("./"):
         p = p[2:]
     return p
+
+
+def copy_json(obj):
+    """A deep copy of parsed JSON (dicts, lists, scalars) made without recursion, so it works at any depth the JSON
+    reader accepts (copy.deepcopy recurses and fails at about 450 levels). Dict key order is kept; scalars and other
+    objects are shared (scalars are immutable); a container reached twice is copied each time. A cycle (a container
+    inside itself, impossible in parsed JSON) raises ValueError("cyclic value") at once (review P10-2)."""
+    if not isinstance(obj, (dict, list)):
+        return obj
+    root = {} if isinstance(obj, dict) else []
+    stack = [(iter(obj.items()) if isinstance(obj, dict) else iter(obj), root, id(obj))]
+    active = {id(obj)}  # the containers on the current path: meeting one again is a cycle
+    while stack:
+        items, dst, src_id = stack[-1]
+        item = next(items, _END)
+        if item is _END:
+            stack.pop()
+            active.discard(src_id)
+            continue
+        key, v = item if isinstance(dst, dict) else (None, item)
+        if isinstance(v, (dict, list)):
+            if id(v) in active:
+                raise ValueError("cyclic value")
+            child = {} if isinstance(v, dict) else []
+            stack.append((iter(v.items()) if isinstance(v, dict) else iter(v), child, id(v)))
+            active.add(id(v))
+        else:
+            child = v
+        if isinstance(dst, dict):
+            dst[key] = child
+        else:
+            dst.append(child)
+    return root
+
+
+_END = object()
+
+
+def json_depth(obj):
+    """How deeply parsed JSON nests containers (0 for a scalar, 1 for [] or {}), measured without recursion."""
+    deepest, stack = 0, [(obj, 1)]
+    while stack:
+        v, d = stack.pop()
+        if isinstance(v, dict):
+            deepest = max(deepest, d)
+            stack.extend((x, d + 1) for x in v.values())
+        elif isinstance(v, list):
+            deepest = max(deepest, d)
+            stack.extend((x, d + 1) for x in v)
+    return deepest
 
 
 def path_key(rel):
@@ -97,7 +242,8 @@ def project_path(root, raw):
     repeated separators, symlinks and junctions are resolved, and case and separators come from the disk for the part
     that exists. When the drive spellings differ (an admin share \\host\C$, subst, a mapped drive), the resolved
     path's existing ancestors are compared with the root by os.path.samefile. On Windows the part that does not exist
-    yet loses the trailing dots and spaces of each segment, as Windows drops them when it creates the file. Forward
+    yet loses, in each segment, everything from its first ':' (an alternate data stream names the same file) and
+    then the trailing dots and spaces, as Windows does when it creates the file. Forward
     slashes; compare results with path_key."""
     p = Path(_strip_long_prefix(raw))
     if not p.is_absolute():
@@ -132,7 +278,9 @@ def project_path(root, raw):
                 base = base / seg
                 out.append(seg)
                 continue
-            out += [s.rstrip(" .") or s for s in parts[i:]]
+            # a segment loses everything from its first ':' (an alternate data stream, '::$DATA' or ':x', names the
+            # same file), then its trailing dots and spaces; the drive letter is in the root part, never here
+            out += [s.split(":", 1)[0].rstrip(" .") or s for s in parts[i:]]
             break
         parts = out
     return "/".join(parts) if parts else "."
@@ -324,3 +472,490 @@ def find_asset(name):
         if cand.exists():
             return cand
     return None
+
+
+# ---------------------------------------------------------------- state.json: one locked way to change it
+
+STATE_LOCK = "state.lock"
+LOCK_TIMEOUT_ENV = "BLUEPRINT_LOCK_TIMEOUT"
+LOCK_TIMEOUT = 15.0
+LOCK_TIMEOUT_MAX = 600.0
+GITIGNORE_LINES = ("state.lock", "*.tmp")
+STALE_TMP_SECONDS = 3600
+AGAIN = "run the same command again"
+_STATE_TMP = re.compile(r"^state\.json\.\d+-[0-9a-f]{8}\.tmp$")  # write_json's temp names for state.json, only
+_HELD = set()  # the lock files this process holds: the lock is never nested, so a second take is a bug
+
+
+# characters that are literal inside double quotes in bash, PowerShell and cmd (besides letters and digits, which
+# str.isalnum accepts in any script): a path made only of these can be printed inside a command (review of #17, F8)
+# ~ is literal inside double quotes too (8.3 short names hold it); a backslash only on Windows: bash reads \\\\ inside
+# double quotes as one backslash (review of #17, R2-3)
+PASTE_SAFE = frozenset(" -_./:+,@=()[]~" + ("\\" if os.name == "nt" else ""))
+PORTABLE_NOTE = " (run from the project folder)"
+
+
+def paste_safe(text):
+    """True when `text` can go inside double quotes in a printed command: every character a letter, a digit (any
+    script) or in PASTE_SAFE, and no backslash at the end (in bash it would escape the closing quote)."""
+    return bool(text) and all(c.isalnum() or c in PASTE_SAFE for c in text) and not text.endswith("\\")
+
+
+def run_hint(root, args, module=None, use_copy=True):
+    """A command line that runs as printed, and runs nothing else when pasted into bash, PowerShell or cmd:
+    - the project's copy, `python .blueprint/bin/blueprint.py <args>`, when it has the command (module, e.g.
+      "commands/roadmap", names the file it needs; None: any copy) and use_copy is true (no path in it);
+    - else this running tool, `python "<launcher>" <args> --root "<root>"`, when both paths are paste_safe;
+    - else the portable form, `python <skill>/scripts/blueprint.py <args> --root . (run from the project folder)`.
+    args is the tool's own text (a subcommand and flags), never something a caller typed."""
+    copy = bp_dir(root) / "bin"
+    if use_copy and (copy / "blueprint.py").is_file() and (module is None or (copy / "bp" / (module + ".py")).is_file()):
+        return f"python .blueprint/bin/blueprint.py {args}"
+    # as given, made absolute, never resolved (review of #17, R2-0): an 8.3 short name such as RUNNER~1 stays as the
+    # caller spelled it, a link still names the same project (the state lock is keyed by the real path); the
+    # allowlist alone decides between this form and the fallback
+    launcher, where = os.path.abspath(TOOL_HOME / "blueprint.py"), os.path.abspath(root)
+    if paste_safe(launcher) and paste_safe(where):
+        return f'python "{launcher}" {args} --root "{where}"'
+    return f"python <skill>/scripts/blueprint.py {args} --root .{PORTABLE_NOTE}"
+
+
+def _bad_state(why, next, name="state.json"):  # noqa: A002 (next is the contract's name)
+    return BlueprintError("bad-state", f".blueprint/{name} {why}", entry=f".blueprint/{name}", next=next)
+
+
+def _rule_names(line):
+    """The name a .gitignore line is about, for the lines this tool adds: 'state.lock' for state.lock, /state.lock,
+    **/state.lock and !state.lock (a negation is the user's choice too); None for comments and blank lines."""
+    s = line.strip()
+    if not s or s.startswith("#"):
+        return None
+    s = s.lstrip("!")
+    for prefix in ("**/", "/"):
+        if s.startswith(prefix):
+            s = s[len(prefix):]
+    return s
+
+
+def ensure_gitignore(root):
+    """.blueprint/.gitignore lists state.lock and *.tmp, so the lock file and temp files never show up as project
+    changes. Creates the file, or appends only the patterns no line of it already names in any form (a negation such
+    as !state.lock included, so the user's choice stands), with the file's own line ending; a user's lines are never
+    rewritten, and a final newline is added only when something is appended. Best effort: False when the file cannot
+    be read or written."""
+    path = bp_dir(root) / ".gitignore"
+    try:
+        old = path.read_bytes() if path.exists() else b""
+        text = old.decode("utf-8", "replace")
+        named = {_rule_names(line) for line in text.splitlines()}
+        missing = [p for p in GITIGNORE_LINES if p not in named]
+        if not missing:
+            return True
+        eol = "\r\n" if "\r\n" in text else "\n"
+        add = (eol if old and not old.endswith(b"\n") else "") + "".join(p + eol for p in missing)
+        with path.open("ab") as f:
+            f.write(add.encode("utf-8"))
+        return True
+    except OSError:
+        return False
+
+
+def _lock_timeout():
+    """$BLUEPRINT_LOCK_TIMEOUT in seconds, at most 600; a value that is not a finite number of at least 0 means the
+    default (15), with one warning on stderr."""
+    raw = os.environ.get(LOCK_TIMEOUT_ENV)
+    if raw is None:
+        return LOCK_TIMEOUT
+    try:
+        value = float(raw)
+    except ValueError:
+        value = None
+    if value is None or value != value or value in (float("inf"), float("-inf")) or value < 0:
+        print(f"warning: {LOCK_TIMEOUT_ENV}={raw!r} is not a number of seconds (0 or more); "
+              f"using {LOCK_TIMEOUT:g}", file=sys.stderr)
+        return LOCK_TIMEOUT
+    return min(value, LOCK_TIMEOUT_MAX)
+
+
+def _try_lock(fd):
+    """Take the advisory lock on an open file without blocking; OSError when it is held or cannot be taken."""
+    if msvcrt is not None:
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+    else:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock(fds):
+    for fd in reversed(fds):
+        try:
+            if msvcrt is not None:
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass  # closing the file releases it anyway
+        finally:
+            os.close(fd)
+
+
+_BUSY = {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK, getattr(errno, "EDEADLK", -1), getattr(errno, "EDEADLOCK", -1)}
+
+
+def _open_lock_file(root):
+    """The lock file, opened (created when missing). A link or anything but a regular file is bad-state, and a link's
+    target is never created (O_NOFOLLOW on POSIX; an lstat check first on Windows)."""
+    path = bp_dir(root) / STATE_LOCK
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        st = None
+    except OSError as e:
+        raise _lock_error(f"cannot be opened ({e.strerror or e})")
+    if st is not None and (not stat.S_ISREG(st.st_mode) or getattr(st, "st_file_attributes", 0) & 0x400):
+        raise _lock_error("is not a regular file (a link, a folder or something else)")
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        return os.open(path, flags, 0o666), st is None
+    except OSError as e:
+        if e.errno == getattr(errno, "ELOOP", None):
+            raise _lock_error("is not a regular file (a link, a folder or something else)")
+        try:  # a read-only lock file still locks
+            return os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)), False
+        except OSError:
+            raise _lock_error(f"cannot be opened ({e.strerror or e})")
+
+
+def _lock_error(why):
+    return _bad_state(f"{why}, so .blueprint/state.json cannot be written safely",
+                      f"make .blueprint/{STATE_LOCK} a plain file (or remove it) and the folder .blueprint writable, "
+                      f"then {AGAIN}", name=STATE_LOCK)
+
+
+def _try_acquire(root):
+    """One attempt: the fds held, or None when another process holds the lock. On POSIX the lock is flock on
+    state.lock plus flock on the .blueprint folder itself: deleting state.lock while it is held (git clean -X, a
+    person) makes a new file, and so a new lock, but never a second lock on the folder."""
+    fd, new = _open_lock_file(root)
+    fds = [fd]
+    try:
+        _try_lock(fd)
+    except OSError as e:
+        _unlock(fds)
+        if e.errno not in _BUSY:
+            raise _lock_error(f"cannot be locked ({e.strerror or e}); this file system may not support file locks")
+        return None, new
+    if fcntl is not None:
+        locking = False
+        try:
+            dfd = os.open(bp_dir(root), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                locking = True
+                _try_lock(dfd)
+            except OSError:
+                os.close(dfd)
+                raise
+            fds.append(dfd)
+        except OSError as e:
+            if locking and e.errno in _BUSY:
+                _unlock(fds)
+                return None, new
+            try:
+                _folder_lock_unsupported(e)  # e.g. a network mount: the file lock alone
+            except BaseException:
+                _unlock(fds)
+                raise
+    return fds, new
+
+
+_FOLDER_LOCK_UNSUPPORTED = {getattr(errno, n) for n in ("ENOTSUP", "EOPNOTSUPP", "EINVAL", "ENOLCK", "EBADF", "ENOSYS")
+                            if hasattr(errno, n)}
+_WARNED = set()  # warnings printed once per process
+
+
+def _folder_lock_unsupported(e):
+    """The file system refuses flock on the .blueprint folder (some network mounts): the lock on state.lock alone is
+    used, which still serialises writers but not one that deleted state.lock while it was held. One warning per
+    process. Any other error is bad-state, as for the lock file."""
+    if e.errno not in _FOLDER_LOCK_UNSUPPORTED:
+        raise _lock_error(f"cannot be locked: the folder .blueprint cannot be locked ({e.strerror or e})")
+    if "folder-lock" not in _WARNED:
+        _WARNED.add("folder-lock")
+        print(f"warning: this file system cannot lock the folder .blueprint ({e.strerror or e}); using the lock on "
+              f".blueprint/{STATE_LOCK} alone, so do not delete that file while blueprint commands run", file=sys.stderr)
+
+
+def _remove_stale_temp_files(root):
+    """Remove state.json.<pid>-<hex>.tmp files (write_json's names for state.json, nothing else) older than an hour:
+    what a killed writer leaves behind. Called holding the lock."""
+    cutoff = time.time() - STALE_TMP_SECONDS
+    try:
+        entries = list(os.scandir(bp_dir(root)))
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            if _STATE_TMP.match(entry.name) and entry.is_file(follow_symlinks=False) and \
+                    entry.stat(follow_symlinks=False).st_mtime < cutoff:
+                os.unlink(entry.path)
+        except OSError:
+            pass
+
+
+def _acquire(root):
+    timeout = _lock_timeout()
+    deadline = time.monotonic() + timeout
+    delay = 0.005
+    created = False
+    while True:
+        fds, new = _try_acquire(root)
+        created = created or new
+        if fds is not None:
+            break
+        if time.monotonic() >= deadline:
+            raise BlueprintError("state-busy", f"another blueprint command is writing .blueprint/state.json "
+                                 f"(waited {timeout:g} s for .blueprint/{STATE_LOCK})",
+                                 entry=".blueprint/state.json", next=AGAIN)
+        time.sleep(delay * (0.5 + random.random()))
+        delay = min(delay * 2, 0.05)
+    if created:
+        ensure_gitignore(root)  # the first lock: keep the lock and temp files out of the project's changes
+    _remove_stale_temp_files(root)
+    return fds
+
+
+@contextlib.contextmanager
+def state_lock(root):
+    """The one lock on state.json and log.jsonl: an OS advisory lock on .blueprint/state.lock (msvcrt on Windows;
+    flock on POSIX, on the lock file and the .blueprint folder), so a process that dies never leaves the project
+    locked. Waits up to $BLUEPRINT_LOCK_TIMEOUT seconds (default 15, at most 600), then raises state-busy. Never
+    nested (a second take in one process is a RuntimeError) and never held across a subprocess: hold it only to read,
+    change and write state, append log lines and write views. Windows and WSL processes do not share it."""
+    key = _lock_key(root)
+    if key in _HELD:
+        raise RuntimeError("the state lock is already held by this process; it is never nested")
+    fds = _acquire(root)
+    _HELD.add(key)
+    try:
+        yield
+    finally:
+        _HELD.discard(key)
+        _unlock(fds)
+
+
+def _lock_key(root):
+    """One key per project however its root is spelled (8.3 short names, links, case), so nesting is always seen."""
+    return os.path.normcase(os.path.realpath(bp_dir(root) / STATE_LOCK))
+
+
+def _holding(root):
+    return _lock_key(root) in _HELD
+
+
+_CHANGING = set()  # projects whose update_state change callback is running in this process
+
+
+def in_change(root):
+    """True while an update_state change callback runs for this project in this process (plan.save_state refuses then)."""
+    return _lock_key(root) in _CHANGING
+
+
+def state_default():
+    """The state of a project with no state.json (1.x's default)."""
+    return {"files": {}, "patterns": {}, "unplanned": [], "syncedAt": None, "head": None}
+
+
+def _files_damage(raw):
+    if raw.get("files") is None:
+        raw["files"] = {}
+    if not isinstance(raw["files"], dict):
+        return f'"files" must be an object (got {_json_kind(raw["files"])})'
+    for p in [p for p, rec in raw["files"].items() if rec is None]:  # a null record (a hand edit) is missing
+        del raw["files"][p]
+    for p, rec in raw["files"].items():
+        if not isinstance(rec, dict):
+            return f"files[{json.dumps(p, ensure_ascii=False)}] must be an object (got {_json_kind(rec)})"
+        ids = rec.get("workedBy") or []  # null reads as empty, like the sibling keys (review of #17, R2-5)
+        if not isinstance(ids, list) or any(not isinstance(x, str) for x in ids):
+            bad = ids if not isinstance(ids, list) else next(x for x in ids if not isinstance(x, str))
+            return (f"files[{json.dumps(p, ensure_ascii=False)}].workedBy must be a list of ids "
+                    f"(got {_json_kind(bad)}{'' if not isinstance(ids, list) else ' in it'})")
+    return None
+
+
+def _patterns_damage(raw):
+    if "patterns" in raw and raw["patterns"] is None:
+        raw["patterns"] = {}
+    pats = raw.get("patterns", {})
+    if not isinstance(pats, dict):
+        return f'"patterns" must be an object (got {_json_kind(pats)})'
+    for pid, entry in pats.items():
+        where = f"patterns[{json.dumps(pid, ensure_ascii=False)}]"
+        if not isinstance(entry, dict):
+            return f"{where} must be an object (got {_json_kind(entry)})"
+        inst = entry.get("instances", [])
+        if not isinstance(inst, (list, str, dict)):
+            return f"{where}.instances must be a list (got {_json_kind(inst)})"
+        bad = [x for x in inst if not isinstance(x, str)] if isinstance(inst, list) else []
+        if bad:
+            return f"{where}.instances must hold paths (got {_json_kind(bad[0])})"
+    return None
+
+
+def _kind_damage(key, ok, kind):
+    def check(raw):
+        v = raw.get(key)
+        return f'"{key}" must be {kind} (got {_json_kind(v)})' if v and not isinstance(v, ok) else None
+    return check
+
+
+def _data_damage(raw):
+    """data (written by sync and db-check) as its readers use it: tables a list of objects with a text name; observed
+    an object; issues a list of objects with type and detail; a non-empty live an object with source, at, tables (a
+    list) and liveOnly and notApplied (lists of text). A null tables, observed or issues is empty (filled in here).
+    Missing, null or empty data is nothing to read."""
+    d = raw.get("data")
+    if not d:
+        return None
+    if not isinstance(d, dict):
+        return f'"data" must be an object (got {_json_kind(d)})'
+    for key, empty in (("tables", list), ("observed", dict), ("issues", list)):
+        if key in d and d[key] is None:
+            d[key] = empty()
+    for key, ok, kind in (("tables", list, "a list"), ("observed", dict, "an object"), ("issues", list, "a list")):
+        if key in d and not isinstance(d[key], ok):
+            return f'"data.{key}" must be {kind} (got {_json_kind(d[key])})'
+    for i, t in enumerate(d.get("tables", [])):
+        if not isinstance(t, dict) or not isinstance(t.get("name"), str):
+            return f'"data.tables[{i}]" must be an object with a "name" (text)'
+    for i, issue in enumerate(d.get("issues", [])):
+        if not isinstance(issue, dict) or "type" not in issue or "detail" not in issue:
+            return f'"data.issues[{i}]" must be an object with "type" and "detail"'
+    return _live_damage(d.get("live"))
+
+
+def _live_damage(live):
+    """data.live (written by db-check): null or empty, or an object with source, at, tables (a list) and liveOnly and
+    notApplied (lists of names)."""
+    if not live:
+        return None
+    if not isinstance(live, dict):
+        return f'"data.live" must be an object or null (got {_json_kind(live)})'
+    for key in ("source", "at", "tables", "liveOnly", "notApplied"):
+        if key not in live:
+            return f'"data.live" has no "{key}"'
+    if not isinstance(live["tables"], list):
+        return f'"data.live.tables" must be a list (got {_json_kind(live["tables"])})'
+    for key in ("liveOnly", "notApplied"):
+        if not isinstance(live[key], list) or not all(isinstance(x, str) for x in live[key]):
+            return f'"data.live.{key}" must be a list of names'
+    return None
+
+
+# key -> (check, the empty value an owner that rewrites the key repairs it to). Only shapes the commands dereference
+# are checked, the ones on which 1.3.0 crashed; the list comes from a grep of every read of state in bp/, one level
+# below each top-level key (test_state_integrity's sweeps set each of them to every wrong type).
+_STATE_CHECKS = {"files": (_files_damage, dict), "patterns": (_patterns_damage, dict),
+                 "unplanned": (_kind_damage("unplanned", (list, str), "a list"), list),
+                 "data": (_data_damage, dict)}
+
+
+def _damage(raw, owned=()):
+    """The first part of a parsed state that the commands cannot use, as words for bad-state, or None. Missing or null
+    "files" and "patterns" are empty (filled in here). A key in `owned` (one the calling command rewrites wholesale,
+    as sync does patterns) is repaired to its empty value in place instead, as 1.3.0's rewrite did; files is never
+    owned. Anything 1.3.0 read without crashing is still read."""
+    d = raw.get("data")
+    if "data.live" in owned and isinstance(d, dict) and _live_damage(d.get("live")):
+        d["live"] = None  # db-check rewrites data.live wholesale: damage confined to it is repaired, as 1.3.0 did
+    for key, (check, empty) in _STATE_CHECKS.items():
+        why = check(raw)
+        if why and key in owned and key != "files":
+            raw[key] = empty()
+            why = None
+        if why:
+            return why
+    return None
+
+
+def read_state(root, prepare=None, owned=()):
+    """state.json as a dict (the 1.x default when there is none), then prepare(state) if given (the in-memory upgrade).
+    A state.json that cannot be used is error bad-state (exit 1), raised before the command writes anything, and the
+    file is left as it is: a folder, unreadable, not UTF-8, not JSON (a UTF-8 BOM included, as in 1.3.0), not an
+    object, or damaged (_damage: "files" or a file record not an object, and the like). Damage confined to a key in
+    `owned`, which the caller rewrites wholesale, is repaired instead (_damage)."""
+    path = bp_dir(root) / "state.json"
+    fix = f"fix .blueprint/state.json or move it away (progress is then tracked from scratch), then run: " \
+          f"{run_hint(root, 'sync')}"
+    if path.is_dir():
+        raise _bad_state("is a folder, not a file",
+                         f"remove or rename the folder .blueprint/state.json, then run: {run_hint(root, 'sync')}")
+    try:
+        data = _retry_windows(path.read_bytes)
+    except FileNotFoundError:
+        raw = state_default()
+    except OSError as e:
+        raise _bad_state(f"cannot be read ({e.strerror or e})",
+                         f"make .blueprint/state.json readable, then run: {run_hint(root, 'status')}")
+    else:
+        try:
+            raw = json.loads(data.decode("utf-8"))
+        except UnicodeDecodeError:
+            raise _bad_state("is not UTF-8 text", fix) from None
+        except (ValueError, RecursionError) as e:
+            raise _bad_state(f"is not valid JSON ({e})" if isinstance(e, ValueError) else "is not valid JSON "
+                             "(nested too deeply)", fix) from None
+        if not isinstance(raw, dict):
+            raise _bad_state(f"must be a JSON object (got {_json_kind(raw)})", fix)
+        bad = unusable_json(raw)  # a value no write could keep: refused, as a plan holding one is
+        if bad:
+            raise _bad_state(f"is damaged: {bad[0]} holds {bad[1]}", fix)
+        why = _damage(raw, owned)
+        if why:
+            raise _bad_state(f"is damaged: {why}", fix)
+    return prepare(raw) if prepare is not None else raw
+
+def _json_kind(v):
+    return ("null" if v is None else "boolean" if isinstance(v, bool) else "number" if isinstance(v, (int, float))
+            else "string" if isinstance(v, str) else "list" if isinstance(v, list) else "object")
+
+
+def write_state(root, state):
+    """Write state.json atomically; call it holding state_lock. On Windows, a file another program keeps open past
+    write_json's retries is state-busy; a file or folder that cannot be written is bad-state."""
+    path = bp_dir(root) / "state.json"
+    try:
+        write_json(path, state)
+    except PermissionError as e:
+        if os.name == "nt" and path.is_file() and os.access(path, os.W_OK) and os.access(path.parent, os.W_OK):
+            raise BlueprintError("state-busy", ".blueprint/state.json is open in another program (Windows refuses to "
+                                 "replace it while it is open); nothing was written", entry=".blueprint/state.json",
+                                 next=f"close it, then {AGAIN}") from None
+        raise _bad_state(f"cannot be written ({e.strerror or e})",
+                         f"make .blueprint/state.json and the folder .blueprint writable, then {AGAIN}") from None
+    except OSError as e:
+        raise _bad_state(f"cannot be written ({e.strerror or e})",
+                         f"make .blueprint/state.json and the folder .blueprint writable, then {AGAIN}") from None
+
+
+def update_state(root, change, prepare=None, owned=()):
+    """The one way to change state.json: take state_lock, re-read state.json inside it (prepare upgrades it), apply
+    change(state) in place, write it atomically, append the log events change returned (one line each), release.
+    Compute before calling this; change only sets the keys and entries its command owns, so another writer's
+    different entries survive and the same entry is last-writer-wins. owned: the keys change rewrites wholesale, whose
+    damage is repaired rather than refused (read_state). change may raise to write nothing; it must not
+    call update_state or state_lock (never nested), nor plan.save_state (a RuntimeError: the outer write would overwrite
+    it), but may call append_log. Returns the state written."""
+    key = _lock_key(root)
+    with state_lock(root):
+        state = read_state(root, prepare, owned)
+        _CHANGING.add(key)
+        try:
+            events = change(state) or ()
+        finally:
+            _CHANGING.discard(key)
+        write_state(root, state)
+        for event in events:
+            _append_log_line(root, event)
+    return state

@@ -88,7 +88,7 @@ def cmd_doctor(args):
         try:
             raw = read_json(bp_dir(root) / "blueprint.json")
             schema = json.dumps(raw.get("version")) if isinstance(raw, dict) else "unreadable"
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):  # a plan too deep to read is unreadable (review P10-1)
             raw, schema = None, "unreadable"
         # contract 1.7: the migrate hint only once the command exists (1.5 row d)
         hint = " (run migrate to use 2.0 planning)" if plan_version(raw) == 1 and command_built("migrate") else ""

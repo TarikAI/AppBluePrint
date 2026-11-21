@@ -172,3 +172,46 @@ function mindMap(host, root, opts) {
     }
   };
 }
+
+/* Mind map branch mode "by feature" (contract 8.4). The template declares BP_BRANCHES before this file is inlined; any
+ * other host that inlines this file without it simply skips the mode. build(D, H) returns the first-level branches:
+ * one per feature (its files as leaves), then the infrastructure files, then files that serve no feature. */
+if (typeof BP_BRANCHES !== 'undefined' && BP_BRANCHES && typeof BP_BRANCHES.push === 'function') {
+  BP_BRANCHES.push({
+    value: 'feature',
+    label: 'Features',
+    build: function (D, H) {
+      var feats = Array.isArray(D.features) ? D.features : [];
+      var rows = Array.isArray(D.rows) ? D.rows : [];
+      var pats = Array.isArray(D.patterns) ? D.patterns : [];
+      var glyphs = D.featureGlyph || {};
+      var byPath = H.byPath || {};
+      if (!feats.length) {
+        return [{ label: 'No features yet', title: typeof D.featureNext === 'string' && D.featureNext ? D.featureNext : 'Add features[] to blueprint.json and link files with files[].features, then run render', dot: 'var(--warn)' }];
+      }
+      function leaves(f) {
+        var out = [];
+        (f.items || []).forEach(function (it) {
+          var row = byPath[it.path];
+          if (row && it.from === 'file') { out.push(H.fileLeaf(row, '')); return; }
+          var pid = String(it.from || '').indexOf('pattern:') === 0 ? it.from.slice(8) : '';
+          var pat = pats.filter(function (p) { return p.id === pid; })[0];
+          if (pat && it.path === pat.glob) { out.push(H.patLeaf(pat, '')); return; }
+          out.push({ label: it.path, title: it.path + ' · ' + (H.labels && H.labels[it.status] || it.status), dot: H.colors && H.colors[it.status] || 'var(--sub)' });
+        });
+        return out;
+      }
+      var branches = feats.map(function (f) {
+        return { label: (glyphs[f.status] || '?') + ' ' + f.id + ' ' + f.title + ' · ' + (f.statusText || f.status),
+          title: (f.statement || f.title) + ' · ' + (f.owner || ''), children: leaves(f) };
+      });
+      var infra = rows.filter(function (r) { return r.infrastructure; });
+      var loose = rows.filter(function (r) { return !r.infrastructure && !(r.features && r.features.length) && r.action !== 'delete'; });
+      if (infra.length) branches.push({ label: 'Infrastructure', title: 'Files that serve no single feature', color: 'var(--b5)',
+        children: infra.map(function (r) { return H.fileLeaf(r, ''); }) });
+      if (loose.length) branches.push({ label: 'No feature (' + loose.length + ')', title: 'Planned files that serve no feature and are not infrastructure', color: 'var(--warn)',
+        children: loose.map(function (r) { return H.fileLeaf(r, ''); }) });
+      return branches;
+    }
+  });
+}

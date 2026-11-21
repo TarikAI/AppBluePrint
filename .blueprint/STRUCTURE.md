@@ -4,7 +4,7 @@
 
 The repository's own plan: who builds which file of app-blueprint 2.0, taken from section 11 of the contract.
 
-**141 planned files, 7 patterns.** Status: ○ planned 60, ◑ on disk 81. Last sync: 2026-11-20T03:01:24Z at `cb194a8`.
+**141 planned files, 7 patterns.** Status: ○ planned 47, ◑ on disk 94. Last sync: 2026-11-21T15:57:48Z at `715b0b7`.
 
 ## Build approach
 
@@ -18,7 +18,7 @@ The repository's own plan: who builds which file of app-blueprint 2.0, taken fro
 ```text
 .
 ├── .blueprint/  # This repository's own plan and views [dogfood]
-│   └── *  ⟨pattern dogfood-views: The plan, its state and the generated views of this repository; 6 on disk⟩ (orchestrator, W0)
+│   └── *  ⟨pattern dogfood-views: The plan, its state and the generated views of this repository; 7 on disk⟩ (orchestrator, W0)
 ├── .github/  # GitHub workflows and templates [ci]
 │   ├── ISSUE_TEMPLATE/
 │   │   └── *  ⟨pattern issue-templates: GitHub issue forms; 5 on disk⟩ (maintainers, W0)
@@ -34,10 +34,10 @@ The repository's own plan: who builds which file of app-blueprint 2.0, taken fro
 │   ├── assets/  # The map template and the browser scripts of its tabs [assets]
 │   │   ├── map.template.html  ◑ Template of map.html with the tab plug-in point (W0-A2, W0)
 │   │   ├── mindmap.js [modify]  ◑ Mind map of the map, with the by-feature mode (W1-F, W1)
-│   │   ├── tab-features.js  ○ Features tab of the map (W1-F, W1)
-│   │   ├── tab-roadmap.js  ○ Roadmap tab of the map (W1-R, W1)
+│   │   ├── tab-features.js  ◑ Features tab of the map (W1-F, W1)
+│   │   ├── tab-roadmap.js  ◑ Roadmap tab of the map (W1-R, W1)
 │   │   ├── tab-studies.js  ○ Studies tab of the map (W2-E, W2)
-│   │   └── tab-unknowns.js  ○ Unknowns tab of the map (W1-U, W1)
+│   │   └── tab-unknowns.js  ◑ Unknowns tab of the map (W1-U, W1)
 │   ├── references/  # Reference documents and example plans the skill points to [references]
 │   │   ├── stacks/
 │   │   │   └── *.md  ⟨pattern stack-presets: Stack presets the tool offers at init; 4 on disk⟩ (maintainers, W0)
@@ -59,7 +59,7 @@ The repository's own plan: who builds which file of app-blueprint 2.0, taken fro
 │   │   │   │   ├── plan.py  ◑ init, validate, render, contracts and export commands (W0-A2, W0)
 │   │   │   │   ├── progress.py  ◑ sync, status, owner, claim, mark, verify, guard and hook commands (W0-A2, W0)
 │   │   │   │   ├── records.py  ○ The accept command (W3-V, W3)
-│   │   │   │   ├── roadmap.py  ○ The task command (W1-R, W1)
+│   │   │   │   ├── roadmap.py  ◑ The task command (W1-R, W1)
 │   │   │   │   └── study.py  ○ The study command (W2-E, W2)
 │   │   │   ├── study/
 │   │   │   │   ├── __init__.py  ○ Package marker for the study engine (W2-E, W2)
@@ -85,9 +85,9 @@ The repository's own plan: who builds which file of app-blueprint 2.0, taken fro
 │   │   │   ├── views/
 │   │   │   │   ├── __init__.py  ◑ Package marker for the view modules (W0-A2, W0)
 │   │   │   │   ├── context.py  ◑ The context every view and status hook reads (W0-A2, W0)
-│   │   │   │   ├── features_md.py  ○ FEATURES.md (W1-F, W1)
+│   │   │   │   ├── features_md.py  ◑ FEATURES.md (W1-F, W1)
 │   │   │   │   ├── render.py  ◑ Writes every view and the map (W0-A2, W0)
-│   │   │   │   ├── roadmap_md.py  ○ ROADMAP.md (W1-R, W1)
+│   │   │   │   ├── roadmap_md.py  ◑ ROADMAP.md (W1-R, W1)
 │   │   │   │   ├── roster.py  ◑ ROSTER.md (W0-A2, W0)
 │   │   │   │   └── structure.py  ◑ STRUCTURE.md (W0-A2, W0)
 │   │   │   ├── __init__.py  ◑ Package marker for bp (W0-A2, W0)
@@ -97,7 +97,7 @@ The repository's own plan: who builds which file of app-blueprint 2.0, taken fro
 │   │   │   ├── data.py  ◑ Stores and resources: SQL, Prisma and code scanning for the data checks (W0-A2, W0)
 │   │   │   ├── evidence.py  ○ Evidence store and records (W2-E, W2)
 │   │   │   ├── export.py  ◑ Export formats: codeowners, csv, json, AgenticTeam commands (W0-A2, W0)
-│   │   │   ├── features.py  ○ Features, criteria, file links and derived status (W1-F, W1)
+│   │   │   ├── features.py  ◑ Features, criteria, file links and derived status (W1-F, W1)
 │   │   │   ├── globs.py  ◑ Glob matching for owner rules, patterns and ignores (W0-A2, W0)
 │   │   │   ├── install.py  ◑ Copy of the tool into .blueprint/bin and the package start-up check (W0-A2, W0)
 │   │   │   ├── learn.py  ◑ Learning-loop store, redaction and incident records (W0-A2, W0)
@@ -105,11 +105,11 @@ The repository's own plan: who builds which file of app-blueprint 2.0, taken fro
 │   │   │   ├── plan.py  ◑ Plan loading, shape checks and the skeleton (W0-A2, W0)
 │   │   │   ├── records.py  ○ Verification records, criterion checks and acceptance (W3-V, W3)
 │   │   │   ├── registry.py ★  ◑ Module registry, hook collection and validation code ownership (W0-A2, W0)
-│   │   │   ├── roadmap.py  ○ Milestones and tasks: rules, ladder, owner actions (W1-R, W1)
+│   │   │   ├── roadmap.py  ◑ Milestones and tasks: rules, ladder, owner actions (W1-R, W1)
 │   │   │   ├── rules.py  ◑ Owner rules, roster and team validation (W0-A2, W0)
 │   │   │   ├── signals.py  ○ Automatic loop signals (W3-L, W3)
 │   │   │   ├── status.py  ◑ Status computation, claim rules and the guard decision (W0-A2, W0)
-│   │   │   ├── unknowns.py  ○ Unknowns, experiments, blocking and claim refusal (W1-U, W1)
+│   │   │   ├── unknowns.py  ◑ Unknowns, experiments, blocking and claim refusal (W1-U, W1)
 │   │   │   ├── validate.py  ◑ Validation findings, codes and the schema checks (W0-A2, W0)
 │   │   │   ├── verify.py  ◑ Verify commands and the hash of a verified file (W0-A2, W0)
 │   │   │   └── version.py [modify]  ◑ TOOL_VERSION and schema version constants (orchestrator, W0)
@@ -131,7 +131,7 @@ The repository's own plan: who builds which file of app-blueprint 2.0, taken fro
 │   │   ├── test_docs.py  ○ Checks that the docs match the real CLI (W3-R2, W3)
 │   │   ├── test_e2e.py  ○ End-to-end tests (W4-E2E, W4)
 │   │   ├── test_evidence.py  ○ Tests of the evidence store (W2-E, W2)
-│   │   ├── test_features.py  ○ Tests of features and FEATURES.md (W1-F, W1)
+│   │   ├── test_features.py  ◑ Tests of features and FEATURES.md (W1-F, W1)
 │   │   ├── test_fixtures_archives.py [modify]  ◑ Structural self-checks of the archive builders (W2-FX1, W2)
 │   │   ├── test_fixtures_text.py [modify]  ◑ Self-checks of the text builders (W2-FX2, W2)
 │   │   ├── test_ignore_anchor.py  ◑ Tests of ignore rule anchoring (W0-A2, W0)
@@ -145,9 +145,9 @@ The repository's own plan: who builds which file of app-blueprint 2.0, taken fro
 │   │   ├── test_records.py  ○ Tests of verification records (W3-V, W3)
 │   │   ├── test_registry.py  ○ Tests of the registry across all modules (W4-E2E, W4)
 │   │   ├── test_registry_hooks.py  ◑ Tests of the registry and every hook with a stub module (W0-A2, W0)
-│   │   ├── test_roadmap.py  ○ Tests of milestones, tasks and ROADMAP.md (W1-R, W1)
+│   │   ├── test_roadmap.py  ◑ Tests of milestones, tasks and ROADMAP.md (W1-R, W1)
 │   │   ├── test_signals.py  ○ Tests of signals (W3-L, W3)
-│   │   ├── test_state_integrity.py  ○ Tests of state locking, atomic writes and a broken state.json (W0-A2, W0)
+│   │   ├── test_state_integrity.py  ◑ Tests of state locking, atomic writes and a broken state.json (W0-A2, W0)
 │   │   ├── test_study_core.py  ○ Tests of the study engine and its safety rules (W2-E, W2)
 │   │   ├── test_study_data.py  ○ Tests of the data and compare lanes (W2-DA, W2)
 │   │   ├── test_study_desktop.py  ○ Tests of the desktop lane (W2-D, W2)
@@ -156,14 +156,14 @@ The repository's own plan: who builds which file of app-blueprint 2.0, taken fro
 │   │   ├── test_study_source.py  ○ Tests of the source lane and trace (W2-S, W2)
 │   │   ├── test_study_web.py  ○ Tests of the web lane (W2-W, W2)
 │   │   ├── test_synth.py  ○ Tests of synth, check and adopt (W2-SY, W2)
-│   │   ├── test_unknowns.py  ○ Tests of unknowns (W1-U, W1)
+│   │   ├── test_unknowns.py  ◑ Tests of unknowns (W1-U, W1)
 │   │   └── test_validate.py  ◑ Tests of validation codes and findings (W0-A2, W0)
 │   └── SKILL.md [modify]  ◑ The skill: when and how an agent uses the tool (W3-R1, W3)
 ├── examples/  # The generated example project [examples]
 │   ├── */
 │   │   └── .blueprint/
 │   │       └── **  ⟨pattern example-plan: The example's own plan, state, views and tool copy; 0 on disk⟩ (orchestrator, W0)
-│   └── **  ⟨pattern example-project: The generated example project, rebuilt by maintainers/make_example.py; 50 on disk⟩ (orchestrator, W0)
+│   └── **  ⟨pattern example-project: The generated example project, rebuilt by maintainers/make_example.py; 61 on disk⟩ (orchestrator, W0)
 ├── learning/
 │   └── LESSONS.md [modify]  ◑ Lessons the learning loop has adopted (maintainers, W0)
 ├── maintainers/  # Maintainers' tools, specification, design contract and learning-loop agents [maintainers]
@@ -222,8 +222,8 @@ flowchart LR
 | maintainers | `maintainers` | build | Maintainers' tools, specification, design contract and learning-loop agents |  | `python -m unittest discover -s maintainers/tests` |
 | examples | `examples` | build | The generated example project |  | `python app-blueprint/scripts/blueprint.py validate --root examples/snag-desk` |
 | ci | `.github` | build | GitHub workflows and templates |  | `python -c "pass"` |
-| docs | `` | docs | Repository-level documents: README, changelog, contributing, license, lessons |  | `python -c "pass"` |
-| repo | `` | build | Repository-level configuration and the installer |  | `python -c "pass"` |
+| docs |  | docs | Repository-level documents: README, changelog, contributing, license, lessons |  | `python -c "pass"` |
+| repo |  | build | Repository-level configuration and the installer |  | `python -c "pass"` |
 | dogfood | `.blueprint` | build | This repository's own plan and views | tool | `python app-blueprint/scripts/blueprint.py validate` |
 
 ## Phases
@@ -250,8 +250,8 @@ These files are depended on by several owners. Change them only through their ow
 
 | Pattern | Glob | One instance contains | Owner | Phase | On disk |
 |---|---|---|---|---|---|
-| dogfood-views | `.blueprint/*` | One file init, sync or render writes in .blueprint/ (README.md, blueprint.json, state.json, log.jsonl, STRUCTURE.md, ROSTER.md, map.html, and later ROADMAP.md and FEATURES.md). The tool copy in .blueprint/bin is not committed. | orchestrator | W0 | 6 |
-| example-project | `examples/**` | One file of the example, including its own .blueprint folder and tool copy; never edited by hand. | orchestrator | W0 | 50 |
+| dogfood-views | `.blueprint/*` | One file init, sync or render writes in .blueprint/ (README.md, blueprint.json, state.json, log.jsonl, STRUCTURE.md, ROSTER.md, map.html, and later ROADMAP.md and FEATURES.md). The tool copy in .blueprint/bin is not committed. | orchestrator | W0 | 7 |
+| example-project | `examples/**` | One file of the example, including its own .blueprint folder and tool copy; never edited by hand. | orchestrator | W0 | 61 |
 | example-plan | `examples/*/.blueprint/**` | One file under an example's .blueprint folder, written by the tool when make_example.py runs. | orchestrator | W0 | 0 |
 | v1-goldens | `app-blueprint/tests/data/v1/**` | One frozen input, golden or generator script of the version 1 behaviour tests. | W0-A2 | W0 | 4 |
 | android-goldens | `app-blueprint/tests/data/android/**` | One manifest source or aapt2 output (text, binary AXML or proto). | W2-FX1 | W2 | 3 |
@@ -307,19 +307,19 @@ These files are depended on by several owners. Change them only through their ow
 | `app-blueprint/tests/test_migrate.py` | create | tests | W0 | W0-B | ◑ on disk | Tests of the migrate command |  |  | `python -m unittest discover -s app-blueprint/tests` |
 | `maintainers/check_owned.py` | create | maintainers | W0 | W0-C | ◑ on disk | Pull-request ownership check: changed paths against the roster |  |  | `python -m unittest discover -s maintainers/tests` |
 | `maintainers/tests/test_check_owned.py` | create | maintainers | W0 | W0-C | ◑ on disk | Tests of the ownership check on throwaway git repositories |  |  | `python -m unittest discover -s maintainers/tests` |
-| `app-blueprint/scripts/bp/roadmap.py` | create | tool | W1 | W1-R | ○ planned | Milestones and tasks: rules, ladder, owner actions |  |  | `python app-blueprint/scripts/blueprint.py --version` |
-| `app-blueprint/scripts/bp/commands/roadmap.py` | create | tool | W1 | W1-R | ○ planned | The task command |  |  | `python app-blueprint/scripts/blueprint.py --version` |
-| `app-blueprint/scripts/bp/views/roadmap_md.py` | create | tool | W1 | W1-R | ○ planned | ROADMAP.md |  |  | `python app-blueprint/scripts/blueprint.py --version` |
-| `app-blueprint/assets/tab-roadmap.js` | create | assets | W1 | W1-R | ○ planned | Roadmap tab of the map |  |  | `python app-blueprint/scripts/blueprint.py --version` |
-| `app-blueprint/tests/test_roadmap.py` | create | tests | W1 | W1-R | ○ planned | Tests of milestones, tasks and ROADMAP.md |  |  | `python -m unittest discover -s app-blueprint/tests` |
-| `app-blueprint/scripts/bp/features.py` | create | tool | W1 | W1-F | ○ planned | Features, criteria, file links and derived status |  |  | `python app-blueprint/scripts/blueprint.py --version` |
-| `app-blueprint/scripts/bp/views/features_md.py` | create | tool | W1 | W1-F | ○ planned | FEATURES.md |  |  | `python app-blueprint/scripts/blueprint.py --version` |
-| `app-blueprint/assets/tab-features.js` | create | assets | W1 | W1-F | ○ planned | Features tab of the map |  |  | `python app-blueprint/scripts/blueprint.py --version` |
+| `app-blueprint/scripts/bp/roadmap.py` | create | tool | W1 | W1-R | ◑ on disk | Milestones and tasks: rules, ladder, owner actions |  |  | `python app-blueprint/scripts/blueprint.py --version` |
+| `app-blueprint/scripts/bp/commands/roadmap.py` | create | tool | W1 | W1-R | ◑ on disk | The task command |  |  | `python app-blueprint/scripts/blueprint.py --version` |
+| `app-blueprint/scripts/bp/views/roadmap_md.py` | create | tool | W1 | W1-R | ◑ on disk | ROADMAP.md |  |  | `python app-blueprint/scripts/blueprint.py --version` |
+| `app-blueprint/assets/tab-roadmap.js` | create | assets | W1 | W1-R | ◑ on disk | Roadmap tab of the map |  |  | `python app-blueprint/scripts/blueprint.py --version` |
+| `app-blueprint/tests/test_roadmap.py` | create | tests | W1 | W1-R | ◑ on disk | Tests of milestones, tasks and ROADMAP.md |  |  | `python -m unittest discover -s app-blueprint/tests` |
+| `app-blueprint/scripts/bp/features.py` | create | tool | W1 | W1-F | ◑ on disk | Features, criteria, file links and derived status |  |  | `python app-blueprint/scripts/blueprint.py --version` |
+| `app-blueprint/scripts/bp/views/features_md.py` | create | tool | W1 | W1-F | ◑ on disk | FEATURES.md |  |  | `python app-blueprint/scripts/blueprint.py --version` |
+| `app-blueprint/assets/tab-features.js` | create | assets | W1 | W1-F | ◑ on disk | Features tab of the map |  |  | `python app-blueprint/scripts/blueprint.py --version` |
 | `app-blueprint/assets/mindmap.js` | modify | assets | W1 | W1-F | ◑ on disk | Mind map of the map, with the by-feature mode |  |  | `python app-blueprint/scripts/blueprint.py --version` |
-| `app-blueprint/tests/test_features.py` | create | tests | W1 | W1-F | ○ planned | Tests of features and FEATURES.md |  |  | `python -m unittest discover -s app-blueprint/tests` |
-| `app-blueprint/scripts/bp/unknowns.py` | create | tool | W1 | W1-U | ○ planned | Unknowns, experiments, blocking and claim refusal |  |  | `python app-blueprint/scripts/blueprint.py --version` |
-| `app-blueprint/assets/tab-unknowns.js` | create | assets | W1 | W1-U | ○ planned | Unknowns tab of the map |  |  | `python app-blueprint/scripts/blueprint.py --version` |
-| `app-blueprint/tests/test_unknowns.py` | create | tests | W1 | W1-U | ○ planned | Tests of unknowns |  |  | `python -m unittest discover -s app-blueprint/tests` |
+| `app-blueprint/tests/test_features.py` | create | tests | W1 | W1-F | ◑ on disk | Tests of features and FEATURES.md |  |  | `python -m unittest discover -s app-blueprint/tests` |
+| `app-blueprint/scripts/bp/unknowns.py` | create | tool | W1 | W1-U | ◑ on disk | Unknowns, experiments, blocking and claim refusal |  |  | `python app-blueprint/scripts/blueprint.py --version` |
+| `app-blueprint/assets/tab-unknowns.js` | create | assets | W1 | W1-U | ◑ on disk | Unknowns tab of the map |  |  | `python app-blueprint/scripts/blueprint.py --version` |
+| `app-blueprint/tests/test_unknowns.py` | create | tests | W1 | W1-U | ◑ on disk | Tests of unknowns |  |  | `python -m unittest discover -s app-blueprint/tests` |
 | `app-blueprint/tests/fixtures_archives.py` | modify | tests | W2 | W2-FX1 | ◑ on disk | Builders for APK, AAB, XAPK, IPA, asar and hostile archives |  |  | `python -m unittest discover -s app-blueprint/tests` |
 | `app-blueprint/tests/test_fixtures_archives.py` | modify | tests | W2 | W2-FX1 | ◑ on disk | Structural self-checks of the archive builders |  |  | `python -m unittest discover -s app-blueprint/tests` |
 | `app-blueprint/tests/data/README.md` | modify | tests | W2 | W2-FX1 | ◑ on disk | Where the golden files came from and how to rebuild them |  |  | `python -m unittest discover -s app-blueprint/tests` |
@@ -402,7 +402,7 @@ These files are depended on by several owners. Change them only through their ow
 | `.github/workflows/tests.yml` | modify | ci | W0 | maintainers | ◑ on disk | CI test workflow |  |  | `python -c "pass"` |
 | `app-blueprint/agents/openai.yaml` | modify | skill | W0 | maintainers | ◑ on disk | Agent descriptor for OpenAI-style hosts |  |  | `python app-blueprint/scripts/blueprint.py --version` |
 | `app-blueprint/references/example-blueprint.json` | modify | references | W0 | maintainers | ◑ on disk | The version 1 example plan |  |  | `python app-blueprint/scripts/blueprint.py validate --root examples/snag-desk` |
-| `app-blueprint/tests/test_state_integrity.py` | create | tests | W0 | W0-A2 | ○ planned | Tests of state locking, atomic writes and a broken state.json |  |  | `python -m unittest discover -s app-blueprint/tests` |
+| `app-blueprint/tests/test_state_integrity.py` | create | tests | W0 | W0-A2 | ◑ on disk | Tests of state locking, atomic writes and a broken state.json |  |  | `python -m unittest discover -s app-blueprint/tests` |
 
 ## Decisions
 
